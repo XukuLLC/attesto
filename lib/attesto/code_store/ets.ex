@@ -60,6 +60,14 @@ defmodule Attesto.CodeStore.ETS do
     end
   end
 
+  @impl Attesto.CodeStore
+  def get(code_hash) when is_binary(code_hash) do
+    case :ets.lookup(@table, code_hash) do
+      [{^code_hash, _expires_at, record}] -> {:ok, record}
+      [] -> :error
+    end
+  end
+
   @doc "Clear every entry. Test-facing."
   @spec reset() :: :ok
   def reset do

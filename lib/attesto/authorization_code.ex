@@ -209,6 +209,29 @@ defmodule Attesto.AuthorizationCode do
     end
   end
 
+  @doc """
+  Returns `true` iff a stored code for `code` is bound to a DPoP key (RFC 9449
+  §10) - i.e. its redemption requires a matching DPoP proof (holder-of-key).
+
+  Reads the code via the store's OPTIONAL `c:Attesto.CodeStore.get/1` WITHOUT
+  consuming it, so a legitimate redemption is unaffected. Returns `false` when
+  the store has no `get/1`, the code is unknown, or it carries no `:dpop_jkt`.
+  This lets the token endpoint surface a holder-of-key (`invalid_dpop_proof`)
+  rejection ahead of the client-authentication error (FAPI2) without burning the
+  single-use code.
+  """
+  @spec dpop_bound?(module(), String.t()) :: boolean()
+  def dpop_bound?(store, code) when is_atom(store) and is_binary(code) do
+    if function_exported?(store, :get, 1) do
+      case store.get(Secret.hash(code)) do
+        {:ok, %{data: %{dpop_jkt: jkt}}} when is_binary(jkt) and jkt != "" -> true
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
   # `take/1` has already claimed the code (single use). Validate it and return
   # the grant. The reuse marker is NOT recorded here - the caller records it via
   # `finalize/3` only after the full token response is built, so a downstream

@@ -132,5 +132,19 @@ defmodule Attesto.CodeStore do
   """
   @callback mark_consumed(code_hash(), consumed_meta()) :: :ok
 
-  @optional_callbacks mark_consumed: 2
+  @doc """
+  OPTIONAL. Read the entry for `code_hash` WITHOUT consuming it (unlike
+  `take/1`). Returns `{:ok, entry}` when a code with that hash is stored, else
+  `:error`.
+
+  Used for read-only pre-checks at the token endpoint - e.g. surfacing a
+  holder-of-key (DPoP) requirement for a sender-constrained code (RFC 9449 §10 /
+  FAPI2) before the client-authentication failure, WITHOUT burning the
+  single-use code. A store that does not implement it is detected via
+  `function_exported?/3` and the pre-check is skipped (single-use behaviour and
+  the normal error are unchanged).
+  """
+  @callback get(code_hash()) :: {:ok, entry()} | :error
+
+  @optional_callbacks mark_consumed: 2, get: 1
 end

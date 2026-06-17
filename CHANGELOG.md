@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-16
+
+### Added
+
+- **`Attesto.CodeStore.get/1`** (OPTIONAL callback) — read a stored authorization
+  code WITHOUT consuming it (unlike `take/1`). Implemented by the bundled
+  `Attesto.CodeStore.ETS`. Lets the token endpoint run read-only pre-checks
+  (e.g. a holder-of-key requirement) without burning the single-use code.
+- **`Attesto.AuthorizationCode.dpop_bound?/2`** — returns whether a stored code
+  is bound to a DPoP key (RFC 9449 §10), via the store's non-consuming `get/1`.
+  Used to surface a holder-of-key (`invalid_request`/`invalid_dpop_proof`)
+  rejection ahead of the client-auth error at the token endpoint (FAPI2
+  `ensure-holder-of-key-required`), without consuming the code. Returns `false`
+  when the store has no `get/1`, so behaviour is unchanged for stores that
+  don't implement it.
+
 ## [0.7.1] - 2026-06-14
 
 ### Security
