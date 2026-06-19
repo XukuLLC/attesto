@@ -13,7 +13,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "0.7.2"
+  @version "0.8.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -114,7 +114,8 @@ defmodule Attesto.MixProject do
           Attesto.AuthorizationCode,
           Grant,
           Attesto.RefreshToken,
-          Attesto.Revocation
+          Attesto.Revocation,
+          Attesto.IdentityAssertion
         ],
         Plugs: [
           Authenticate,

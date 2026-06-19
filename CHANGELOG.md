@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-18
+
+### Added
+
+- **`Attesto.IdentityAssertion`** — verification for the Identity Assertion JWT
+  Authorization Grant (ID-JAG), the resource Authorization Server's half of
+  `draft-ietf-oauth-identity-assertion-authz-grant-04` (the grant behind MCP
+  Enterprise-Managed Authorization). Conn-free and side-effect-free:
+  `verify/3` checks the assertion's signature against a caller-supplied trusted
+  issuer JWKS (kid selection, `RS256`/`PS256`/`ES*`/`EdDSA`) and enforces the
+  draft's claim rules — JOSE `typ` pinned to `oauth-id-jag+jwt`, `iss` matches
+  the trusted issuer (NOT the `client_id`), `aud` is exactly this server's
+  issuer (strict single value), the required `iss`/`sub`/`aud`/`client_id`/
+  `jti`/`exp`/`iat` claims, `client_id` binding, and `exp`/`iat`/`nbf` skew with
+  an optional `:max_lifetime_seconds` bound. `peek_issuer/1` reads the
+  unverified `iss` so the caller can select the trusted issuer before verifying.
+  The stateful concerns (JWKS fetch/cache, `jti` replay, subject resolution,
+  error mapping to RFC 6749 `invalid_grant`) belong to the `attesto_phoenix`
+  token layer. Distinct from `private_key_jwt` client auth (RFC 7523 §3) and the
+  RFC 8693 token-exchange grant (which runs at the IdP).
+
 ## [0.7.2] - 2026-06-16
 
 ### Added
