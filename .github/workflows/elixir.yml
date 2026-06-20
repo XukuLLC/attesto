@@ -24,6 +24,8 @@ jobs:
             otp: "28.0"
           - elixir: "1.19.4"
             otp: "28.3"
+          - elixir: "1.20.1"
+            otp: "29.0.2"
             lint: true
 
     env:
