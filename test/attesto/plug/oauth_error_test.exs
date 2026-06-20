@@ -67,6 +67,37 @@ defmodule Attesto.Plug.OAuthErrorTest do
 
       assert [] == Plug.Conn.get_resp_header(conn, "dpop-nonce")
     end
+
+    test ":resource_metadata is advertised as a quoted auth-param (RFC 9728 §5.1)" do
+      url = "https://api.example.com/.well-known/oauth-protected-resource"
+
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> OAuthError.unauthorized(:bearer, "invalid_token", resource_metadata: url)
+
+      assert www_authenticate(conn) =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "without :resource_metadata no resource_metadata auth-param is emitted" do
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> OAuthError.unauthorized(:bearer, "invalid_token")
+
+      refute www_authenticate(conn) =~ "resource_metadata"
+    end
+
+    test "a non-https / malformed :resource_metadata is dropped (RFC 9728 §1.2)" do
+      # The pointer must be an https metadata URL; a bad value is omitted rather
+      # than rendered into an unusable challenge.
+      for bad <- ["", "http://api.example/x", "https://api.example/%ZZ", "not-a-url", 123] do
+        conn =
+          conn(:get, "https://api.example.com/x")
+          |> OAuthError.unauthorized(:bearer, "invalid_token", resource_metadata: bad)
+
+        refute www_authenticate(conn) =~ "resource_metadata",
+               "expected no resource_metadata for #{inspect(bad)}"
+      end
+    end
   end
 
   describe "insufficient_scope/2" do
@@ -92,6 +123,24 @@ defmodule Attesto.Plug.OAuthErrorTest do
         |> OAuthError.insufficient_scope(["documents.read"], :dpop)
 
       assert String.starts_with?(www_authenticate(conn), "DPoP ")
+    end
+
+    test ":resource_metadata is advertised on the 403 challenge (RFC 9728 §5.1)" do
+      url = "https://api.example.com/.well-known/oauth-protected-resource"
+
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> OAuthError.insufficient_scope(["documents.read"], :bearer, resource_metadata: url)
+
+      assert www_authenticate(conn) =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "without :resource_metadata the 403 challenge omits the auth-param" do
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> OAuthError.insufficient_scope(["documents.read"])
+
+      refute www_authenticate(conn) =~ "resource_metadata"
     end
   end
 end

@@ -269,6 +269,32 @@ defmodule Attesto.TokenMintTest do
     end
   end
 
+  # RFC 8707 §2: a per-call `:audience` override (a validated `resource`
+  # indicator) overrides config.audience for this token's `aud` only.
+  describe "mint/3 audience option" do
+    test "an :audience option overrides config.audience in the aud claim", %{config: config} do
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(config, client_principal(), audience: "https://resource.example/api")
+
+      assert payload!(jwt)["aud"] == "https://resource.example/api"
+    end
+
+    test "without :audience the aud claim is config.audience", %{config: config} do
+      assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
+      assert payload!(jwt)["aud"] == "https://api.example.com/"
+    end
+
+    test "a present-but-malformed :audience fails closed as :invalid_audience", %{config: config} do
+      # RFC 8707 §2: the override is a single resource identifier. A miswired
+      # caller must not mint a malformed/attacker-influenced aud.
+      for bad <- [nil, "", ["https://a.example/"], %{"a" => 1}, :atom, 123] do
+        assert {:error, :invalid_audience} =
+                 Token.mint(config, client_principal(), audience: bad),
+               "expected :invalid_audience for #{inspect(bad)}"
+      end
+    end
+  end
+
   describe "mint/3 DPoP binding" do
     test "embeds cnf.jkt and switches token_type to DPoP", %{config: config} do
       assert {:ok, %{access_token: jwt, token_type: "DPoP", scope: "documents.read"}} =

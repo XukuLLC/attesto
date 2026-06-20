@@ -4,11 +4,42 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-## [0.8.0] - 2026-06-18
+## [0.8.0] - 2026-06-20
 
 ### Added
+
+- **`Attesto.ProtectedResourceMetadata`** — renderer for the RFC 9728 OAuth 2.0
+  Protected Resource Metadata document (the resource-server analogue of
+  `Attesto.Discovery`). `metadata/2` returns the string-keyed map a resource
+  publishes at `/.well-known/oauth-protected-resource`: the REQUIRED `resource`
+  identifier (defaulting to `config.audience`, overridable via `:resource`) plus
+  the nil-droppable RFC 9728 §2 host fields (`authorization_servers`,
+  `jwks_uri`, `scopes_supported`, `bearer_methods_supported`,
+  `resource_signing_alg_values_supported`,
+  `authorization_details_types_supported`, the `resource_name`/documentation/
+  policy/ToS members, `tls_client_certificate_bound_access_tokens`,
+  `dpop_bound_access_tokens_required`, `dpop_signing_alg_values_supported`, and
+  `signed_metadata`). A present-but-malformed `:resource` (the REQUIRED member)
+  fails fast with `ArgumentError`. Conn-free; mounting a serving endpoint is the
+  host's concern.
+- **RFC 9728 §5.1 `resource_metadata` challenge pointer.**
+  `Attesto.Plug.OAuthError.unauthorized/4` and `insufficient_scope/3,4` now
+  append a `resource_metadata="<url>"` auth-param to the `WWW-Authenticate`
+  challenge when a `:resource_metadata` opt is present, so a client refused with
+  401/403 can discover the resource's protected-resource metadata (and thereby
+  its authorization server). Threaded through `Attesto.Plug.Authenticate`
+  (`:resource_metadata` init opt) and `Attesto.Plug.RequireScopes`
+  (`:resource_metadata` init opt). Omitted when unset.
+
+- **`Attesto.Token.mint/3` `:audience` option** — a per-call override for the
+  access token's `aud` claim, defaulting to `config.audience`. RFC 8707 §2: when
+  a token request carries a `resource` indicator the access token's `aud` MUST
+  identify that resource; the host derives the resource identifier and passes it
+  here. The override is conn-free and does not mutate `config`, so one issuer can
+  mint resource-audienced tokens for one grant without changing `aud` for any
+  other. A present-but-malformed override (a `nil`, `""`, list, or other
+  non-string) is rejected `{:error, :invalid_audience}` rather than minted, so a
+  miswired `resource` cannot produce a malformed `aud`.
 
 - **`Attesto.IdentityAssertion`** — verification for the Identity Assertion JWT
   Authorization Grant (ID-JAG), the resource Authorization Server's half of
@@ -31,7 +62,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`Attesto.CodeStore.get/1`** (OPTIONAL callback) — read a stored authorization
+- **`c:Attesto.CodeStore.get/1`** (OPTIONAL callback) — read a stored authorization
   code WITHOUT consuming it (unlike `take/1`). Implemented by the bundled
   `Attesto.CodeStore.ETS`. Lets the token endpoint run read-only pre-checks
   (e.g. a holder-of-key requirement) without burning the single-use code.

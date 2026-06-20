@@ -32,12 +32,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     @doc """
     Respond 401 with a `WWW-Authenticate` challenge for `scheme` carrying
     `error` (an OAuth error code string). Options: `:description`
-    (`error_description`) and `:dpop_nonce` (sets the `DPoP-Nonce` header,
-    for `use_dpop_nonce`). Halts.
+    (`error_description`), `:dpop_nonce` (sets the `DPoP-Nonce` header, for
+    `use_dpop_nonce`), and `:resource_metadata` (RFC 9728 §5.1: the URL of this
+    resource's protected-resource metadata, advertised as a `resource_metadata`
+    auth-param so the client can discover the authorization server). Halts.
     """
     @spec unauthorized(Plug.Conn.t(), scheme(), String.t(), keyword()) :: Plug.Conn.t()
     def unauthorized(conn, scheme, error, opts \\ []) do
-      params = [{"error", error} | description_param(opts)]
+      params = [{"error", error} | description_param(opts)] ++ resource_metadata_param(opts)
 
       conn
       |> maybe_put_dpop_nonce(Keyword.get(opts, :dpop_nonce))
@@ -48,17 +50,29 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @doc """
     Respond 403 `insufficient_scope` naming the `required` scope list
-    (RFC 6750 §3.1). Halts.
+    (RFC 6750 §3.1). The optional `opts` accepts `:resource_metadata` (RFC 9728
+    §5.1: the URL of this resource's protected-resource metadata, advertised as
+    a `resource_metadata` auth-param). Halts.
     """
-    @spec insufficient_scope(Plug.Conn.t(), [String.t()], scheme()) :: Plug.Conn.t()
-    def insufficient_scope(conn, required, scheme \\ :bearer) do
+    @spec insufficient_scope(Plug.Conn.t(), [String.t()], scheme(), keyword()) :: Plug.Conn.t()
+    def insufficient_scope(conn, required, scheme \\ :bearer, opts \\ [])
+
+    # A keyword list in the `scheme` position is `opts` for the default Bearer
+    # scheme: tolerate `insufficient_scope(conn, required, resource_metadata: url)`
+    # so the RFC 9728 pointer is not silently dropped by the optional-arg order.
+    def insufficient_scope(conn, required, opts, []) when is_list(opts) do
+      insufficient_scope(conn, required, :bearer, opts)
+    end
+
+    def insufficient_scope(conn, required, scheme, opts) do
       scope = Enum.join(required, " ")
 
-      params = [
-        {"error", "insufficient_scope"},
-        {"error_description", "requires scope: #{scope}"},
-        {"scope", scope}
-      ]
+      params =
+        [
+          {"error", "insufficient_scope"},
+          {"error_description", "requires scope: #{scope}"},
+          {"scope", scope}
+        ] ++ resource_metadata_param(opts)
 
       conn
       |> put_no_store([])
@@ -84,6 +98,34 @@ if Code.ensure_loaded?(Plug.Conn) do
         nil -> []
         desc -> [{"error_description", desc}]
       end
+    end
+
+    # RFC 9728 §5.1: a protected resource's `WWW-Authenticate` challenge MAY
+    # carry a `resource_metadata` auth-param whose value is the URL of the
+    # resource's protected-resource metadata, letting a client that received a
+    # 401/403 discover which authorization server issues tokens for it. Quoted
+    # like every other auth-param via `escape/1`. Omitted when no
+    # `:resource_metadata` opt is present.
+    defp resource_metadata_param(opts) do
+      case Keyword.get(opts, :resource_metadata) do
+        url when is_binary(url) ->
+          # RFC 9728 §1.2: the pointer is an https metadata URL. Drop a blank /
+          # non-https / malformed value rather than render an unusable param or
+          # crash quoting a non-string. (The Phoenix layer validates this at
+          # config build; this guards a core-only caller passing it directly.)
+          if metadata_url?(url), do: [{"resource_metadata", url}], else: []
+
+        _ ->
+          []
+      end
+    end
+
+    defp metadata_url?(url) do
+      not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, url) and
+        match?(
+          {:ok, %URI{scheme: "https", host: h, fragment: nil}} when is_binary(h) and h != "",
+          URI.new(url)
+        )
     end
 
     defp maybe_put_dpop_nonce(conn, nil), do: conn

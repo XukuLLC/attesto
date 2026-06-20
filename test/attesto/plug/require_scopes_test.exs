@@ -111,6 +111,45 @@ defmodule Attesto.Plug.RequireScopesTest do
       assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
     end
 
+    test "403 insufficient_scope carries the RFC 9728 resource_metadata pointer when configured" do
+      url = "https://api.example.com/.well-known/oauth-protected-resource"
+      opts = RequireScopes.init(scopes: ["documents.write"], resource_metadata: url)
+
+      conn =
+        %{"scope" => "documents.read"}
+        |> with_claims()
+        |> RequireScopes.call(opts)
+
+      assert conn.status == 403
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "401 invalid_token (unauthenticated) carries the resource_metadata pointer when configured" do
+      url = "https://api.example.com/.well-known/oauth-protected-resource"
+      opts = RequireScopes.init(scopes: ["documents.read"], resource_metadata: url)
+
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> RequireScopes.call(opts)
+
+      assert conn.status == 401
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "the resource_metadata pointer is omitted when not configured" do
+      opts = RequireScopes.init(["documents.write"])
+
+      conn =
+        %{"scope" => "documents.read"}
+        |> with_claims()
+        |> RequireScopes.call(opts)
+
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      refute challenge =~ "resource_metadata"
+    end
+
     test "honours a custom :claims_key" do
       opts = RequireScopes.init(scopes: ["documents.read"], claims_key: :other_claims)
 

@@ -84,7 +84,7 @@ this package: endpoints, router helpers, and Ecto-backed stores wired together.
 ```elixir
 def deps do
   [
-    {:attesto, "~> 0.6"}
+    {:attesto, "~> 0.8"}
   ]
 end
 ```
@@ -259,8 +259,11 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 6749 §4.1 | Authorization-code grant (single-use, PKCE-mandatory) | Supported |
 | RFC 6749 §6 / §10.4 | Refresh-token rotation + reuse detection | Supported |
 | RFC 6749 §3.3 | Access-token scope | Supported |
+| RFC 7523 §4 | JWT-assertion grant (`jwt-bearer`; ID-JAG draft) | Supported |
+| RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (jwt-bearer grant) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
+| RFC 9728 | Protected Resource Metadata | Supported |
 | RFC 7517 | JSON Web Key Set publication (JWKS endpoint) | Supported |
 | RFC 7009 | Token Revocation (refresh-token family) | Supported |
 | RFC 9449 §8 | DPoP server-issued nonce | Supported |
@@ -317,7 +320,7 @@ constraint.
 
 ## Status
 
-A `0.x` release: still pre-1.0, so the API may change between minor versions (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), signed request-object policy, JARM response signing, token introspection, and signed introspection response JWTs. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 0.6`.
+A `0.x` release: still pre-1.0, so the API may change between minor versions (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), signed request-object policy, JARM response signing, token introspection, signed introspection response JWTs, the JWT-assertion (`jwt-bearer`) grant, and RFC 9728 protected-resource metadata. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 0.8`.
 
 ## Development
 

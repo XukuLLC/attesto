@@ -53,6 +53,10 @@ if Code.ensure_loaded?(Plug.Conn) do
         hooks forwarded to `Attesto.Plug.OAuthError` so a host can keep its
         own JSON error envelope while Attesto owns the RFC status/challenge
         semantics.
+      * `:resource_metadata` - the URL of this resource's protected-resource
+        metadata (RFC 9728), advertised as a `resource_metadata` auth-param on
+        every 401 `WWW-Authenticate` challenge (RFC 9728 §5.1) so a client that
+        is refused can discover the authorization server.
 
         plug Attesto.Plug.Authenticate,
           config: &MyApp.Attesto.config/0,
@@ -336,7 +340,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp error_opts(opts, extra) do
       opts
-      |> Keyword.take([:send_error, :www_authenticate, :no_store])
+      |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata])
       |> Keyword.merge(extra)
     end
   end

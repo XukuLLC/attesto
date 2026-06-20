@@ -162,6 +162,30 @@ defmodule Attesto.Plug.AuthenticateTest do
              }
     end
 
+    test "a 401 carries the RFC 9728 resource_metadata pointer when configured", %{config: config} do
+      url = "https://api.example.com/.well-known/oauth-protected-resource"
+
+      conn =
+        []
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, resource_metadata: url))
+
+      assert conn.status == 401
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "a 401 omits the resource_metadata pointer when not configured", %{config: config} do
+      conn =
+        []
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config))
+
+      assert conn.status == 401
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      refute challenge =~ "resource_metadata"
+    end
+
     test "a garbage Authorization header is 401 invalid_token", %{config: config} do
       conn =
         [{"authorization", "not-a-real-scheme zzz"}]

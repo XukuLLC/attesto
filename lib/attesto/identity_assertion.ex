@@ -185,8 +185,10 @@ defmodule Attesto.IdentityAssertion do
     Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, alg, jwk}, acc ->
       case JOSE.JWT.verify_strict(jwk, [alg], jwt) do
         {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:halt, {:ok, claims}}
-        {false, _jwt, _jws} -> {:cont, acc}
-        _other -> {:halt, {:error, :invalid_signature}}
+        # A non-verifying result (`{false, _, _}`) moves on to the next candidate
+        # key; if none verify, the reduce returns the seed
+        # `{:error, :invalid_signature}`.
+        _ -> {:cont, acc}
       end
     end)
   end

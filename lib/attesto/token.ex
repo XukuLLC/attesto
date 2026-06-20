@@ -14,7 +14,9 @@ defmodule Attesto.Token do
   Every minted token carries:
 
     * `iss` - the configured issuer.
-    * `aud` - the configured audience.
+    * `aud` - the configured audience, or the per-call `:audience` mint
+      option when the host derived a resource-specific audience (RFC 8707
+      §2 resource indicator → access-token `aud`).
     * `sub` - the subject's public identifier, which MUST begin with the
       `sub_prefix` of its principal kind.
     * `exp` / `iat` - expiry and issued-at, unix seconds.
@@ -84,6 +86,7 @@ defmodule Attesto.Token do
           {:now, DateTime.t() | non_neg_integer()}
           | {:lifetime, pos_integer()}
           | {:typ, String.t()}
+          | {:audience, String.t()}
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
         ]
@@ -102,6 +105,7 @@ defmodule Attesto.Token do
           | :reserved_claim_conflict
           | :invalid_scopes
           | :invalid_typ
+          | :invalid_audience
           | :invalid_dpop_jkt
           | :invalid_mtls_thumbprint
           | :conflicting_confirmation
@@ -154,6 +158,14 @@ defmodule Attesto.Token do
   Options:
 
     * `:typ` - `"access"` (default) or `"refresh"`.
+    * `:audience` - the `aud` claim for this token, overriding
+      `config.audience`. RFC 8707 §2: when a token request carries a
+      `resource` indicator the access token's `aud` MUST identify that
+      resource, so the host passes the validated resource identifier here;
+      absent, `config.audience` is used (the default surface). The override
+      is per-call and conn-free - it does not mutate `config` - so a single
+      issuer can mint resource-audienced tokens for one grant without
+      changing `aud` for any other.
     * `:now` - `DateTime` or unix-seconds clock override. Defaults to now.
     * `:lifetime` - positive seconds; may only *shorten* the configured
       default (a larger value is capped to the default, so a miswired
@@ -181,6 +193,7 @@ defmodule Attesto.Token do
          {:ok, extra} <- normalize_extra_claims(config, kind, principal),
          {:ok, scopes} <- normalize_scopes(principal),
          {:ok, typ} <- normalize_typ(opts),
+         {:ok, audience} <- normalize_audience(config, opts),
          {:ok, confirmation} <- normalize_confirmation(opts) do
       iat = unix_now(opts)
       lifetime = lifetime_seconds(config, opts)
@@ -188,7 +201,9 @@ defmodule Attesto.Token do
 
       claims =
         %{
-          "aud" => config.audience,
+          # RFC 8707 §2: a per-call `:audience` (a validated `resource`
+          # indicator) takes precedence over the configured default audience.
+          "aud" => audience,
           "exp" => iat + lifetime,
           "iat" => iat,
           "iss" => config.issuer,
@@ -389,6 +404,20 @@ defmodule Attesto.Token do
     case Keyword.get(opts, :typ, @typ_access) do
       typ when typ in @typ_values -> {:ok, typ}
       _ -> {:error, :invalid_typ}
+    end
+  end
+
+  # RFC 8707 §2: when present, the `:audience` override (a validated `resource`
+  # indicator) becomes the `aud` claim and so MUST be a single non-empty string
+  # identifier - a `nil`, `""`, list, or other shape is a miswired caller and is
+  # rejected `:invalid_audience` rather than minted into a malformed or
+  # attacker-influenced `aud`. Absent, the configured default audience (already
+  # validated at `Config.new/1`) is used.
+  defp normalize_audience(config, opts) do
+    case Keyword.fetch(opts, :audience) do
+      :error -> {:ok, config.audience}
+      {:ok, aud} when is_binary(aud) and aud != "" -> {:ok, aud}
+      {:ok, _} -> {:error, :invalid_audience}
     end
   end
 
