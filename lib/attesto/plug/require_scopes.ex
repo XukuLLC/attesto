@@ -21,6 +21,11 @@ if Code.ensure_loaded?(Plug.Conn) do
         metadata (RFC 9728), advertised as a `resource_metadata` auth-param on
         the 403 `insufficient_scope` (and the 401 `invalid_token` for an
         unauthenticated request) `WWW-Authenticate` challenge (RFC 9728 §5.1).
+      * `:send_error`, `:www_authenticate`, `:no_store` - the transport hooks
+        `Attesto.Plug.OAuthError` honors, threaded onto BOTH the 403 and the 401
+        this plug renders so a host can override the response envelope and inject
+        a per-conn challenge (e.g. a request-derived `resource_metadata` pointer)
+        on the scope-rejection path, not just the authentication-rejection path.
 
     A request that reaches this plug without verified claims (the
     authentication plug did not run or did not assign them) is treated as
@@ -36,9 +41,11 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @default_claims_key :attesto_claims
 
+    @transport_keys [:send_error, :www_authenticate, :no_store]
+
     @impl Plug
     def init(scopes) when is_list(scopes) do
-      {required, claims_key, resource_metadata} = normalize(scopes)
+      {required, claims_key, resource_metadata, transport} = normalize(scopes)
 
       if required == [] do
         raise ArgumentError,
@@ -50,40 +57,63 @@ if Code.ensure_loaded?(Plug.Conn) do
         required: required,
         catalog: Scope.new_catalog(required),
         claims_key: claims_key,
-        resource_metadata: resource_metadata
+        resource_metadata: resource_metadata,
+        transport: transport
       }
     end
 
     @impl Plug
-    def call(conn, %{required: required, catalog: catalog, claims_key: claims_key, resource_metadata: resource_metadata}) do
+    def call(conn, %{
+          required: required,
+          catalog: catalog,
+          claims_key: claims_key,
+          resource_metadata: resource_metadata,
+          transport: transport
+        }) do
       case conn.assigns[claims_key] do
         %{"scope" => scope} = claims when is_binary(scope) ->
           granted = String.split(scope, ~r/\s+/, trim: true)
 
           if Scope.grants_all?(catalog, granted, required),
             do: conn,
-            else: OAuthError.insufficient_scope(conn, required, scheme_of(claims), error_opts(resource_metadata))
+            else:
+              OAuthError.insufficient_scope(
+                conn,
+                required,
+                scheme_of(claims),
+                error_opts(resource_metadata, transport)
+              )
 
         %{} = claims ->
           # Authenticated but no scope claim: cannot satisfy any requirement.
-          OAuthError.insufficient_scope(conn, required, scheme_of(claims), error_opts(resource_metadata))
+          OAuthError.insufficient_scope(
+            conn,
+            required,
+            scheme_of(claims),
+            error_opts(resource_metadata, transport)
+          )
 
         _ ->
           OAuthError.unauthorized(
             conn,
             :bearer,
             "invalid_token",
-            error_opts(resource_metadata, description: "request is not authenticated")
+            error_opts(resource_metadata, transport, description: "request is not authenticated")
           )
       end
     end
 
-    # RFC 9728 §5.1: thread the configured `resource_metadata` pointer (when set)
-    # into the OAuthError challenge so the 403/401 carries it.
-    defp error_opts(nil), do: []
-    defp error_opts(url), do: [resource_metadata: url]
-    defp error_opts(nil, extra), do: extra
-    defp error_opts(url, extra), do: [{:resource_metadata, url} | extra]
+    # Build the OAuthError opts: the host transport hooks (`:send_error`,
+    # `:www_authenticate`, `:no_store`) carried verbatim, plus the RFC 9728 §5.1
+    # `resource_metadata` pointer (when set) and any extra (e.g. `:description`).
+    defp error_opts(resource_metadata, transport, extra \\ []) do
+      transport
+      |> maybe_put_resource_metadata(resource_metadata)
+      |> Keyword.merge(extra)
+    end
+
+    defp maybe_put_resource_metadata(opts, nil), do: opts
+    defp maybe_put_resource_metadata(opts, url), do: Keyword.put(opts, :resource_metadata, url)
 
     # The challenge scheme must match how the client authenticated (RFC
     # 9449 §7.1): a DPoP-bound token carries a `cnf.jkt`, so its
@@ -95,9 +125,9 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp normalize(scopes) do
       if Keyword.keyword?(scopes) and scopes != [] do
         {Keyword.get(scopes, :scopes, []), Keyword.get(scopes, :claims_key, @default_claims_key),
-         Keyword.get(scopes, :resource_metadata)}
+         Keyword.get(scopes, :resource_metadata), Keyword.take(scopes, @transport_keys)}
       else
-        {scopes, @default_claims_key, nil}
+        {scopes, @default_claims_key, nil, []}
       end
     end
   end

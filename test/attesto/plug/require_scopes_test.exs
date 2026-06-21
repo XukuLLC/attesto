@@ -160,5 +160,86 @@ defmodule Attesto.Plug.RequireScopesTest do
 
       refute conn.halted
     end
+
+    test "threads the :www_authenticate hook onto the 403 challenge" do
+      inject = fn conn, challenge ->
+        Plug.Conn.put_resp_header(
+          conn,
+          "www-authenticate",
+          challenge <> ~s(, resource_metadata="https://rs.example/.well-known/oauth-protected-resource")
+        )
+      end
+
+      opts = RequireScopes.init(scopes: ["documents.write"], www_authenticate: inject)
+
+      conn =
+        %{"scope" => "documents.read"}
+        |> with_claims()
+        |> RequireScopes.call(opts)
+
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(error="insufficient_scope")
+      assert challenge =~ ~s(resource_metadata="https://rs.example/.well-known/oauth-protected-resource")
+    end
+
+    test "threads the :send_error hook onto the 403 envelope" do
+      send_error = fn conn, status, body ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/problem+json")
+        |> Plug.Conn.send_resp(status, JSON.encode!(Map.put(body, "host_rendered", true)))
+        |> Plug.Conn.halt()
+      end
+
+      opts = RequireScopes.init(scopes: ["documents.write"], send_error: send_error)
+
+      conn =
+        %{"scope" => "documents.read"}
+        |> with_claims()
+        |> RequireScopes.call(opts)
+
+      assert conn.status == 403
+
+      assert ["application/problem+json; charset=utf-8"] ==
+               Plug.Conn.get_resp_header(conn, "content-type")
+
+      body = JSON.decode!(conn.resp_body)
+      assert body["error"] == "insufficient_scope"
+      assert body["host_rendered"] == true
+    end
+
+    test ":no_store hook is threaded onto the 403" do
+      opts =
+        RequireScopes.init(
+          scopes: ["documents.write"],
+          no_store: fn conn -> Plug.Conn.put_resp_header(conn, "x-no-store", "host") end
+        )
+
+      conn =
+        %{"scope" => "documents.read"}
+        |> with_claims()
+        |> RequireScopes.call(opts)
+
+      assert ["host"] == Plug.Conn.get_resp_header(conn, "x-no-store")
+      assert [] == Plug.Conn.get_resp_header(conn, "pragma")
+    end
+
+    test "the :send_error hook is also threaded onto the 401 unauthenticated path" do
+      send_error = fn conn, status, body ->
+        conn
+        |> Plug.Conn.put_resp_header("x-host-rendered", "true")
+        |> Plug.Conn.send_resp(status, JSON.encode!(body))
+        |> Plug.Conn.halt()
+      end
+
+      opts = RequireScopes.init(scopes: ["documents.read"], send_error: send_error)
+
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> RequireScopes.call(opts)
+
+      assert conn.status == 401
+      assert ["true"] == Plug.Conn.get_resp_header(conn, "x-host-rendered")
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
   end
 end

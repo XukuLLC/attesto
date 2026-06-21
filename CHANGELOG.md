@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-06-21
+
+### Changed
+
+- **`Attesto.Plug.OAuthError.insufficient_scope/4` now honors the transport
+  hooks.** The 403 scope-rejection path threads the same `:send_error`,
+  `:www_authenticate`, and `:no_store` options `unauthorized/4` already honored,
+  so a resource server can override the 403 response envelope and inject a
+  per-conn challenge (e.g. a request-derived RFC 9728 `resource_metadata`
+  pointer) on the scope-rejection path, not just the authentication-rejection
+  path. The `insufficient_scope` code, 403 status, and the `error_description` /
+  `scope` challenge semantics remain owned by the renderer; the default response
+  is byte-identical when no hooks are passed.
+- **`Attesto.Plug.RequireScopes` now threads those transport hooks** onto both
+  the 403 `insufficient_scope` and the 401 `invalid_token` it renders, alongside
+  the existing `:resource_metadata` pointer. Previously they were dropped, so a
+  host could not override the scope-rejection envelope through this plug.
+
 ## [0.8.0] - 2026-06-20
 
 ### Added

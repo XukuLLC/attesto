@@ -264,6 +264,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
 | RFC 9728 | Protected Resource Metadata | Supported |
+| CIMD draft | Client ID Metadata Documents (`https`-URL client ids) | Supported |
 | RFC 7517 | JSON Web Key Set publication (JWKS endpoint) | Supported |
 | RFC 7009 | Token Revocation (refresh-token family) | Supported |
 | RFC 9449 §8 | DPoP server-issued nonce | Supported |
@@ -320,7 +321,7 @@ constraint.
 
 ## Status
 
-A `0.x` release: still pre-1.0, so the API may change between minor versions (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), signed request-object policy, JARM response signing, token introspection, signed introspection response JWTs, the JWT-assertion (`jwt-bearer`) grant, and RFC 9728 protected-resource metadata. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 0.8`.
+A `0.x` release: still pre-1.0, so the API may change between minor versions (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), signed request-object policy, JARM response signing, token introspection, signed introspection response JWTs, the JWT-assertion (`jwt-bearer`) grant, RFC 9728 protected-resource metadata, and Client ID Metadata Document (CIMD) verification. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 0.8`.
 
 ## Development
 

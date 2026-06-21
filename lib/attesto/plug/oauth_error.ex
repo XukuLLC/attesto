@@ -52,7 +52,13 @@ if Code.ensure_loaded?(Plug.Conn) do
     Respond 403 `insufficient_scope` naming the `required` scope list
     (RFC 6750 §3.1). The optional `opts` accepts `:resource_metadata` (RFC 9728
     §5.1: the URL of this resource's protected-resource metadata, advertised as
-    a `resource_metadata` auth-param). Halts.
+    a `resource_metadata` auth-param) and the SAME transport hooks
+    `unauthorized/4` honors - `:send_error`, `:www_authenticate`, and
+    `:no_store` - so a resource server can override the 403 response envelope and
+    inject a per-conn challenge (e.g. a host-derived `resource_metadata` pointer)
+    on the scope-rejection path too. The `insufficient_scope` error code, 403
+    status, and the `error_description` / `scope` challenge semantics remain
+    owned here. Halts.
     """
     @spec insufficient_scope(Plug.Conn.t(), [String.t()], scheme(), keyword()) :: Plug.Conn.t()
     def insufficient_scope(conn, required, scheme \\ :bearer, opts \\ [])
@@ -66,18 +72,24 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     def insufficient_scope(conn, required, scheme, opts) do
       scope = Enum.join(required, " ")
+      description = "requires scope: #{scope}"
 
       params =
         [
           {"error", "insufficient_scope"},
-          {"error_description", "requires scope: #{scope}"},
+          {"error_description", description},
           {"scope", scope}
         ] ++ resource_metadata_param(opts)
 
+      # Thread the host transport hooks exactly as `unauthorized/4` does. The
+      # `error_description` is owned here, so it is forced into `opts` before
+      # `send_error` reads it (overriding any caller `:description`) - this keeps
+      # the default JSON body identical while letting `:send_error` /
+      # `:www_authenticate` / `:no_store` override the envelope and challenge.
       conn
-      |> put_no_store([])
-      |> put_www_authenticate(challenge(scheme, params), [])
-      |> send_error(403, "insufficient_scope", description: "requires scope: #{scope}")
+      |> put_no_store(opts)
+      |> put_www_authenticate(challenge(scheme, params), opts)
+      |> send_error(403, "insufficient_scope", Keyword.put(opts, :description, description))
     end
 
     # ----- internal -----
@@ -109,10 +121,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp resource_metadata_param(opts) do
       case Keyword.get(opts, :resource_metadata) do
         url when is_binary(url) ->
-          # RFC 9728 §1.2: the pointer is an https metadata URL. Drop a blank /
-          # non-https / malformed value rather than render an unusable param or
-          # crash quoting a non-string. (The Phoenix layer validates this at
-          # config build; this guards a core-only caller passing it directly.)
+          # RFC 9728 §1.2 / §3: the pointer is an https metadata URL. Drop a
+          # blank / non-https / malformed value rather than render an unusable
+          # param or crash quoting a non-string. (The Phoenix layer validates
+          # this at config build; this guards a core-only caller passing it
+          # directly.) A loopback `http://` dev resource cannot use this static
+          # value - by RFC 9728 the pointer is https - so a host that needs an
+          # http loopback pointer in dev supplies the whole challenge via the
+          # `:www_authenticate` hook, which bypasses this builder.
           if metadata_url?(url), do: [{"resource_metadata", url}], else: []
 
         _ ->
