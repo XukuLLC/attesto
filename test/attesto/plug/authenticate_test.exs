@@ -45,6 +45,12 @@ defmodule Attesto.Plug.AuthenticateTest do
     end)
   end
 
+  defp form_post(params) do
+    :post
+    |> conn(@uri, params)
+    |> Plug.Conn.put_req_header("content-type", "application/x-www-form-urlencoded")
+  end
+
   # A real DER-encoded self-signed X.509 root cert (OTP >= 24).
   defp cert_der(name \\ "cn=attesto-plug-test") do
     %{cert: der} = :public_key.pkix_test_root_cert(String.to_charlist(name), [])
@@ -78,17 +84,94 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert conn.assigns.who["sub"] == "oc_abc123"
     end
 
-    test "accepts a form-body access_token on POST when no Authorization header is present",
+    test "rejects a form-body access_token by default",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        %{"access_token" => token}
+        |> form_post()
+        |> Authenticate.call(Authenticate.init(config: config))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
+    test "accepts a form-body access_token only when the body bearer method is enabled",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        %{"access_token" => token}
+        |> form_post()
+        |> Authenticate.call(Authenticate.init(config: config, bearer_methods: [:header, :body]))
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
+    end
+
+    test "accepts string bearer method names for metadata-aligned config",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        %{"access_token" => token}
+        |> form_post()
+        |> Authenticate.call(Authenticate.init(config: config, bearer_methods: ["header", "body"]))
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
+    end
+
+    test "does not accept a body access_token from a non-form request even when :body is enabled",
          %{config: config} do
       {:ok, %{access_token: token}} = Token.mint(config, client_principal())
 
       conn =
         :post
         |> conn(@uri, %{"access_token" => token})
-        |> Authenticate.call(Authenticate.init(config: config))
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> Authenticate.call(Authenticate.init(config: config, bearer_methods: [:header, :body]))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
+    test "Authorization bearer still authenticates with header-only bearer methods",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, bearer_methods: [:header]))
 
       refute conn.halted
       assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
+    end
+
+    test "Authorization bearer is rejected when the header bearer method is disabled",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, bearer_methods: [:body]))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
+    test "rejects unsupported bearer method configuration", %{config: config} do
+      for bad <- [[], [:query], ["query"], [:header, :header], "header", nil] do
+        assert_raise ArgumentError, ~r/:bearer_methods must be a non-empty list of distinct/, fn ->
+          Authenticate.init(config: config, bearer_methods: bad)
+        end
+      end
     end
 
     test "accepts a host-provided fallback credential when no Authorization header is present",
@@ -101,6 +184,25 @@ defmodule Attesto.Plug.AuthenticateTest do
         |> Authenticate.call(
           Authenticate.init(
             config: config,
+            credential_from_conn: fn _conn -> {:ok, :bearer, token} end
+          )
+        )
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
+    end
+
+    test "host-provided fallback credential still authenticates with header-only bearer methods",
+         %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        %{"access_token" => "ignored"}
+        |> form_post()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            bearer_methods: [:header],
             credential_from_conn: fn _conn -> {:ok, :bearer, token} end
           )
         )

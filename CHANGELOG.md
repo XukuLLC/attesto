@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-21
+
+### Changed
+
+- **`Attesto.Plug.Authenticate` bearer presentation methods are explicit and
+  header-only by default.** The new `:bearer_methods` option accepts `:header` /
+  `"header"` and `:body` / `"body"`; it defaults to `[:header]`. A resource
+  server that intentionally accepts RFC 6750 §2.2 form-body `access_token`
+  credentials must opt in with `bearer_methods: [:header, :body]` and advertise
+  the matching `bearer_methods_supported` metadata. URI-query bearer tokens
+  remain unsupported. DPoP, mTLS, and host-provided `:credential_from_conn`
+  fallback credentials are unchanged.
+
 ## [0.8.1] - 2026-06-21
 
 ### Changed

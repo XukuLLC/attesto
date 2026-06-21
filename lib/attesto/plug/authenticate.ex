@@ -47,6 +47,16 @@ if Code.ensure_loaded?(Plug.Conn) do
         standard `Authorization` header remains authoritative when present;
         this callback is consulted only when no usable header credential is
         present.
+      * `:bearer_methods` - standard RFC 6750 Bearer-token presentation
+        methods this resource server accepts. Allowed values are `:header` /
+        `"header"` (RFC 6750 §2.1 `Authorization: Bearer`) and `:body` /
+        `"body"` (RFC 6750 §2.2 form-body `access_token`). Defaults to
+        `[:header]`. Add `:body` only when the protected-resource metadata
+        advertises body support and the deployment accepts the logging,
+        caching, retry, and replay risks of credentials in request bodies.
+        The URI-query method is intentionally unsupported. This setting does
+        not disable `Authorization: DPoP`, mTLS binding, or a host-owned
+        `:credential_from_conn` fallback.
       * `:claims_key` - the `conn.assigns` key the verified claims are put
         under (default `:attesto_claims`).
       * `:send_error`, `:www_authenticate`, `:no_store` - optional transport
@@ -74,6 +84,8 @@ if Code.ensure_loaded?(Plug.Conn) do
     alias Attesto.Token
 
     @default_claims_key :attesto_claims
+    @default_bearer_methods [:header]
+    @supported_bearer_methods [:header, :body]
 
     @impl Plug
     def init(opts) do
@@ -88,7 +100,7 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "use_dpop_nonce challenge can carry a DPoP-Nonce header."
       end
 
-      opts
+      Keyword.put(opts, :bearer_methods, bearer_methods(opts))
     end
 
     @impl Plug
@@ -134,18 +146,18 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp authorization(conn, opts) do
       case get_req_header(conn, "authorization") do
-        [value] -> parse_authorization(value)
+        [value] -> parse_authorization(value, opts)
         [] -> fallback_authorization(conn, opts)
         _ -> :missing
       end
     end
 
-    defp parse_authorization(value) do
+    defp parse_authorization(value, opts) do
       case String.split(value, " ", parts: 2) do
         [scheme, token] ->
           case String.downcase(scheme) do
-            "bearer" -> {:ok, :bearer, String.trim(token)}
-            "dpop" -> {:ok, :dpop, String.trim(token)}
+            "bearer" -> bearer_header_authorization(token, opts)
+            "dpop" -> authorization_token(:dpop, token)
             _ -> :missing
           end
 
@@ -154,25 +166,51 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
-    # RFC 6750 §2.2 permits bearer tokens in an application/x-www-form-urlencoded
-    # request body. Keep this as a fallback only: an Authorization header remains
-    # the primary credential channel, and GET query tokens are intentionally not
-    # accepted here.
-    defp form_body_authorization(%Plug.Conn{method: "POST", body_params: %{"access_token" => token}})
-         when is_binary(token) do
+    defp bearer_header_authorization(token, opts) do
+      if bearer_method?(opts, :header), do: authorization_token(:bearer, token), else: :missing
+    end
+
+    defp authorization_token(scheme, token) do
       case String.trim(token) do
         "" -> :missing
-        token -> {:ok, :bearer, token}
+        token -> {:ok, scheme, token}
       end
+    end
+
+    # RFC 6750 §2.2 permits bearer tokens in an application/x-www-form-urlencoded
+    # request body. Keep this opt-in and fallback-only: an Authorization header
+    # remains the primary credential channel, and GET query tokens are
+    # intentionally not accepted here.
+    defp form_body_authorization(%Plug.Conn{method: "POST", body_params: %{"access_token" => token}} = conn)
+         when is_binary(token) do
+      if form_urlencoded?(conn), do: authorization_token(:bearer, token), else: :missing
     end
 
     defp form_body_authorization(_conn), do: :missing
 
     defp fallback_authorization(conn, opts) do
       case custom_authorization(conn, opts) do
-        :missing -> form_body_authorization(conn)
+        :missing -> maybe_form_body_authorization(conn, opts)
         result -> result
       end
+    end
+
+    defp maybe_form_body_authorization(conn, opts) do
+      if bearer_method?(opts, :body) do
+        form_body_authorization(conn)
+      else
+        :missing
+      end
+    end
+
+    defp form_urlencoded?(conn) do
+      conn
+      |> get_req_header("content-type")
+      |> Enum.any?(fn value ->
+        value
+        |> String.downcase()
+        |> String.starts_with?("application/x-www-form-urlencoded")
+      end)
     end
 
     defp custom_authorization(conn, opts) do
@@ -194,6 +232,41 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp normalize_custom_authorization(:missing), do: :missing
     defp normalize_custom_authorization(_other), do: :missing
+
+    defp bearer_method?(opts, method), do: method in bearer_methods(opts)
+
+    defp bearer_methods(opts) do
+      opts
+      |> Keyword.get(:bearer_methods, @default_bearer_methods)
+      |> normalize_bearer_methods()
+    end
+
+    defp normalize_bearer_methods(methods) when is_list(methods) do
+      normalized = Enum.map(methods, &normalize_bearer_method/1)
+
+      if normalized != [] and normalized == Enum.uniq(normalized) and
+           Enum.all?(normalized, &(&1 in @supported_bearer_methods)) do
+        normalized
+      else
+        raise ArgumentError,
+              "Attesto.Plug.Authenticate: :bearer_methods must be a non-empty list of distinct " <>
+                "RFC 6750 methods accepted by this resource server " <>
+                "(#{inspect(@supported_bearer_methods)}); got #{inspect(methods)}."
+      end
+    end
+
+    defp normalize_bearer_methods(methods) do
+      raise ArgumentError,
+            "Attesto.Plug.Authenticate: :bearer_methods must be a non-empty list of distinct " <>
+              "RFC 6750 methods accepted by this resource server " <>
+              "(#{inspect(@supported_bearer_methods)}); got #{inspect(methods)}."
+    end
+
+    defp normalize_bearer_method(:header), do: :header
+    defp normalize_bearer_method("header"), do: :header
+    defp normalize_bearer_method(:body), do: :body
+    defp normalize_bearer_method("body"), do: :body
+    defp normalize_bearer_method(other), do: other
 
     # ----- DPoP proof -----
 
