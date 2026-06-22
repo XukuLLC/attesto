@@ -35,12 +35,12 @@ defmodule Attesto.StepUp.Requirement do
   end
 
   defp validate!(%__MODULE__{acr_values: acrs, max_age: max_age} = req) do
-    unless is_list(acrs) and Enum.all?(acrs, &valid_acr?/1) do
+    if !(is_list(acrs) and Enum.all?(acrs, &valid_acr?/1)) do
       raise ArgumentError,
             "step-up :acr_values must be a list of non-empty acr token strings (no whitespace, quotes, commas, or backslashes), got: #{inspect(acrs)}"
     end
 
-    unless is_nil(max_age) or (is_integer(max_age) and max_age >= 0) do
+    if !(is_nil(max_age) or (is_integer(max_age) and max_age >= 0)) do
       raise ArgumentError, "step-up :max_age must be a non-negative integer or nil, got: #{inspect(max_age)}"
     end
 
