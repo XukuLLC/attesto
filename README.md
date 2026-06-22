@@ -260,7 +260,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 6749 §6 / §10.4 | Refresh-token rotation + reuse detection | Supported |
 | RFC 6749 §3.3 | Access-token scope | Supported |
 | RFC 7523 §4 | JWT-assertion grant (`jwt-bearer`; ID-JAG draft) | Supported |
-| RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (jwt-bearer grant) |
+| RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (one or more resources; `Attesto.ResourceIndicator`) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
 | RFC 9728 | Protected Resource Metadata | Supported |
