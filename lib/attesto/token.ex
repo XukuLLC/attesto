@@ -87,6 +87,8 @@ defmodule Attesto.Token do
           | {:lifetime, pos_integer()}
           | {:typ, String.t()}
           | {:audience, String.t() | [String.t()]}
+          | {:acr, String.t()}
+          | {:auth_time, non_neg_integer()}
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
         ]
@@ -194,6 +196,7 @@ defmodule Attesto.Token do
          {:ok, scopes} <- normalize_scopes(principal),
          {:ok, typ} <- normalize_typ(opts),
          {:ok, audience} <- normalize_audience(config, opts),
+         {:ok, auth_context} <- normalize_auth_context(opts),
          {:ok, confirmation} <- normalize_confirmation(opts) do
       iat = unix_now(opts)
       lifetime = lifetime_seconds(config, opts)
@@ -214,6 +217,11 @@ defmodule Attesto.Token do
           "typ" => typ
         }
         |> Map.merge(extra)
+        # RFC 9470 / OIDC Core §2: the authentication context (`acr` /
+        # `auth_time`) the end-user grant established, carried onto the access
+        # token so a resource server can enforce a step-up requirement. Present
+        # only when the issuing flow actually established it.
+        |> Map.merge(auth_context)
         |> maybe_put_confirmation(confirmation)
 
       {:ok,
@@ -438,6 +446,29 @@ defmodule Attesto.Token do
 
   defp collapse_audience([single]), do: single
   defp collapse_audience(many), do: many
+
+  # RFC 9470 / OIDC Core §2: optional `:acr` (authentication context class, a
+  # non-empty string) and `:auth_time` (the authentication event time, a
+  # non-negative integer NumericDate) for the access token. Absent opts add no
+  # claim; a present-but-malformed value is a miswired caller and is rejected
+  # rather than minted into a claim a resource server would trust for step-up.
+  defp normalize_auth_context(opts) do
+    with {:ok, acr} <- normalize_acr(Keyword.fetch(opts, :acr)),
+         {:ok, auth_time} <- normalize_auth_time(Keyword.fetch(opts, :auth_time)) do
+      {:ok, Map.merge(acr, auth_time)}
+    end
+  end
+
+  defp normalize_acr(:error), do: {:ok, %{}}
+  defp normalize_acr({:ok, acr}) when is_binary(acr) and acr != "", do: {:ok, %{"acr" => acr}}
+  defp normalize_acr({:ok, _other}), do: {:error, :invalid_acr}
+
+  defp normalize_auth_time(:error), do: {:ok, %{}}
+
+  defp normalize_auth_time({:ok, auth_time}) when is_integer(auth_time) and auth_time >= 0,
+    do: {:ok, %{"auth_time" => auth_time}}
+
+  defp normalize_auth_time({:ok, _other}), do: {:error, :invalid_auth_time}
 
   # RFC 7800 `cnf` assembly. DPoP (`jkt`) and mTLS (`x5t#S256`) are
   # mutually exclusive, and each thumbprint is shape-validated: a

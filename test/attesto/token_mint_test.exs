@@ -313,6 +313,31 @@ defmodule Attesto.TokenMintTest do
     end
   end
 
+  describe "mint/3 authentication context (RFC 9470)" do
+    test "writes :acr and :auth_time as access-token claims", %{config: config} do
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(config, client_principal(), acr: "phr", auth_time: 1_700_000_000)
+
+      claims = payload!(jwt)
+      assert claims["acr"] == "phr"
+      assert claims["auth_time"] == 1_700_000_000
+    end
+
+    test "omits the claims when not supplied", %{config: config} do
+      assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
+      claims = payload!(jwt)
+      refute Map.has_key?(claims, "acr")
+      refute Map.has_key?(claims, "auth_time")
+    end
+
+    test "a malformed :acr or :auth_time fails closed", %{config: config} do
+      assert {:error, :invalid_acr} = Token.mint(config, client_principal(), acr: "")
+      assert {:error, :invalid_acr} = Token.mint(config, client_principal(), acr: 123)
+      assert {:error, :invalid_auth_time} = Token.mint(config, client_principal(), auth_time: -1)
+      assert {:error, :invalid_auth_time} = Token.mint(config, client_principal(), auth_time: "now")
+    end
+  end
+
   describe "mint/3 DPoP binding" do
     test "embeds cnf.jkt and switches token_type to DPoP", %{config: config} do
       assert {:ok, %{access_token: jwt, token_type: "DPoP", scope: "documents.read"}} =
