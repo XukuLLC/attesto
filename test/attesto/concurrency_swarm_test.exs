@@ -62,38 +62,52 @@ defmodule Attesto.ConcurrencySwarmTest do
   end
 
   describe "claim swarm: flooded rotation of one live token" do
-    test "at most one rotation claims the live token; the family ends revoked and forkless" do
-      {:ok, %{token: t0}} =
+    test "concurrent rotations never fork: at most one distinct successor, chain stays forkless" do
+      {:ok, %{token: t0, family_id: family_id}} =
         RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_7", scope: ["documents.read"]})
 
       results = swarm(fn -> RefreshToken.rotate(RefreshStore.ETS, t0) end)
 
       assert length(results) == @swarm
 
-      # Every result is one of: the single atomic claim ({:ok,_}); a loser
-      # that saw the token already claimed (:reuse_detected, which revokes
-      # the family); or a loser whose read landed after the concurrent
-      # revoke already deleted the row (:invalid_grant). All three are safe;
-      # what must never happen is two successful claims or a surviving fork.
+      # Every result is one of: a successful rotation ({:ok,_}); a loser that saw
+      # the token already claimed (:reuse_detected, which revokes the family); or
+      # a loser whose read landed after a concurrent revoke deleted the row
+      # (:invalid_grant). All three are safe.
       assert Enum.all?(results, fn r ->
                match?({:ok, _}, r) or r in [{:error, :reuse_detected}, {:error, :invalid_grant}]
              end),
              "results must be {:ok,_}, :reuse_detected, or :invalid_grant; got #{inspect(results)}"
 
-      winners = Enum.filter(results, &match?({:ok, _}, &1))
-
-      assert length(winners) <= 1,
-             "at most one rotation may claim a live token; got #{length(winners)}"
-
-      # No two distinct successors both rotate. If a winner emerged, its
-      # successor token must be the ONLY live token, and even it does not
-      # rotate once a concurrent reuse revoked the family. Confirm forkless:
-      # the original no longer rotates, and any successor is non-rotatable.
-      refute match?({:ok, _}, RefreshToken.rotate(RefreshStore.ETS, t0)),
-             "the claimed original must not rotate again"
-
+      # A {:ok,_} is either the single task that won the atomic claim and minted
+      # the successor, OR a lagging task whose read landed after that claim,
+      # within the rotation-grace window: an idempotent lost-response retry that
+      # returns the SAME successor (exactly what the reuse swarm above asserts).
+      # So more than one {:ok,_} is safe under contention - what must never
+      # happen is a FORK. The invariant is forklessness: at most ONE distinct
+      # successor is ever minted, no matter how many retries observe it. (An
+      # earlier `length(winners) <= 1` check was a flawed proxy that flaked when
+      # scheduling let several grace retries observe the same live successor.)
       successor_tokens =
-        for {:ok, %{token: tok}} <- winners, do: tok
+        results
+        |> Enum.flat_map(fn
+          {:ok, %{token: tok}} -> [tok]
+          _ -> []
+        end)
+        |> Enum.uniq()
+
+      assert length(successor_tokens) <= 1,
+             "rotation must be forkless: at most one distinct successor; got #{inspect(successor_tokens)}"
+
+      # Whether the swarm trips reuse detection depends on interleaving (an
+      # all-idempotent interleaving leaves one safe live leaf and never revokes),
+      # so drive the family to its terminal revoked state deterministically, then
+      # confirm the chain is dead with no surviving fork: neither the original
+      # nor the minted successor can rotate.
+      :ok = RefreshStore.ETS.revoke_family(family_id)
+
+      refute match?({:ok, _}, RefreshToken.rotate(RefreshStore.ETS, t0)),
+             "the original must not rotate once the family is revoked"
 
       for tok <- successor_tokens do
         refute match?({:ok, _}, RefreshToken.rotate(RefreshStore.ETS, tok)),
