@@ -46,6 +46,7 @@ defmodule Attesto.ProtectedResourceMetadata do
     bearer_methods_supported
     resource_signing_alg_values_supported
     authorization_details_types_supported
+    acr_values_supported
     resource_name
     resource_documentation
     resource_policy_uri

@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **RFC 9470 Step-Up Authentication Challenge.** New `Attesto.StepUp` +
+  `Attesto.StepUp.Requirement` primitive: a requirement is accepted `acr_values`
+  and/or a `max_age` freshness bound; `evaluate/3` checks a verified token's
+  `acr` / `auth_time` claims (conjunction, fail-closed on absent/malformed) and
+  returns the §3 challenge params.
+- `Attesto.Token.mint/3` accepts optional `:acr` / `:auth_time`, written as
+  access-token claims (the carrier a resource server enforces step-up against).
+- `Attesto.RefreshToken` carries the original `acr` / `auth_time` across rotation
+  unchanged, so a refresh-minted access token reports the real authentication
+  event (`auth_time` is never re-stamped).
+- `Attesto.Plug.OAuthError.insufficient_user_authentication/4` (the RFC 9470 §3
+  401 challenge) and a `:step_up` option on `Attesto.Plug.Authenticate` that
+  enforces a per-route requirement after token verification.
+- `acr_values_supported` is now an accepted protected-resource-metadata host
+  field (RFC 9728), so a resource server can advertise the `acr` values it can
+  demand.
+
 ## [0.10.0] - 2026-06-22
 
 ### Added
