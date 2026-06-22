@@ -407,19 +407,37 @@ defmodule Attesto.Token do
     end
   end
 
-  # RFC 8707 §2: when present, the `:audience` override (a validated `resource`
-  # indicator) becomes the `aud` claim and so MUST be a single non-empty string
-  # identifier - a `nil`, `""`, list, or other shape is a miswired caller and is
-  # rejected `:invalid_audience` rather than minted into a malformed or
+  # RFC 8707 §2: when present, the `:audience` override (the validated
+  # `resource` indicator(s)) becomes the `aud` claim. A single resource is a
+  # non-empty string; multiple resources (§2.2) are a list of them, written as
+  # a JWT `aud` array (RFC 7519 §4.1.3). A `nil`, `""`, empty list, or list with
+  # a blank/non-binary member is a miswired caller and is rejected
+  # `:invalid_audience` rather than minted into a malformed or
   # attacker-influenced `aud`. Absent, the configured default audience (already
   # validated at `Config.new/1`) is used.
   defp normalize_audience(config, opts) do
     case Keyword.fetch(opts, :audience) do
       :error -> {:ok, config.audience}
-      {:ok, aud} when is_binary(aud) and aud != "" -> {:ok, aud}
-      {:ok, _} -> {:error, :invalid_audience}
+      {:ok, aud} -> normalize_audience_value(aud)
     end
   end
+
+  defp normalize_audience_value(aud) when is_binary(aud) and aud != "", do: {:ok, aud}
+
+  defp normalize_audience_value(aud) when is_list(aud) do
+    cond do
+      aud == [] -> {:error, :invalid_audience}
+      Enum.any?(aud, &(not (is_binary(&1) and &1 != ""))) -> {:error, :invalid_audience}
+      # A single requested resource collapses to a plain string `aud`; only a
+      # genuine multi-resource grant is written as a JWT `aud` array.
+      true -> {:ok, collapse_audience(Enum.uniq(aud))}
+    end
+  end
+
+  defp normalize_audience_value(_aud), do: {:error, :invalid_audience}
+
+  defp collapse_audience([single]), do: single
+  defp collapse_audience(many), do: many
 
   # RFC 7800 `cnf` assembly. DPoP (`jkt`) and mTLS (`x5t#S256`) are
   # mutually exclusive, and each thumbprint is shape-validated: a

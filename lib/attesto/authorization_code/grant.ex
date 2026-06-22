@@ -22,13 +22,14 @@ defmodule Attesto.AuthorizationCode.Grant do
   """
 
   @enforce_keys [:client_id, :redirect_uri, :subject]
-  defstruct [:client_id, :redirect_uri, :subject, :dpop_jkt, :family_id, scope: [], claims: %{}]
+  defstruct [:client_id, :redirect_uri, :subject, :dpop_jkt, :family_id, scope: [], resource: [], claims: %{}]
 
   @type t :: %__MODULE__{
           client_id: String.t(),
           redirect_uri: String.t(),
           subject: String.t(),
           scope: [String.t()],
+          resource: [String.t()],
           dpop_jkt: String.t() | nil,
           family_id: String.t() | nil,
           claims: map()
@@ -42,6 +43,7 @@ defmodule Attesto.AuthorizationCode.Grant do
       redirect_uri: data.redirect_uri,
       subject: data.subject,
       scope: Map.get(data, :scope, []),
+      resource: Map.get(data, :resource, []),
       dpop_jkt: Map.get(data, :dpop_jkt),
       family_id: Map.get(data, :family_id),
       claims: Map.get(data, :claims, %{})

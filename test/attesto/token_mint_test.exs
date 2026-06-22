@@ -284,10 +284,28 @@ defmodule Attesto.TokenMintTest do
       assert payload!(jwt)["aud"] == "https://api.example.com/"
     end
 
+    test "a single-resource :audience list collapses to a string aud", %{config: config} do
+      # RFC 8707 §2.2: one requested resource yields a plain string `aud`.
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(config, client_principal(), audience: ["https://resource.example/api"])
+
+      assert payload!(jwt)["aud"] == "https://resource.example/api"
+    end
+
+    test "a multi-resource :audience list is written as a JWT aud array", %{config: config} do
+      # RFC 8707 §2.2: multiple granted resources → an `aud` array (deduped).
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(config, client_principal(),
+                 audience: ["https://a.example/api", "https://b.example/api", "https://a.example/api"]
+               )
+
+      assert payload!(jwt)["aud"] == ["https://a.example/api", "https://b.example/api"]
+    end
+
     test "a present-but-malformed :audience fails closed as :invalid_audience", %{config: config} do
-      # RFC 8707 §2: the override is a single resource identifier. A miswired
+      # RFC 8707 §2: the override is one or more resource identifiers. A miswired
       # caller must not mint a malformed/attacker-influenced aud.
-      for bad <- [nil, "", ["https://a.example/"], %{"a" => 1}, :atom, 123] do
+      for bad <- [nil, "", [], [""], ["https://ok.example/", ""], %{"a" => 1}, :atom, 123] do
         assert {:error, :invalid_audience} =
                  Token.mint(config, client_principal(), audience: bad),
                "expected :invalid_audience for #{inspect(bad)}"

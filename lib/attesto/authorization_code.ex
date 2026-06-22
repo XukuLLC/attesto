@@ -309,11 +309,12 @@ defmodule Attesto.AuthorizationCode do
 
   defp normalize_issue_attrs(attrs) do
     scope = Map.get(attrs, :scope, [])
+    resource = Map.get(attrs, :resource, [])
     dpop_jkt = Map.get(attrs, :dpop_jkt)
     family_id = Map.get(attrs, :family_id)
     claims = Map.get(attrs, :claims, %{})
 
-    with :ok <- validate_issue_attrs(attrs, scope, dpop_jkt, family_id, claims) do
+    with :ok <- validate_issue_attrs(attrs, scope, resource, dpop_jkt, family_id, claims) do
       {:ok,
        %{
          client_id: attrs.client_id,
@@ -321,6 +322,7 @@ defmodule Attesto.AuthorizationCode do
          code_challenge: Map.get(attrs, :code_challenge),
          subject: attrs.subject,
          scope: scope,
+         resource: resource,
          dpop_jkt: dpop_jkt,
          family_id: family_id,
          claims: claims
@@ -331,13 +333,17 @@ defmodule Attesto.AuthorizationCode do
   # Each issue attribute is checked in a fixed precedence order; the first
   # failure wins. Driving the checks from a list keeps the precedence
   # explicit while holding the function's branching low.
-  defp validate_issue_attrs(attrs, scope, dpop_jkt, family_id, claims) do
+  defp validate_issue_attrs(attrs, scope, resource, dpop_jkt, family_id, claims) do
     [
       {non_empty_binary?(Map.get(attrs, :client_id)), :invalid_client_id},
       {non_empty_binary?(Map.get(attrs, :redirect_uri)), :invalid_redirect_uri},
       {valid_optional_challenge?(Map.get(attrs, :code_challenge)), :invalid_code_challenge},
       {non_empty_binary?(Map.get(attrs, :subject)), :invalid_subject},
       {valid_scope?(scope), :invalid_scope},
+      # RFC 8707 §2.2: the resource indicator(s) the user authorized are bound to
+      # the code (like scope) so the token endpoint mints `aud` from what was
+      # granted at authorization, not a value re-submitted at redemption.
+      {valid_resource?(resource), :invalid_resource},
       {valid_optional_jkt?(dpop_jkt), :invalid_dpop_jkt},
       {valid_optional_family_id?(family_id), :invalid_family_id},
       {is_map(claims), :invalid_claims}
@@ -412,6 +418,10 @@ defmodule Attesto.AuthorizationCode do
   defp valid_optional_challenge?(nil), do: true
   defp valid_optional_challenge?(challenge), do: PKCE.valid_challenge?(challenge)
   defp valid_scope?(scope), do: is_list(scope) and Enum.all?(scope, &Scope.valid_token?/1)
+  # The bound resource indicators are validated as RFC 8707 §2.1 absolute-URI
+  # indicators at the authorization-server framing layer; here they are
+  # shape-checked as a list of non-empty strings before being stored.
+  defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &non_empty_binary?/1)
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)
   defp valid_optional_family_id?(nil), do: true

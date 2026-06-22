@@ -35,6 +35,7 @@ defmodule Attesto.RefreshToken do
   @type context :: %{
           required(:subject) => String.t(),
           optional(:scope) => [String.t()],
+          optional(:resource) => [String.t()],
           optional(:client_id) => String.t(),
           optional(:dpop_jkt) => String.t() | nil,
           optional(:claims) => map()
@@ -326,21 +327,27 @@ defmodule Attesto.RefreshToken do
 
   defp normalize_context(context) do
     scope = Map.get(context, :scope, [])
+    resource = Map.get(context, :resource, [])
     dpop_jkt = Map.get(context, :dpop_jkt)
 
     cond do
       not non_empty_binary?(Map.get(context, :subject)) -> {:error, :invalid_subject}
       not valid_scope?(scope) -> {:error, :invalid_scope}
+      not valid_resource?(resource) -> {:error, :invalid_resource}
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
       not is_map(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
-      true -> {:ok, build_data(context, scope, dpop_jkt)}
+      # RFC 8707: the bound resource set rides through rotation unchanged via the
+      # `%{claimed.data | scope: scope}` struct-update in `issue_successor/4`, so
+      # a refreshed access token stays audienced to the same resource(s).
+      true -> {:ok, build_data(context, scope, resource, dpop_jkt)}
     end
   end
 
-  defp build_data(context, scope, dpop_jkt) do
+  defp build_data(context, scope, resource, dpop_jkt) do
     %{
       subject: context.subject,
       scope: scope,
+      resource: resource,
       client_id: Map.get(context, :client_id),
       dpop_jkt: dpop_jkt,
       claims: Map.get(context, :claims, %{})
@@ -372,6 +379,7 @@ defmodule Attesto.RefreshToken do
 
   defp non_empty_binary?(v), do: is_binary(v) and v != ""
   defp valid_scope?(scope), do: is_list(scope) and Enum.all?(scope, &Scope.valid_token?/1)
+  defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &non_empty_binary?/1)
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)
 
