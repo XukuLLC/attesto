@@ -36,6 +36,8 @@ defmodule Attesto.RefreshToken do
           required(:subject) => String.t(),
           optional(:scope) => [String.t()],
           optional(:resource) => [String.t()],
+          optional(:acr) => String.t() | nil,
+          optional(:auth_time) => non_neg_integer() | nil,
           optional(:client_id) => String.t(),
           optional(:dpop_jkt) => String.t() | nil,
           optional(:claims) => map()
@@ -362,6 +364,8 @@ defmodule Attesto.RefreshToken do
       not valid_resource?(resource) -> {:error, :invalid_resource}
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
       not is_map(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
+      not valid_optional_acr?(Map.get(context, :acr)) -> {:error, :invalid_acr}
+      not valid_optional_auth_time?(Map.get(context, :auth_time)) -> {:error, :invalid_auth_time}
       # RFC 8707: the bound resource set rides through rotation unchanged via the
       # `%{claimed.data | scope: scope}` struct-update in `issue_successor/4`, so
       # a refreshed access token stays audienced to the same resource(s).
@@ -376,9 +380,21 @@ defmodule Attesto.RefreshToken do
       resource: resource,
       client_id: Map.get(context, :client_id),
       dpop_jkt: dpop_jkt,
+      # RFC 9470 / OIDC Core §2: the authentication context (`acr`/`auth_time`)
+      # of the ORIGINAL end-user authentication. Carried through rotation
+      # unchanged (issue_successor/4's struct-update never overrides them), so a
+      # refresh-minted access token reports the original auth event - a refresh
+      # never makes the authentication "fresher".
+      acr: Map.get(context, :acr),
+      auth_time: Map.get(context, :auth_time),
       claims: Map.get(context, :claims, %{})
     }
   end
+
+  defp valid_optional_acr?(nil), do: true
+  defp valid_optional_acr?(acr), do: non_empty_binary?(acr)
+  defp valid_optional_auth_time?(nil), do: true
+  defp valid_optional_auth_time?(auth_time), do: is_integer(auth_time) and auth_time >= 0
 
   defp check_expiry(%{expires_at: expires_at}, opts) do
     if expires_at > unix_now(opts), do: :ok, else: {:error, :expired}
