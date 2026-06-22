@@ -336,6 +336,17 @@ defmodule Attesto.TokenMintTest do
       assert {:error, :invalid_auth_time} = Token.mint(config, client_principal(), auth_time: -1)
       assert {:error, :invalid_auth_time} = Token.mint(config, client_principal(), auth_time: "now")
     end
+
+    test "acr/auth_time cannot be forged through a principal's free-form claims", %{config: config} do
+      # They are reserved: only the host-asserted mint opts may write them, so a
+      # principal claim of acr/auth_time is rejected rather than minting a token
+      # that would forge satisfaction of a step-up requirement.
+      principal = client_principal(%{claims: %{"client_id" => "oc_abc123", "acr" => "phr"}})
+      assert {:error, :reserved_claim_conflict} = Token.mint(config, principal)
+
+      principal2 = client_principal(%{claims: %{"client_id" => "oc_abc123", "auth_time" => 1_700_000_000}})
+      assert {:error, :reserved_claim_conflict} = Token.mint(config, principal2)
+    end
   end
 
   describe "mint/3 DPoP binding" do
