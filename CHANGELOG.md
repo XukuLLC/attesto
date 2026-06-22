@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-22
+
+### Added
+
+- **RFC 8707 Resource Indicators.** New `Attesto.ResourceIndicator` primitive
+  (`validate/1` for §2.1 absolute-URI syntax over the scalar/array `resource`
+  parameter; `authorize/2` for §2.2 allow-listing → `:invalid_target`).
+- `Attesto.Token.mint/3`'s `:audience` option now accepts a list of resource
+  identifiers, written as a JWT `aud` array (a single resource still collapses
+  to a string). `Token.verify` already checks array membership, so a resource
+  server validates that its own identifier is in `aud`.
+- `Attesto.AuthorizationCode` / `Attesto.RefreshToken` bind a `resource` set
+  alongside scope; refresh rotation carries it and narrows it subset-only (a
+  requested resource outside the granted set is `:invalid_target`).
+- `Attesto.AuthorizationRequest` parses and validates the `resource` parameter,
+  surfacing a malformed value as a redirectable `invalid_target` error.
+
 ## [0.9.0] - 2026-06-21
 
 ### Changed
