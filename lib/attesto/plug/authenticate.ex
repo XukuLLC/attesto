@@ -81,6 +81,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     alias Attesto.DPoP
     alias Attesto.MTLS
     alias Attesto.Plug.OAuthError
+    alias Attesto.StepUp.Requirement
     alias Attesto.Token
 
     @default_claims_key :attesto_claims
@@ -100,7 +101,20 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "use_dpop_nonce challenge can carry a DPoP-Nonce header."
       end
 
-      Keyword.put(opts, :bearer_methods, bearer_methods(opts))
+      opts
+      |> Keyword.put(:bearer_methods, bearer_methods(opts))
+      |> normalize_step_up()
+    end
+
+    # RFC 9470: a route may declare a step-up requirement (`step_up:
+    # [acr_values: [...], max_age: ...]` or a `%Attesto.StepUp.Requirement{}`).
+    # Parse + validate it at boot so a malformed requirement fails closed here
+    # rather than silently never (or always) challenging at request time.
+    defp normalize_step_up(opts) do
+      case Keyword.fetch(opts, :step_up) do
+        :error -> opts
+        {:ok, spec} -> Keyword.put(opts, :step_up, Requirement.parse(spec))
+      end
     end
 
     @impl Plug
@@ -111,7 +125,18 @@ if Code.ensure_loaded?(Plug.Conn) do
            {:ok, dpop_jkt} <- verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumb} <- cert_thumbprint(conn, opts),
            {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb) do
-        assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
+        conn = assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
+
+        # RFC 9470 §3: after the token is verified, enforce any route step-up
+        # requirement against its authentication-context claims; an unsatisfied
+        # requirement halts with the `insufficient_user_authentication` challenge.
+        case step_up_check(claims, opts) do
+          :ok ->
+            conn
+
+          {:challenge, challenge} ->
+            OAuthError.insufficient_user_authentication(conn, step_up_scheme(claims), challenge, error_opts(opts, []))
+        end
       else
         :missing ->
           OAuthError.unauthorized(
@@ -415,6 +440,34 @@ if Code.ensure_loaded?(Plug.Conn) do
       opts
       |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata])
       |> Keyword.merge(extra)
+    end
+
+    # RFC 9470: evaluate the (init-parsed) route step-up requirement against the
+    # verified token's authentication-context claims. No requirement => :ok.
+    defp step_up_check(claims, opts) do
+      case Keyword.get(opts, :step_up) do
+        nil ->
+          :ok
+
+        %Requirement{} = requirement ->
+          case Attesto.StepUp.evaluate(requirement, claims, step_up_now(opts)) do
+            :ok -> :ok
+            {:error, :insufficient_user_authentication, challenge} -> {:challenge, challenge}
+          end
+      end
+    end
+
+    # The challenge scheme follows the token's own binding (a DPoP-bound token is
+    # presented and re-challenged under DPoP), mirroring the scope-rejection path.
+    defp step_up_scheme(%{"cnf" => %{"jkt" => jkt}}) when is_binary(jkt), do: :dpop
+    defp step_up_scheme(_claims), do: :bearer
+
+    defp step_up_now(opts) do
+      case Keyword.get(opts, :now) do
+        %DateTime{} = dt -> DateTime.to_unix(dt)
+        n when is_integer(n) -> n
+        _ -> System.system_time(:second)
+      end
     end
   end
 end

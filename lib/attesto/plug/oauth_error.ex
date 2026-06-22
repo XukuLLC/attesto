@@ -49,6 +49,44 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     @doc """
+    Respond RFC 9470 §3 `insufficient_user_authentication` (401): the presented
+    token does not meet the route's step-up requirement.
+
+    `challenge` is the `Attesto.StepUp` challenge map carrying the `:acr_values`
+    (space-delimited) and/or `:max_age` the client must re-request at the
+    authorization endpoint; both are appended as `WWW-Authenticate` auth-params.
+    This is an *authentication* error (401, like `invalid_token`), built on the
+    same machinery as `unauthorized/4`, honoring the same `:description`,
+    `:resource_metadata`, and `:send_error` / `:www_authenticate` / `:no_store`
+    transport hooks. Halts.
+    """
+    @spec insufficient_user_authentication(Plug.Conn.t(), scheme(), map(), keyword()) :: Plug.Conn.t()
+    def insufficient_user_authentication(conn, scheme, challenge, opts \\ []) when is_map(challenge) do
+      description = Keyword.get(opts, :description, "requires a stronger or more recent authentication")
+
+      params =
+        [{"error", "insufficient_user_authentication"}, {"error_description", description}] ++
+          step_up_params(challenge) ++ resource_metadata_param(opts)
+
+      conn
+      |> put_no_store(opts)
+      |> put_www_authenticate(challenge(scheme, params), opts)
+      |> send_error(401, "insufficient_user_authentication", Keyword.put(opts, :description, description))
+    end
+
+    # RFC 9470 §3: the unmet step-up dimensions, echoed so the client knows
+    # exactly what to re-request. `acr_values` is already space-delimited; the
+    # numeric `max_age` is stringified for the quoted-string auth-param.
+    defp step_up_params(challenge) do
+      []
+      |> maybe_step_up_param("acr_values", Map.get(challenge, :acr_values))
+      |> maybe_step_up_param("max_age", Map.get(challenge, :max_age))
+    end
+
+    defp maybe_step_up_param(params, _key, nil), do: params
+    defp maybe_step_up_param(params, key, value), do: params ++ [{key, to_string(value)}]
+
+    @doc """
     Respond 403 `insufficient_scope` naming the `required` scope list
     (RFC 6750 §3.1). The optional `opts` accepts `:resource_metadata` (RFC 9728
     §5.1: the URL of this resource's protected-resource metadata, advertised as

@@ -545,4 +545,72 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
     end
   end
+
+  describe "RFC 9470 step-up (:step_up)" do
+    defp step_up_conn(config, mint_opts, plug_opts) do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), mint_opts)
+
+      [{"authorization", "Bearer " <> token}]
+      |> request()
+      |> Authenticate.call(Authenticate.init([config: config] ++ plug_opts))
+    end
+
+    test "a token meeting the acr + freshness requirement passes", %{config: config} do
+      now = System.system_time(:second)
+
+      conn =
+        step_up_conn(config, [acr: "phr", auth_time: now], step_up: [acr_values: ["phr"], max_age: 300], now: now)
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["acr"] == "phr"
+    end
+
+    test "a wrong acr is challenged with insufficient_user_authentication naming acr_values + max_age", %{
+      config: config
+    } do
+      now = System.system_time(:second)
+
+      conn =
+        step_up_conn(config, [acr: "pwd", auth_time: now], step_up: [acr_values: ["phr"], max_age: 300], now: now)
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "insufficient_user_authentication"
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(error="insufficient_user_authentication")
+      assert challenge =~ ~s(acr_values="phr")
+      assert challenge =~ ~s(max_age="300")
+    end
+
+    test "a stale auth_time is challenged even with the right acr", %{config: config} do
+      now = System.system_time(:second)
+
+      conn =
+        step_up_conn(config, [acr: "phr", auth_time: now - 1000],
+          step_up: [acr_values: ["phr"], max_age: 300],
+          now: now
+        )
+
+      assert conn.halted
+      assert conn.status == 401
+    end
+
+    test "a token with no auth_time (machine grant) fails closed against a freshness requirement", %{config: config} do
+      now = System.system_time(:second)
+      conn = step_up_conn(config, [], step_up: [max_age: 300], now: now)
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "insufficient_user_authentication"
+    end
+
+    test "no :step_up requirement leaves authentication unchanged", %{config: config} do
+      conn = step_up_conn(config, [], [])
+      refute conn.halted
+    end
+
+    test "a malformed :step_up requirement fails closed at init", %{config: config} do
+      assert_raise ArgumentError, fn -> Authenticate.init(config: config, step_up: []) end
+    end
+  end
 end
