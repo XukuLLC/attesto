@@ -444,13 +444,18 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     # RFC 9470: evaluate the (init-parsed) route step-up requirement against the
     # verified token's authentication-context claims. No requirement => :ok.
+    # The spec is normalized via `Requirement.parse/1` here as well as at
+    # `init/1`, so a caller that wires this plug WITHOUT going through `init/1`
+    # (e.g. the MCP `Authenticate` wrapper, which rebuilds core opts per request)
+    # still gets a parsed, validated requirement rather than a raw keyword list.
+    # `parse/1` is idempotent on an already-parsed `%Requirement{}`.
     defp step_up_check(claims, opts) do
       case Keyword.get(opts, :step_up) do
         nil ->
           :ok
 
-        %Requirement{} = requirement ->
-          case Attesto.StepUp.evaluate(requirement, claims, step_up_now(opts)) do
+        spec ->
+          case Attesto.StepUp.evaluate(Requirement.parse(spec), claims, step_up_now(opts)) do
             :ok -> :ok
             {:error, :insufficient_user_authentication, challenge} -> {:challenge, challenge}
           end
