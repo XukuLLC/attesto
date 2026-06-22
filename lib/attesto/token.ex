@@ -86,7 +86,7 @@ defmodule Attesto.Token do
           {:now, DateTime.t() | non_neg_integer()}
           | {:lifetime, pos_integer()}
           | {:typ, String.t()}
-          | {:audience, String.t()}
+          | {:audience, String.t() | [String.t()]}
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
         ]

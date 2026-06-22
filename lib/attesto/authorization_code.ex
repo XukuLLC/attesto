@@ -88,6 +88,7 @@ defmodule Attesto.AuthorizationCode do
           optional(:code_challenge) => String.t() | nil,
           required(:subject) => String.t(),
           optional(:scope) => [String.t()],
+          optional(:resource) => [String.t()],
           optional(:code_challenge_method) => String.t(),
           optional(:dpop_jkt) => String.t() | nil,
           optional(:family_id) => String.t() | nil,
@@ -101,6 +102,7 @@ defmodule Attesto.AuthorizationCode do
           | :unsupported_code_challenge_method
           | :invalid_subject
           | :invalid_scope
+          | :invalid_resource
           | :invalid_dpop_jkt
           | :invalid_family_id
           | :invalid_claims

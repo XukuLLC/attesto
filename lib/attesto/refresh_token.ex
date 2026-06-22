@@ -54,7 +54,8 @@ defmodule Attesto.RefreshToken do
           context: map()
         }
 
-  @type issue_error :: :invalid_subject | :invalid_scope | :invalid_dpop_jkt | :invalid_claims | :family_revoked
+  @type issue_error ::
+          :invalid_subject | :invalid_scope | :invalid_resource | :invalid_dpop_jkt | :invalid_claims | :family_revoked
 
   @type rotate_error ::
           :invalid_grant
@@ -63,6 +64,7 @@ defmodule Attesto.RefreshToken do
           | :client_required
           | :client_mismatch
           | :invalid_scope
+          | :invalid_target
           | :dpop_proof_required
           | :dpop_proof_unexpected
           | :dpop_binding_mismatch
