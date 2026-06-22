@@ -49,6 +49,7 @@ defmodule Attesto.AuthorizationRequest do
   alias Attesto.PKCE
   alias Attesto.RequestObject
   alias Attesto.RequestObject.Policy
+  alias Attesto.ResourceIndicator
   alias Attesto.Scope
 
   @response_type_code "code"
@@ -89,6 +90,7 @@ defmodule Attesto.AuthorizationRequest do
           client_id: String.t(),
           redirect_uri: String.t(),
           scope: [String.t()],
+          resource: [String.t()],
           openid?: boolean(),
           state: String.t() | nil,
           nonce: String.t() | nil,
@@ -126,6 +128,7 @@ defmodule Attesto.AuthorizationRequest do
     openid?: false,
     prompt: [],
     scope: [],
+    resource: [],
     response_mode: nil,
     dpop_jkt: nil
   ]
@@ -370,6 +373,7 @@ defmodule Attesto.AuthorizationRequest do
     with :ok <- validate_request_object_params(params, redirect_uri, state),
          :ok <- validate_response_type(params, redirect_uri, state),
          {:ok, scope} <- validate_scope(params, redirect_uri, state),
+         {:ok, resource} <- validate_resource(params, redirect_uri, state),
          {:ok, code_challenge, method} <- validate_pkce(params, require_pkce, redirect_uri, state),
          {:ok, max_age} <- validate_max_age(params, redirect_uri, state),
          {:ok, prompt} <- validate_prompt(params, redirect_uri, state),
@@ -382,6 +386,7 @@ defmodule Attesto.AuthorizationRequest do
          client_id: client_id,
          redirect_uri: redirect_uri,
          scope: scope,
+         resource: resource,
          openid?: @openid_scope in scope,
          state: state,
          nonce: nonce,
@@ -516,6 +521,29 @@ defmodule Attesto.AuthorizationRequest do
 
       _ ->
         {:error, redirect_error("invalid_scope", "scope must be a string", redirect_uri, state)}
+    end
+  end
+
+  # RFC 8707 §2: the OPTIONAL `resource` parameter (scalar or array) requests
+  # that the issued token be audienced to the named protected resource(s). Each
+  # value must be an absolute URI with no fragment (§2.1); a malformed value is
+  # the redirectable `invalid_target` error (RFC 6749 §4.1.2.1). Authorization
+  # against the resources this server actually serves (§2.2) is applied where the
+  # token is minted; here the syntactically valid set is bound to the request so
+  # the issued code carries the resources the user authorized.
+  defp validate_resource(params, redirect_uri, state) do
+    case ResourceIndicator.validate(Map.get(params, "resource")) do
+      {:ok, resources} ->
+        {:ok, resources}
+
+      {:error, :invalid_target} ->
+        {:error,
+         redirect_error(
+           "invalid_target",
+           "resource is not a valid absolute-URI indicator",
+           redirect_uri,
+           state
+         )}
     end
   end
 

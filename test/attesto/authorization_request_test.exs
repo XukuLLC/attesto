@@ -152,6 +152,28 @@ defmodule Attesto.AuthorizationRequestTest do
       refute req.openid?
     end
 
+    test "RFC 8707: binds a valid resource indicator to the request" do
+      assert {:ok, req} = validate(base_params(%{"resource" => "https://api.example/mcp"}))
+      assert req.resource == ["https://api.example/mcp"]
+    end
+
+    test "RFC 8707: binds multiple resource indicators (array form)" do
+      assert {:ok, req} =
+               validate(base_params(%{"resource" => ["https://a.example/api", "https://b.example/api"]}))
+
+      assert req.resource == ["https://a.example/api", "https://b.example/api"]
+    end
+
+    test "RFC 8707: a missing resource is the empty set" do
+      assert {:ok, req} = base_params() |> Map.delete("resource") |> validate()
+      assert req.resource == []
+    end
+
+    test "RFC 8707: a malformed resource is a redirectable invalid_target error" do
+      assert {:error, {:redirect, %{error: "invalid_target"}}} =
+               validate(base_params(%{"resource" => "https://api.example/mcp#frag"}))
+    end
+
     test "carries state and nonce through, nil when absent" do
       params = base_params() |> Map.drop(["state", "nonce"])
       assert {:ok, req} = validate(params)
