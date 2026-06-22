@@ -170,7 +170,8 @@ defmodule Attesto.RefreshToken do
          :ok <- check_client(record.data, opts),
          :ok <- check_dpop(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
-         {:ok, successor} <- same_successor(record, scope),
+         {:ok, resource} <- resolve_resource(record.data, opts),
+         {:ok, successor} <- same_successor(record, scope, resource),
          :ok <- successor_still_live?(store, successor) do
       {:ok,
        %{
@@ -208,13 +209,14 @@ defmodule Attesto.RefreshToken do
          :ok <- check_expiry(record, opts),
          :ok <- check_dpop(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
+         {:ok, resource} <- resolve_resource(record.data, opts),
          {:ok, claimed} <- claim(store, record, opts) do
-      issue_successor(store, claimed, scope, opts)
+      issue_successor(store, claimed, scope, resource, opts)
     end
   end
 
-  defp issue_successor(store, claimed, scope, opts) do
-    successor_data = %{claimed.data | scope: scope}
+  defp issue_successor(store, claimed, scope, resource, opts) do
+    successor_data = %{claimed.data | scope: scope, resource: resource}
 
     case issue(store, successor_data,
            family_id: claimed.family_id,
@@ -287,6 +289,28 @@ defmodule Attesto.RefreshToken do
     end
   end
 
+  # RFC 8707 + RFC 6749 §6 (mirrors scope narrowing): a refresh request may
+  # narrow the bound resource set via a `:resource` opt but never widen it - a
+  # requested resource not among the originally granted set is `:invalid_target`.
+  # No `:resource` opt keeps the full granted set, so a refreshed access token
+  # stays audienced to the resources the original grant authorized.
+  defp resolve_resource(data, opts) do
+    granted = Map.get(data, :resource, [])
+
+    case Keyword.get(opts, :resource) do
+      nil ->
+        {:ok, granted}
+
+      requested when is_list(requested) ->
+        if Enum.all?(requested, &(&1 in granted)),
+          do: {:ok, Enum.uniq(requested)},
+          else: {:error, :invalid_target}
+
+      _ ->
+        {:error, :invalid_target}
+    end
+  end
+
   # The atomic claim. Closes the read-then-claim race: if a concurrent
   # rotation claimed this token between our read and here, `consume`
   # reports `{:reuse, _}` and we revoke the family.
@@ -312,9 +336,9 @@ defmodule Attesto.RefreshToken do
       unix_now(opts) - consumed_at <= grace
   end
 
-  defp same_successor(record, scope) do
+  defp same_successor(record, scope, resource) do
     case Map.get(record, :successor) do
-      %{token: token, generation: generation, context: %{scope: ^scope} = context}
+      %{token: token, generation: generation, context: %{scope: ^scope, resource: ^resource} = context}
       when is_binary(token) and is_integer(generation) ->
         {:ok, %{token: token, generation: generation, context: context}}
 
