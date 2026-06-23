@@ -38,6 +38,9 @@ defmodule Attesto.IDToken do
     * `amr` - Authentication Methods References, a JSON array (OIDC Core §2).
     * `at_hash` - Access Token hash (OIDC Core §3.1.3.6 / §3.3.2.11).
     * `c_hash` - Authorization Code hash (OIDC Core §3.3.2.11).
+    * `sid` - Session ID (OIDC Back-Channel Logout 1.0 §2.1 / Front-Channel
+      Logout 1.0 §3). Present when the host runs back-channel-logout-capable
+      sessions, so a later `logout_token` can target this exact session.
 
   There is deliberately no `scope` claim: scope is a property of the
   authorization grant, not of the identity assertion.
@@ -95,6 +98,7 @@ defmodule Attesto.IDToken do
           | {:amr, [String.t()]}
           | {:access_token, String.t()}
           | {:code, String.t()}
+          | {:sid, String.t()}
           | {:extra_claims, %{optional(String.t()) => term()}}
         ]
 
@@ -125,7 +129,7 @@ defmodule Attesto.IDToken do
 
   # Claims this module assembles itself: a caller's `:extra_claims` may not
   # shadow one (mirrors `Attesto.Config` reserved-claim discipline).
-  @reserved_claims ~w(iss sub aud exp iat nonce azp auth_time acr amr at_hash c_hash)
+  @reserved_claims ~w(iss sub aud exp iat nonce azp auth_time acr amr at_hash c_hash sid)
 
   @doc """
   Mint a signed OpenID Connect ID Token for `subject`, addressed to the
@@ -149,6 +153,9 @@ defmodule Attesto.IDToken do
       (OIDC Core §3.1.3.6).
     * `:code` - when given, the `c_hash` claim is computed from it
       (OIDC Core §3.3.2.11).
+    * `:sid` - the session id to assert (OIDC Back-Channel Logout 1.0 §2.1).
+      Supply it when the host issues logout-capable sessions so a future
+      `Attesto.LogoutToken` can target this session.
     * `:extra_claims` - a string-keyed map of additional claims (e.g.
       profile claims). MUST NOT collide with a reserved protocol claim
       (`:reserved_claim_conflict`) and MUST have string keys.
@@ -187,6 +194,7 @@ defmodule Attesto.IDToken do
         |> put_optional("amr", Keyword.get(opts, :amr))
         |> put_optional("at_hash", hash_claim(Keyword.get(opts, :access_token), alg))
         |> put_optional("c_hash", hash_claim(Keyword.get(opts, :code), alg))
+        |> put_optional("sid", Keyword.get(opts, :sid))
         |> Map.merge(extra)
 
       {:ok, sign(config, claims, alg)}
@@ -255,6 +263,38 @@ defmodule Attesto.IDToken do
   end
 
   def verify(%Config{}, _id_token, _opts), do: {:error, :invalid_token}
+
+  @doc """
+  Verify an ID Token presented as an `id_token_hint` to the end-session
+  endpoint (OpenID Connect RP-Initiated Logout 1.0 §2), returning its claims.
+
+  This is a deliberately *looser* check than `verify/3`: the signature, token
+  purpose, issuer, required-claim shape, and a non-future `iat` are all
+  enforced, but
+
+    * the `aud` (client) is **not** required up front — the caller reads the
+      Relying Party from the returned `aud` claim, and
+    * **expiry is tolerated** — RP-Initiated Logout §2 says the OP SHOULD
+      accept an otherwise-valid hint even after it has expired, since the
+      user is logging out precisely because their session is ending.
+
+  A logout token's authenticity still rests entirely on the signature, so a
+  forged or tampered hint is rejected as `:invalid_signature` / `:invalid_token`.
+
+  Returns `{:ok, claims}` (string-keyed payload) or `{:error, reason}`.
+  """
+  @spec verify_logout_hint(Config.t(), String.t()) :: {:ok, claims()} | {:error, verify_error()}
+  def verify_logout_hint(%Config{} = config, id_token) when is_binary(id_token) do
+    with {:ok, claims} <- verify_signature(config, id_token),
+         :ok <- check_token_purpose(config, claims),
+         :ok <- check_issuer(config, claims),
+         :ok <- check_required_claims(claims),
+         :ok <- check_iat_not_future(claims, []) do
+      {:ok, claims}
+    end
+  end
+
+  def verify_logout_hint(%Config{}, _id_token), do: {:error, :invalid_token}
 
   @doc "The default JWS algorithm for RSA keys. Keystores may label individual keys with another supported alg."
   @spec signing_alg() :: String.t()

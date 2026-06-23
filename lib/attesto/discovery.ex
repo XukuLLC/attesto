@@ -53,6 +53,9 @@ defmodule Attesto.Discovery do
     require_pushed_authorization_requests
     pushed_authorization_request_endpoint
     device_authorization_endpoint
+    end_session_endpoint
+    backchannel_logout_supported
+    backchannel_logout_session_supported
     require_signed_request_object
     request_object_signing_alg_values_supported
     client_id_metadata_document_supported

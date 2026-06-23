@@ -185,11 +185,42 @@ defmodule Attesto.IDTokenTest do
     end
 
     test "rejects an :extra_claims key colliding with a reserved claim", %{config: config} do
-      for reserved <- ~w(iss sub aud exp iat nonce azp auth_time acr amr at_hash c_hash) do
+      for reserved <- ~w(iss sub aud exp iat nonce azp auth_time acr amr at_hash c_hash sid) do
         assert {:error, :reserved_claim_conflict} =
                  IDToken.mint(config, @subject, @client_id, extra_claims: %{reserved => "shadow"}),
                "expected :reserved_claim_conflict for #{reserved}"
       end
+    end
+
+    test "threads :sid into the claims (OIDC Back-Channel Logout §2.1)", %{config: config} do
+      assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id, sid: "sess-123")
+      assert payload!(jwt)["sid"] == "sess-123"
+    end
+
+    test "omits sid when none is supplied", %{config: config} do
+      assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
+      refute Map.has_key?(payload!(jwt), "sid")
+    end
+  end
+
+  describe "verify_logout_hint/2" do
+    test "accepts a valid hint and returns its claims", %{config: config} do
+      {:ok, jwt} = IDToken.mint(config, @subject, @client_id, sid: "sess-123")
+      assert {:ok, claims} = IDToken.verify_logout_hint(config, jwt)
+      assert claims["sub"] == @subject
+      assert claims["aud"] == @client_id
+      assert claims["sid"] == "sess-123"
+    end
+
+    test "tolerates an expired hint (RP-Initiated Logout §2)", %{config: config} do
+      {:ok, jwt} = IDToken.mint(config, @subject, @client_id, now: 1_500_000_000)
+      assert {:ok, claims} = IDToken.verify_logout_hint(config, jwt)
+      assert claims["sub"] == @subject
+    end
+
+    test "rejects a tampered hint", %{config: config} do
+      {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
+      assert {:error, _} = IDToken.verify_logout_hint(config, jwt <> "tamper")
     end
   end
 

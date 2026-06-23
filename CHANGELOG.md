@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-06-23
+
+### Added
+
+- **OpenID Connect Logout (RP-Initiated Logout 1.0 + Back-Channel Logout 1.0).**
+  - `Attesto.LogoutToken` mints a signed Back-Channel `logout_token`
+    (§2.4): `typ: "logout+jwt"`, the `events` claim
+    `{"http://schemas.openid.net/event/backchannel-logout": {}}`, `iss`/`aud`/
+    `iat`/`jti`/short-`exp`, at least one of `sub`/`sid`, and never a `nonce`.
+  - `Attesto.EndSession` is the conn-free RP-Initiated Logout validator:
+    `parse/2` verifies the `id_token_hint`, resolves the Relying Party
+    `client_id` (rejecting a `client_id` parameter that disagrees with the
+    hint's `aud`), and extracts the session `sub`/`sid`; `confirm_redirect/2`
+    honors a `post_logout_redirect_uri` only on an **exact** match against the
+    client's registered set and appends `state` — an unregistered or
+    unidentifiable return URI is refused (no open redirect).
+  - `Attesto.IDToken` gains a `sid` claim (`:sid` mint option, OIDC Back-Channel
+    Logout §2.1) and `verify_logout_hint/2`, which validates a hint's signature
+    + issuer while **tolerating expiry** and reading the RP from `aud` rather
+    than requiring it up front (RP-Initiated Logout §2).
+  - `Attesto.LogoutSessionStore` behaviour: the OP-side
+    `(sid, client_id) -> backchannel_logout_uri` delivery map, with an atomic
+    `take_targets/1` (enumerate-and-delete) so concurrent logouts cannot
+    double-deliver.
+  - Discovery (`Attesto.Discovery`) gains `end_session_endpoint`,
+    `backchannel_logout_supported`, and `backchannel_logout_session_supported`.
+
 ## [0.12.0] - 2026-06-23
 
 ### Added
