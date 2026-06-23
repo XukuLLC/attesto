@@ -66,8 +66,13 @@ defmodule Attesto.DeviceCodeStore do
           required(:expires_at) => non_neg_integer()
         }
 
-  @doc "Persist a new `pending` device-code record."
-  @callback put(entry()) :: :ok
+  @doc """
+  Persist a new `pending` device-code record. Returns `{:error, :user_code_taken}`
+  when the record's `user_code` collides with a live one (so `Attesto.DeviceCode`
+  can retry with a fresh code); a `device_code_hash` collision is a CSPRNG-grade
+  impossibility and may raise.
+  """
+  @callback put(entry()) :: :ok | {:error, :user_code_taken}
 
   @doc """
   Non-consuming read of the record for `user_code`, for the verification page to

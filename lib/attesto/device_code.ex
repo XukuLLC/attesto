@@ -66,33 +66,50 @@ defmodule Attesto.DeviceCode do
   Returns `{:ok, %{device_code: ..., user_code: ...}}` with the plaintext device
   code (only its hash is stored) and the display-formatted user code.
   """
-  @spec issue(module(), issue_attrs(), keyword()) :: {:ok, issued()} | {:error, :invalid_client_id}
+  # A `user_code` is short (≈34.6 bits), so a birthday collision against a live
+  # code is rare but possible; retry with a fresh code a bounded number of times
+  # rather than surfacing the store's uniqueness violation as an error.
+  @user_code_collision_retries 5
+
+  @spec issue(module(), issue_attrs(), keyword()) ::
+          {:ok, issued()} | {:error, :invalid_client_id | :user_code_unavailable}
   def issue(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
     with :ok <- validate_issue_attrs(attrs) do
-      device_code = Secret.generate()
       length = Keyword.get(opts, :user_code_length, @default_user_code_length)
-      user_code = generate_user_code(length)
       ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
+      device_code = Secret.generate()
 
-      :ok =
-        store.put(%{
-          device_code_hash: Secret.hash(device_code),
-          # Stored normalized (no separators); the display form is returned to
-          # the client to show the user.
-          user_code: normalize!(user_code),
-          data: %{
-            client_id: attrs.client_id,
-            scope: Map.get(attrs, :scope, []),
-            resource: Map.get(attrs, :resource, []),
-            dpop_jkt: Map.get(attrs, :dpop_jkt)
-          },
-          status: :pending,
-          subject: nil,
-          expires_at: unix_now(opts) + ttl,
-          last_polled_at: nil
-        })
+      data = %{
+        client_id: attrs.client_id,
+        scope: Map.get(attrs, :scope, []),
+        resource: Map.get(attrs, :resource, []),
+        dpop_jkt: Map.get(attrs, :dpop_jkt)
+      }
 
-      {:ok, %{device_code: device_code, user_code: user_code}}
+      put_with_retry(store, device_code, data, length, unix_now(opts) + ttl, @user_code_collision_retries)
+    end
+  end
+
+  defp put_with_retry(_store, _device_code, _data, _length, _expires_at, 0), do: {:error, :user_code_unavailable}
+
+  defp put_with_retry(store, device_code, data, length, expires_at, attempts_left) do
+    user_code = generate_user_code(length)
+
+    record = %{
+      device_code_hash: Secret.hash(device_code),
+      # Stored normalized (no separators); the display form is returned to the
+      # client to show the user.
+      user_code: normalize!(user_code),
+      data: data,
+      status: :pending,
+      subject: nil,
+      expires_at: expires_at,
+      last_polled_at: nil
+    }
+
+    case store.put(record) do
+      :ok -> {:ok, %{device_code: device_code, user_code: user_code}}
+      {:error, :user_code_taken} -> put_with_retry(store, device_code, data, length, expires_at, attempts_left - 1)
     end
   end
 
@@ -230,13 +247,15 @@ defmodule Attesto.DeviceCode do
 
   @doc """
   Generate a fresh display-formatted user code (`BCDF-GHJK`).
+
+  Each character is drawn from the base-20 alphabet using
+  `:crypto.strong_rand_bytes/1` (a CSPRNG) with rejection sampling to keep the
+  draw uniform — the `user_code` is an online authorization handle, so it must
+  not come from the VM's non-cryptographic PRNG.
   """
   @spec generate_user_code(pos_integer()) :: String.t()
   def generate_user_code(length \\ @default_user_code_length) when is_integer(length) and length > 0 do
-    code =
-      for _ <- 1..length, into: "" do
-        <<Enum.random(@user_code_alphabet)>>
-      end
+    code = for _ <- 1..length, into: "", do: <<random_alphabet_char()>>
 
     # Hyphenate into groups of 4 for readability (purely a display affordance;
     # the separator is stripped on input).
@@ -287,6 +306,19 @@ defmodule Attesto.DeviceCode do
 
   defp all_in_alphabet?(normalized) do
     String.to_charlist(normalized) |> Enum.all?(&(&1 in @user_code_alphabet))
+  end
+
+  @alphabet_size length(@user_code_alphabet)
+  # Rejection sampling: the largest multiple of the alphabet size that fits in a
+  # byte (240 for a 20-char alphabet); bytes at or above it are discarded so the
+  # modulo is unbiased.
+  @rejection_ceiling div(256, @alphabet_size) * @alphabet_size
+
+  defp random_alphabet_char do
+    case :crypto.strong_rand_bytes(1) do
+      <<b>> when b < @rejection_ceiling -> Enum.at(@user_code_alphabet, rem(b, @alphabet_size))
+      _ -> random_alphabet_char()
+    end
   end
 
   defp unix_now(opts) do

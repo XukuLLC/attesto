@@ -95,9 +95,15 @@ defmodule Attesto.DeviceCodeStore.ETS do
 
   @impl GenServer
   def handle_call({:put, record}, _from, state) do
-    :ets.insert(@table, {record.device_code_hash, record.expires_at, record})
-    :ets.insert(@user_index, {record.user_code, record.device_code_hash})
-    {:reply, :ok, state}
+    # Reject a colliding user_code so the caller retries with a fresh one,
+    # rather than orphaning the existing flow by remapping the index.
+    if :ets.member(@user_index, record.user_code) do
+      {:reply, {:error, :user_code_taken}, state}
+    else
+      :ets.insert(@table, {record.device_code_hash, record.expires_at, record})
+      :ets.insert(@user_index, {record.user_code, record.device_code_hash})
+      {:reply, :ok, state}
+    end
   end
 
   def handle_call({:decide, user_code, new_status, approval}, _from, state) do
@@ -135,10 +141,14 @@ defmodule Attesto.DeviceCodeStore.ETS do
     {:reply, reply, state}
   end
 
-  def handle_call({:consume, hash, _opts}, _from, state) do
+  def handle_call({:consume, hash, opts}, _from, state) do
+    now = Map.get(opts, :now, System.system_time(:second))
+
     reply =
       case :ets.lookup(@table, hash) do
-        [{^hash, _expires_at, %{status: :approved} = record}] ->
+        # Guard the consume on BOTH approval and unexpiry, so a code that expires
+        # between the core's poll-time check and this transition cannot mint.
+        [{^hash, expires_at, %{status: :approved} = record}] when expires_at > now ->
           consumed = Map.put(record, :status, :consumed)
           :ets.insert(@table, {hash, record.expires_at, consumed})
           {:ok, consumed}

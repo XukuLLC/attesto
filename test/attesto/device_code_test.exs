@@ -30,6 +30,23 @@ defmodule Attesto.DeviceCodeTest do
     test "rejects a missing client_id" do
       assert {:error, :invalid_client_id} = DeviceCode.issue(Store, %{scope: ["read"]})
     end
+
+    test "retries on a user_code collision and gives up after the bounded retries" do
+      # A store that always reports the user_code as taken exhausts the retries.
+      defmodule AlwaysTakenStore do
+        def put(_record), do: {:error, :user_code_taken}
+      end
+
+      assert {:error, :user_code_unavailable} =
+               DeviceCode.issue(AlwaysTakenStore, %{client_id: "cli-1"})
+    end
+
+    test "generated user codes are well-formed and varied (CSPRNG)" do
+      codes = for _ <- 1..50, do: DeviceCode.generate_user_code()
+      assert Enum.all?(codes, &(&1 =~ ~r/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/))
+      # 50 draws from ~34.6 bits should be unique with overwhelming probability.
+      assert length(Enum.uniq(codes)) == 50
+    end
   end
 
   describe "user_code normalization (fail-closed)" do
