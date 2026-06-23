@@ -262,6 +262,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 7523 §4 | JWT-assertion grant (`jwt-bearer`; ID-JAG draft) | Supported |
 | RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (one or more resources; `Attesto.ResourceIndicator`) |
 | RFC 9470 | Step-Up Authentication Challenge (`acr`/`auth_time`) | Supported (`Attesto.StepUp`) |
+| RFC 8628 | Device Authorization Grant (`device_code`/`user_code` polling) | Supported (`Attesto.DeviceCode`) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
 | RFC 9728 | Protected Resource Metadata | Supported |

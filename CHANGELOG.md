@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **RFC 8628 Device Authorization Grant.** New `Attesto.DeviceCode` primitive
+  (issue + the §3.5 polling state machine: `authorization_pending` / `slow_down`
+  / `expired_token` / `access_denied`, expiry-beats-approval, single-use
+  consume), `Attesto.DeviceCode.Grant`, the `Attesto.DeviceCodeStore` behaviour
+  (every transition a single atomic guarded operation), and an ETS reference
+  store. The `user_code` uses an ambiguity-free base-20 alphabet and is
+  normalized + charset-validated before any store lookup. `device_authorization_endpoint`
+  is now an accepted RFC 8414 metadata field.
+
 ## [0.11.0] - 2026-06-22
 
 ### Added
