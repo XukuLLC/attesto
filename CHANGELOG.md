@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-07-04
+
+First stable release; the public API is now under semantic versioning. No
+functional change from 0.13.0.
+
+The authorization-server core (tokens, ID tokens, PKCE, DPoP, PAR, discovery,
+RP-Initiated and Back-Channel Logout) backs an OpenID Provider that passes the
+OpenID Foundation conformance suite for OpenID Connect Core (Basic), FAPI 2.0
+Security Profile Final, FAPI 2.0 Message Signing Final, RP-Initiated Logout,
+and Back-Channel Logout.
+
 ## [0.13.0] - 2026-06-23
 
 ### Added
