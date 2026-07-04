@@ -50,6 +50,11 @@ If you want a batteries-included Phoenix authorization server, use
 [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix) on top of
 this package: endpoints, router helpers, and Ecto-backed stores wired together.
 
+To protect a Model Context Protocol (MCP) server as an OAuth resource server,
+use [`attesto_mcp`](https://github.com/XukuLLC/attesto_mcp): it reuses Attesto's
+token, DPoP, and scope checks as Plug modules and adds the MCP-facing
+`WWW-Authenticate` challenge and protected-resource metadata (RFC 9728).
+
 ## Contents
 
 - [Where it fits](#where-it-fits)
