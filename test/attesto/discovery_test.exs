@@ -92,6 +92,29 @@ defmodule Attesto.DiscoveryTest do
       refute Map.has_key?(meta, "request_object_signing_alg_values_supported")
     end
 
+    test "advertises the CIBA metadata when supplied (CIBA Core §4)" do
+      meta =
+        Discovery.metadata(config(),
+          backchannel_authentication_endpoint: "https://auth.example.com/bc-authorize",
+          backchannel_token_delivery_modes_supported: ["poll", "ping"],
+          backchannel_authentication_request_signing_alg_values_supported: ["PS256", "ES256"],
+          backchannel_user_code_parameter_supported: false
+        )
+
+      assert meta["backchannel_authentication_endpoint"] == "https://auth.example.com/bc-authorize"
+      assert meta["backchannel_token_delivery_modes_supported"] == ["poll", "ping"]
+      assert meta["backchannel_authentication_request_signing_alg_values_supported"] == ["PS256", "ES256"]
+      assert meta["backchannel_user_code_parameter_supported"] == false
+    end
+
+    test "omits the CIBA metadata when not supplied" do
+      meta = Discovery.metadata(config())
+      refute Map.has_key?(meta, "backchannel_authentication_endpoint")
+      refute Map.has_key?(meta, "backchannel_token_delivery_modes_supported")
+      refute Map.has_key?(meta, "backchannel_authentication_request_signing_alg_values_supported")
+      refute Map.has_key?(meta, "backchannel_user_code_parameter_supported")
+    end
+
     test "advertises client_id_metadata_document_supported when supplied" do
       meta = Discovery.metadata(config(), client_id_metadata_document_supported: true)
       assert meta["client_id_metadata_document_supported"] == true

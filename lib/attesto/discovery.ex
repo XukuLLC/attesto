@@ -53,6 +53,10 @@ defmodule Attesto.Discovery do
     require_pushed_authorization_requests
     pushed_authorization_request_endpoint
     device_authorization_endpoint
+    backchannel_authentication_endpoint
+    backchannel_token_delivery_modes_supported
+    backchannel_authentication_request_signing_alg_values_supported
+    backchannel_user_code_parameter_supported
     end_session_endpoint
     backchannel_logout_supported
     backchannel_logout_session_supported
@@ -85,6 +89,12 @@ defmodule Attesto.Discovery do
       (`draft-ietf-oauth-client-id-metadata-document-01` §6) - a boolean
       advertising whether the server dereferences an HTTPS `client_id` URL to a
       client metadata document; included only if given.
+    * `:backchannel_authentication_endpoint`,
+      `:backchannel_token_delivery_modes_supported` (e.g. `["poll", "ping"]` -
+      FAPI-CIBA forbids `"push"`),
+      `:backchannel_authentication_request_signing_alg_values_supported`,
+      `:backchannel_user_code_parameter_supported` (CIBA Core §4) - the CIBA
+      endpoint and capability advertisement; included only if given.
 
   The accepted host fields are the RFC 8414 §2 allowlist in
   `@host_fields`; the enumeration above is illustrative. Any other opt key
