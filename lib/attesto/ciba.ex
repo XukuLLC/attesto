@@ -108,6 +108,7 @@ defmodule Attesto.CIBA do
           | :slow_down
           | :expired_token
           | :access_denied
+          | :unauthorized_client
           | :invalid_grant
 
   @typedoc """
@@ -211,34 +212,70 @@ defmodule Attesto.CIBA do
     * `:expired_token` - the `auth_req_id`'s lifetime elapsed (this wins over
       a stale approval).
     * `:access_denied` - the user denied the request (or the OP did).
+    * `:unauthorized_client` - the request was registered for push-mode
+      delivery, which (CIBA Core §11) MUST NOT be redeemed at the token
+      endpoint; the token comes over the host's push transport instead.
     * `:invalid_grant` - unknown/garbage `auth_req_id`, a client mismatch
       ("issued to another Client", §11), DPoP mismatch, or an
       already-consumed request.
+
+  All record validation - expiry, client binding, DPoP binding, push-mode
+  rejection, and terminal status - runs on a NON-mutating read BEFORE any
+  poll-interval throttling. `slow_down` is a variant of `authorization_pending`
+  (§11): it is returned only when the request is genuinely still pending, so it
+  can never mask an expired, denied, approved, consumed, wrong-client,
+  wrong-DPoP, or push-mode outcome, and an unauthorized caller can never mutate
+  another client's throttle state.
   """
   @spec redeem(module(), String.t(), map(), keyword()) :: {:ok, Grant.t()} | {:error, redeem_error()}
   def redeem(store, auth_req_id, params, opts \\ [])
       when is_atom(store) and is_binary(auth_req_id) and is_map(params) and is_list(opts) do
-    with {:ok, hash} <- presented_hash(auth_req_id, :invalid_grant) do
-      case store.poll(hash, %{now: unix_now(opts)}) do
-        {:ok, record} -> redeem_polled(store, hash, record, params, opts)
-        {:error, :slow_down} -> {:error, :slow_down}
-        :error -> {:error, :invalid_grant}
-      end
+    with {:ok, hash} <- presented_hash(auth_req_id, :invalid_grant),
+         {:ok, record} <- read_record(store, hash),
+         :ok <- check_not_expired(record, opts),
+         :ok <- check_client(record, params),
+         :ok <- check_dpop(record, params),
+         :ok <- check_not_push(record) do
+      resolve_status(store, hash, record, opts)
     end
   end
 
-  # The poll was accepted. Apply the §11 precedence: expiry first (a stale
-  # approval must not mint), then the binding checks, then the status outcome.
-  # ALL validation runs on the polled record BEFORE `consume/2`, so a client-
-  # or DPoP-mismatched request is rejected without burning the single-use
-  # auth_req_id; only an approved, unexpired, correctly-bound request reaches
-  # the atomic consume.
-  defp redeem_polled(store, hash, record, params, opts) do
-    with :ok <- check_not_expired(record, opts),
-         :ok <- check_client(record, params),
-         :ok <- check_dpop(record, params),
-         :ok <- check_status(record) do
-      consume(store, hash, opts)
+  defp read_record(store, hash) do
+    case store.lookup(hash) do
+      {:ok, record} -> {:ok, record}
+      :error -> {:error, :invalid_grant}
+    end
+  end
+
+  # Apply the §11 status outcome to a record that has already passed expiry, the
+  # binding checks, and the push-mode guard. Only a genuinely-pending request
+  # reaches `poll/2`, so the poll-interval throttle (which mutates
+  # `last_polled_at` and can yield `slow_down`) can never fire for an expired,
+  # denied, approved, consumed, wrong-client, wrong-DPoP, or push-mode request.
+  # An approved request goes to the atomic `consume/2`; a wrong-client/DPoP
+  # request never gets here, so the single-use auth_req_id is never burned by an
+  # unauthorized caller.
+  defp resolve_status(store, hash, record, opts) do
+    case record.status do
+      :approved -> consume(store, hash, opts)
+      :denied -> {:error, :access_denied}
+      :pending -> throttle_pending(store, hash, opts)
+      # consumed (or anything else) → already used.
+      _other -> {:error, :invalid_grant}
+    end
+  end
+
+  # The request is still pending: NOW apply the §7.3 poll-interval throttle.
+  # A poll accepted at the interval is `authorization_pending`; one inside the
+  # interval is its `slow_down` variant. `poll/2` re-reads inside the store's
+  # serialized transition, so a concurrent approval is not clobbered (its
+  # status is preserved; the next redeem observes it and mints).
+  defp throttle_pending(store, hash, opts) do
+    case store.poll(hash, %{now: unix_now(opts)}) do
+      {:ok, _record} -> {:error, :authorization_pending}
+      {:error, :slow_down} -> {:error, :slow_down}
+      # Vanished between the read and the poll (e.g. swept): treat as unknown.
+      :error -> {:error, :invalid_grant}
     end
   end
 
@@ -407,11 +444,14 @@ defmodule Attesto.CIBA do
 
   defp check_client(_record, _params), do: {:error, :invalid_grant}
 
-  defp check_status(%{status: :approved}), do: :ok
-  defp check_status(%{status: :pending}), do: {:error, :authorization_pending}
-  defp check_status(%{status: :denied}), do: {:error, :access_denied}
-  # consumed (or anything else) → already used.
-  defp check_status(_record), do: {:error, :invalid_grant}
+  # CIBA Core §11: a push-mode client MUST NOT redeem the CIBA grant at the
+  # token endpoint - the token is delivered over the host's push transport - so
+  # a push-mode record fails closed with `unauthorized_client`. Checked after
+  # the client/DPoP binding (a wrong caller learns `invalid_grant`, not that the
+  # request is push mode) and BEFORE any status/throttle handling, so it never
+  # consumes the request nor mutates throttle state.
+  defp check_not_push(%{data: %{delivery_mode: :push}}), do: {:error, :unauthorized_client}
+  defp check_not_push(_record), do: :ok
 
   # RFC 9449 §10 holder-of-key: a request pre-bound to a DPoP key may be
   # redeemed only with a matching proof. An unbound request accepts any (or

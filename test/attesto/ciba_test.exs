@@ -148,6 +148,72 @@ defmodule Attesto.CIBATest do
     end
   end
 
+  describe "redeem/4 — push mode is not a token-endpoint grant (§11)" do
+    test "an approved push-mode request is unauthorized_client and stays unconsumed" do
+      %{auth_req_id: id} =
+        issue(%{delivery_mode: :push, client_notification_token: @notification_token})
+
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+
+      # §11: a push-mode client MUST NOT redeem at the token endpoint.
+      assert {:error, :unauthorized_client} =
+               CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 2)
+
+      # The rejection did not burn the single-use request: it is still approved,
+      # not consumed (a repeat redeem sees the same non-minting outcome).
+      assert {:error, :unauthorized_client} =
+               CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 3)
+
+      assert {:ok, %{status: :approved}} = CIBA.lookup(Store, id)
+    end
+  end
+
+  describe "redeem/4 — validation precedes poll-interval throttling (§11)" do
+    # A large interval so that a second token request always lands "inside the
+    # interval"; the point is that throttling must never mask these outcomes.
+    test "a wrong client cannot mutate the legit client's throttle state" do
+      %{auth_req_id: id} = issue(%{}, %{}, interval: 100)
+
+      # Wrong client is rejected AND must not set last_polled_at.
+      assert {:error, :invalid_grant} = CIBA.redeem(Store, id, %{client_id: "wrong"}, now: @now + 1)
+
+      # The legit client's first poll one second later is therefore
+      # authorization_pending, never slow_down.
+      assert {:error, :authorization_pending} =
+               CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 2)
+    end
+
+    test "an expired request yields expired_token even inside the poll interval" do
+      %{auth_req_id: id} = issue(%{requested_expiry: 30}, %{}, interval: 100)
+
+      # A pending poll sets last_polled_at.
+      assert {:error, :authorization_pending} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 1)
+
+      # Now expired, but still within the 100s interval of the last poll:
+      # expiry wins over slow_down.
+      assert {:error, :expired_token} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 31)
+    end
+
+    test "an approved request yields the grant even inside the poll interval" do
+      %{auth_req_id: id} = issue(%{}, %{}, interval: 100)
+
+      assert {:error, :authorization_pending} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 1)
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 2)
+
+      # Approval inside the interval must mint, not slow_down.
+      assert {:ok, %Grant{}} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 3)
+    end
+
+    test "a denied request yields access_denied even inside the poll interval" do
+      %{auth_req_id: id} = issue(%{}, %{}, interval: 100)
+
+      assert {:error, :authorization_pending} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 1)
+      assert {:ok, _decision} = CIBA.deny(Store, id, now: @now + 2)
+
+      assert {:error, :access_denied} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 3)
+    end
+  end
+
   describe "DPoP holder-of-key pre-binding (RFC 9449 §10)" do
     test "a request bound to a dpop_jkt redeems only with the matching proof key" do
       %{auth_req_id: id} = issue(%{}, %{dpop_jkt: "jkt-abc"})
