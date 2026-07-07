@@ -98,6 +98,18 @@ defmodule Attesto.Plug.OAuthErrorTest do
                "expected no resource_metadata for #{inspect(bad)}"
       end
     end
+
+    test "a loopback http :resource_metadata is advertised (local development)" do
+      # The one admitted plain-http pointer: a loopback development resource,
+      # whose challenge would otherwise carry no discovery pointer at all.
+      url = "http://localhost:4000/.well-known/oauth-protected-resource/mcp"
+
+      conn =
+        conn(:get, "http://localhost:4000/mcp")
+        |> OAuthError.unauthorized(:bearer, "invalid_token", resource_metadata: url)
+
+      assert www_authenticate(conn) =~ ~s(resource_metadata="#{url}")
+    end
   end
 
   describe "insufficient_scope/2" do
@@ -242,12 +254,10 @@ defmodule Attesto.Plug.OAuthErrorTest do
     end
 
     test "a non-https resource_metadata is dropped on the 403 path (RFC 9728 §3)" do
-      # RFC 9728 requires an https metadata pointer; an http (incl. loopback) or
-      # malformed value is omitted rather than advertised. A host that needs an
-      # http loopback pointer in dev supplies the whole challenge via the
-      # `:www_authenticate` hook instead.
+      # RFC 9728 requires an https metadata pointer; a non-loopback http or
+      # malformed value is omitted rather than advertised. The loopback
+      # carve-out below is the local-development exception.
       for bad <- [
-            "http://localhost:9000/.well-known/oauth-protected-resource",
             "http://api.example.com/.well-known/oauth-protected-resource",
             "not-a-url"
           ] do
@@ -258,6 +268,16 @@ defmodule Attesto.Plug.OAuthErrorTest do
         refute www_authenticate(conn) =~ "resource_metadata",
                "expected no resource_metadata for #{inspect(bad)}"
       end
+    end
+
+    test "a loopback http resource_metadata is advertised on the 403 path (local development)" do
+      url = "http://localhost:9000/.well-known/oauth-protected-resource"
+
+      conn =
+        conn(:get, "http://localhost:9000/x")
+        |> OAuthError.insufficient_scope(["documents.read"], :bearer, resource_metadata: url)
+
+      assert www_authenticate(conn) =~ ~s(resource_metadata="#{url}")
     end
   end
 end

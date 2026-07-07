@@ -163,10 +163,11 @@ if Code.ensure_loaded?(Plug.Conn) do
           # blank / non-https / malformed value rather than render an unusable
           # param or crash quoting a non-string. (The Phoenix layer validates
           # this at config build; this guards a core-only caller passing it
-          # directly.) A loopback `http://` dev resource cannot use this static
-          # value - by RFC 9728 the pointer is https - so a host that needs an
-          # http loopback pointer in dev supplies the whole challenge via the
-          # `:www_authenticate` hook, which bypasses this builder.
+          # directly.) The one admitted deviation is a plain-`http` pointer at
+          # a LOOPBACK host - the local-development resource
+          # (`Attesto.LoopbackHost`) whose challenge would otherwise carry no
+          # discovery pointer at all; a non-loopback `http` value is still
+          # dropped.
           if metadata_url?(url), do: [{"resource_metadata", url}], else: []
 
         _ ->
@@ -176,10 +177,16 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp metadata_url?(url) do
       not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, url) and
-        match?(
-          {:ok, %URI{scheme: "https", host: h, fragment: nil}} when is_binary(h) and h != "",
-          URI.new(url)
-        )
+        case URI.new(url) do
+          {:ok, %URI{scheme: "https", host: h, fragment: nil}} when is_binary(h) and h != "" ->
+            true
+
+          {:ok, %URI{scheme: "http", host: h, fragment: nil}} when is_binary(h) and h != "" ->
+            Attesto.LoopbackHost.loopback?(h)
+
+          _ ->
+            false
+        end
     end
 
     defp maybe_put_dpop_nonce(conn, nil), do: conn

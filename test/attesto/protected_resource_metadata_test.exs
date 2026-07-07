@@ -62,6 +62,34 @@ defmodule Attesto.ProtectedResourceMetadataTest do
       end
     end
 
+    test "under require_https: false a loopback http resource renders (dev carve-out)" do
+      cfg =
+        config(
+          issuer: "http://localhost:4000",
+          audience: "http://localhost:4000/mcp",
+          require_https: false
+        )
+
+      assert PRM.metadata(cfg)["resource"] == "http://localhost:4000/mcp"
+
+      assert PRM.metadata(cfg, resource: "http://127.0.0.1:4000/mcp")["resource"] ==
+               "http://127.0.0.1:4000/mcp"
+    end
+
+    test "under require_https: false a NON-loopback http resource still fails fast" do
+      cfg = config(issuer: "http://localhost:4000", audience: "https://api.example.com/", require_https: false)
+
+      assert_raise ArgumentError, ~r/must be an absolute https URL/, fn ->
+        PRM.metadata(cfg, resource: "http://api.example.com/mcp")
+      end
+    end
+
+    test "under the default require_https: true a loopback http resource fails fast" do
+      assert_raise ArgumentError, ~r/must be an absolute https URL/, fn ->
+        PRM.metadata(config(), resource: "http://localhost:4000/mcp")
+      end
+    end
+
     test "every key is a string (JSON-serialisable shape)" do
       meta =
         PRM.metadata(config(),

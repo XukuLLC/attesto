@@ -413,25 +413,35 @@ defmodule Attesto.DPoP do
   defp check_htu(_claims, _opts), do: {:error, :invalid_htu}
 
   # RFC 9449 §4.3: compare the effective target URI without query/fragment.
-  # URI scheme and host are case-insensitive, and an explicit HTTPS default
-  # port is equivalent to an omitted port.
+  # URI scheme and host are case-insensitive, and an explicit scheme-default
+  # port is equivalent to an omitted port. A plain-`http` htu is admitted only
+  # for a loopback host (`Attesto.LoopbackHost`) - the local-development token
+  # endpoint. It can only ever MATCH when the expected URL (derived from the
+  # configured issuer) is itself http+loopback, which `Attesto.Config` admits
+  # only under `require_https: false`; against an https deployment the scheme
+  # in the normalized tuple still differs and the proof is rejected.
   defp normalize_htu(uri) do
     parsed = URI.parse(uri)
     scheme = parsed.scheme && String.downcase(parsed.scheme)
     host = parsed.host && String.downcase(parsed.host)
 
     cond do
-      scheme != "https" -> {:error, :invalid_htu}
+      not htu_scheme_allowed?(scheme, host) -> {:error, :invalid_htu}
       is_nil(host) or host == "" -> {:error, :invalid_htu}
       not is_nil(parsed.userinfo) -> {:error, :invalid_htu}
-      true -> {:ok, {scheme, host, normalize_htu_port(parsed.port), parsed.path || ""}}
+      true -> {:ok, {scheme, host, normalize_htu_port(scheme, parsed.port), parsed.path || ""}}
     end
   rescue
     _ -> {:error, :invalid_htu}
   end
 
-  defp normalize_htu_port(443), do: nil
-  defp normalize_htu_port(port), do: port
+  defp htu_scheme_allowed?("https", _host), do: true
+  defp htu_scheme_allowed?("http", host), do: Attesto.LoopbackHost.loopback?(host)
+  defp htu_scheme_allowed?(_scheme, _host), do: false
+
+  defp normalize_htu_port("https", 443), do: nil
+  defp normalize_htu_port("http", 80), do: nil
+  defp normalize_htu_port(_scheme, port), do: port
 
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
     now = unix_now(opts)

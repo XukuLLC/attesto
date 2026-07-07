@@ -179,6 +179,43 @@ defmodule Attesto.ConfigTest do
     end
   end
 
+  describe "new/1 require_https (loopback http development)" do
+    test "defaults to true: an http issuer is rejected even at a loopback host" do
+      assert_raise ArgumentError, ~r/must be an https URL/, fn ->
+        Config.new(base_opts(issuer: "http://localhost:4000"))
+      end
+    end
+
+    test "require_https: false admits an http issuer at a loopback host" do
+      for issuer <- [
+            "http://localhost:4000",
+            "http://app.localhost:4000",
+            "http://127.0.0.1:4000",
+            "http://[::1]:4000"
+          ] do
+        config = Config.new(base_opts(issuer: issuer, require_https: false))
+        assert config.issuer == issuer
+      end
+    end
+
+    test "require_https: false still rejects an http issuer at a non-loopback host" do
+      assert_raise ArgumentError, ~r/must be an https URL/, fn ->
+        Config.new(base_opts(issuer: "http://api.example.com", require_https: false))
+      end
+    end
+
+    test "an admitted loopback http issuer still derives the token endpoint URL" do
+      config = Config.new(base_opts(issuer: "http://localhost:4000", require_https: false))
+      assert Config.token_endpoint_url(config) == "http://localhost:4000/oauth/token"
+    end
+
+    test "raises on a non-boolean require_https" do
+      assert_raise ArgumentError, ~r/must be a boolean/, fn ->
+        Config.new(base_opts(require_https: "false"))
+      end
+    end
+  end
+
   describe "principal_kind/2" do
     test "finds a configured kind by its claim_value" do
       config = Config.new(base_opts())

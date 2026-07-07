@@ -112,24 +112,33 @@ defmodule Attesto.ProtectedResourceMetadata do
   # absolute URI with a host and no fragment (RFC 3986; RFC 9728 §2 - it is the
   # `https` URL a client dereferences), so a malformed value fails fast rather
   # than publishing a non-conformant REQUIRED member. (RFC 9728 §2 specifies the
-  # `https` scheme; that is the host's deployment choice and is not enforced here
-  # so a loopback `http` development resource still renders.)
+  # `https` scheme; under `require_https: false` a loopback `http` development
+  # resource still renders - the same carve-out `Attesto.Config` grants the
+  # issuer.)
   defp resource(config, opts) do
     case Keyword.get(opts, :resource) do
-      nil -> require_resource_identifier!(config.audience)
-      resource when is_binary(resource) and resource != "" -> require_resource_identifier!(resource)
-      other -> raise ArgumentError, malformed_resource_message(other)
+      nil ->
+        require_resource_identifier!(config.audience, config.require_https)
+
+      resource when is_binary(resource) and resource != "" ->
+        require_resource_identifier!(resource, config.require_https)
+
+      other ->
+        raise ArgumentError, malformed_resource_message(other)
     end
   end
 
   # RFC 9728 §1.2/§2: the `resource` identifier is an `https` URL with a host and
-  # no fragment. `URI.new/1` (unlike `URI.parse/1`) rejects whitespace/control
-  # characters but still accepts an invalid percent-escape (a `%` not followed by
-  # two hex digits, e.g. `%ZZ`), so that is rejected explicitly first.
-  defp require_resource_identifier!(url) do
+  # no fragment (`http` admitted only for a loopback host under
+  # `require_https: false`). `URI.new/1` (unlike `URI.parse/1`) rejects
+  # whitespace/control characters but still accepts an invalid percent-escape (a
+  # `%` not followed by two hex digits, e.g. `%ZZ`), so that is rejected
+  # explicitly first.
+  defp require_resource_identifier!(url, require_https) do
     with false <- invalid_percent_encoding?(url),
-         {:ok, %URI{scheme: "https", host: host, fragment: nil}} <- URI.new(url),
-         true <- is_binary(host) and host != "" do
+         {:ok, %URI{scheme: scheme, host: host, fragment: nil}} <- URI.new(url),
+         true <- is_binary(host) and host != "",
+         true <- scheme == "https" or (scheme == "http" and not require_https and Attesto.LoopbackHost.loopback?(host)) do
       url
     else
       _ -> raise ArgumentError, malformed_resource_message(url)

@@ -29,6 +29,13 @@ defmodule Attesto.Config do
       mounted at, used to derive `token_endpoint_url/1` (the URL a DPoP
       proof's `htu` must sign, and the URL OAuth metadata would publish).
       Defaults to `"/oauth/token"`.
+    * `:require_https` - enforce the RFC 8414 §2 `https` scheme on the
+      issuer. Defaults to `true`. Setting `false` admits a plain-`http`
+      issuer ONLY when its host is the loopback interface
+      (`Attesto.LoopbackHost.loopback?/1`: `localhost`, `*.localhost`,
+      `127.0.0.0/8`, `::1`) - the local-development case where TLS adds no
+      transport security (the RFC 8252 §8.3 loopback reasoning). A
+      non-loopback `http` issuer is rejected regardless of this flag.
 
   ## Reserved claims
 
@@ -50,7 +57,8 @@ defmodule Attesto.Config do
     principal_kind_claim: "principal_kind",
     default_lifetime_seconds: 900,
     token_endpoint_path: "/oauth/token",
-    access_token_header_typ: "at+jwt"
+    access_token_header_typ: "at+jwt",
+    require_https: true
   ]
 
   @type t :: %__MODULE__{
@@ -61,7 +69,8 @@ defmodule Attesto.Config do
           principal_kind_claim: String.t(),
           default_lifetime_seconds: pos_integer(),
           token_endpoint_path: String.t(),
-          access_token_header_typ: String.t() | nil
+          access_token_header_typ: String.t() | nil,
+          require_https: boolean()
         }
 
   # `acr` / `auth_time` are the RFC 9470 / OIDC Core authentication-context
@@ -101,8 +110,9 @@ defmodule Attesto.Config do
   def new(opts) when is_list(opts) do
     config = struct!(__MODULE__, opts)
 
+    validate_boolean!(:require_https, config.require_https)
     validate_binary!(:issuer, config.issuer)
-    validate_issuer_url!(config.issuer)
+    validate_issuer_url!(config.issuer, config.require_https)
     validate_binary!(:audience, config.audience)
     validate_keystore!(config.keystore)
     validate_principal_kind_claim!(config.principal_kind_claim)
@@ -146,14 +156,19 @@ defmodule Attesto.Config do
   # RFC 8414 §2: the issuer identifier MUST be an `https` URL with a host
   # and no query or fragment. The same value is the JWT `iss`, so enforcing
   # the metadata shape here keeps a misconfigured deployment from
-  # publishing (and minting tokens under) a non-conformant issuer.
-  defp validate_issuer_url!(issuer) do
+  # publishing (and minting tokens under) a non-conformant issuer. The one
+  # deviation is `require_https: false` + a loopback host: plain `http` to
+  # loopback never leaves the machine (RFC 8252 §8.3's reasoning), so a
+  # local-development issuer like `http://localhost:4000` is admitted.
+  defp validate_issuer_url!(issuer, require_https) do
     uri = URI.parse(issuer)
 
     cond do
-      uri.scheme != "https" ->
+      not issuer_scheme_allowed?(uri, require_https) ->
         raise ArgumentError,
-              "Attesto.Config :issuer must be an https URL (RFC 8414 §2); got #{inspect(issuer)}"
+              "Attesto.Config :issuer must be an https URL (RFC 8414 §2); got #{inspect(issuer)}. " <>
+                "Plain http is admitted only for a loopback host (localhost, *.localhost, " <>
+                "127.0.0.0/8, ::1) with `require_https: false`."
 
       uri.host in [nil, ""] ->
         raise ArgumentError, "Attesto.Config :issuer must include a host; got #{inspect(issuer)}"
@@ -170,6 +185,18 @@ defmodule Attesto.Config do
 
       true ->
         :ok
+    end
+  end
+
+  defp issuer_scheme_allowed?(%URI{scheme: "https"}, _require_https), do: true
+
+  defp issuer_scheme_allowed?(%URI{scheme: "http", host: host}, false), do: Attesto.LoopbackHost.loopback?(host)
+
+  defp issuer_scheme_allowed?(_uri, _require_https), do: false
+
+  defp validate_boolean!(field, value) do
+    if !is_boolean(value) do
+      raise ArgumentError, "Attesto.Config #{field} must be a boolean; got #{inspect(value)}"
     end
   end
 

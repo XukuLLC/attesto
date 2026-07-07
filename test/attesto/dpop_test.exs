@@ -404,6 +404,27 @@ defmodule Attesto.DPoPTest do
       assert {:error, :invalid_htu} = DPoP.verify_proof(proof, base_opts(http_uri: live_uri))
     end
 
+    test "accepts an http htu at a loopback host (local development token endpoint)" do
+      live_uri = "http://localhost:4000/oauth/token"
+      {proof, _jkt} = Factory.dpop_proof(htu: live_uri)
+
+      assert {:ok, _} = DPoP.verify_proof(proof, base_opts(http_uri: live_uri))
+    end
+
+    test "an explicit http default port is equivalent to an omitted one at loopback" do
+      {proof, _jkt} = Factory.dpop_proof(htu: "http://localhost:80/oauth/token")
+
+      assert {:ok, _} =
+               DPoP.verify_proof(proof, base_opts(http_uri: "http://localhost/oauth/token"))
+    end
+
+    test "a loopback http htu never matches an https deployment (no downgrade)" do
+      {proof, _jkt} = Factory.dpop_proof(htu: "http://localhost/oauth/token")
+
+      assert {:error, :invalid_htu} =
+               DPoP.verify_proof(proof, base_opts(http_uri: "https://localhost/oauth/token"))
+    end
+
     test "rejects htu with other non-https schemes (ws://, file://, javascript:)" do
       for scheme <- ["ws://", "wss://", "file://", "javascript:"] do
         uri = scheme <> "api.example.com/oauth/token"
