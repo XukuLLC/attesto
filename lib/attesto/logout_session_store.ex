@@ -1,18 +1,21 @@
 defmodule Attesto.LogoutSessionStore do
   @moduledoc """
-  Storage seam for OpenID Connect Back-Channel Logout 1.0.
+  Storage seam for OpenID Connect Back-Channel Logout 1.0 and Front-Channel
+  Logout 1.0.
 
-  Back-Channel Logout requires the OP to deliver a `logout_token` to every
-  Relying Party that holds a session for the End-User when that session ends.
-  To do that the OP must remember, for each `(session, RP)` pair, where to
-  send the token. This behaviour is that memory: a row is recorded each time
-  an ID Token is minted to a back-channel-logout-capable client (the OP is the
-  party that mints those tokens, so it is the natural place to record the
-  binding), and enumerated when the end-session endpoint fires.
+  Both logout mechanisms require the OP to remember which Relying Parties hold
+  a session for the End-User so it can notify them when that session ends:
+  Back-Channel Logout by POSTing a signed `logout_token` to the RP's
+  `backchannel_logout_uri` (Back-Channel Logout 1.0 §2.5), Front-Channel
+  Logout by rendering the RP's `frontchannel_logout_uri` in an iframe on the
+  logout page (Front-Channel Logout 1.0 §3). This behaviour is that memory: a
+  row is recorded each time an ID Token is minted to a logout-capable client
+  (the OP is the party that mints those tokens, so it is the natural place to
+  record the binding), and enumerated when the end-session endpoint fires.
 
   This is **not** the browser login session — attesto never models that; the
   host owns login and supplies the `sid`. This store only persists the OP-side
-  `(sid, client_id) -> backchannel_logout_uri` delivery map, exactly as
+  `(sid, client_id) -> logout URIs` delivery map, exactly as
   `Attesto.RefreshStore` persists issued refresh families. Killing the actual
   login state remains a host concern (the end-session controller's
   `:terminate_session` callback).
@@ -26,23 +29,35 @@ defmodule Attesto.LogoutSessionStore do
     * `:subject` - the `sub` the session authenticated. The per-subject key,
       used when logout is requested without a `sid`.
     * `:client_id` - the Relying Party that received the ID Token.
-    * `:backchannel_logout_uri` - where the `logout_token` is POSTed.
+    * `:backchannel_logout_uri` - where the `logout_token` is POSTed, or `nil`
+      for an RP that is not back-channel-logout capable.
     * `:session_required` - the client's `backchannel_logout_session_required`
       (whether its `logout_token` MUST carry `sid`).
+    * `:frontchannel_logout_uri` - the RP URL the logout page renders in an
+      iframe (Front-Channel Logout 1.0 §2), or `nil` for an RP that is not
+      front-channel-logout capable.
+    * `:frontchannel_session_required` - the client's
+      `frontchannel_logout_session_required` (whether the rendered URI must
+      carry `iss` and `sid` query parameters).
     * `:expires_at` - absolute expiry, unix seconds (so abandoned sessions are
       swept; mirror the ID Token / session lifetime).
+
+  A record carries at least one of the two logout URIs — a client with
+  neither registers no logout session at all.
 
   `record/1` is idempotent on `(sid, client_id)`: re-issuing an ID Token for a
   session the RP already has refreshes the row rather than duplicating it.
   """
 
-  @typedoc "A stored back-channel-logout session record (see the module docs)."
+  @typedoc "A stored logout session record (see the module docs)."
   @type entry :: %{
           required(:sid) => String.t(),
           required(:subject) => String.t(),
           required(:client_id) => String.t(),
-          required(:backchannel_logout_uri) => String.t(),
-          required(:session_required) => boolean(),
+          optional(:backchannel_logout_uri) => String.t() | nil,
+          optional(:session_required) => boolean(),
+          optional(:frontchannel_logout_uri) => String.t() | nil,
+          optional(:frontchannel_session_required) => boolean(),
           required(:expires_at) => non_neg_integer()
         }
 
@@ -53,18 +68,25 @@ defmodule Attesto.LogoutSessionStore do
   """
   @type criteria :: %{optional(:sid) => String.t() | nil, optional(:subject) => String.t() | nil}
 
-  @typedoc "A fan-out target: one RP to deliver a `logout_token` to."
+  @typedoc """
+  A fan-out target: one RP to notify. `:backchannel_logout_uri` drives the
+  `logout_token` POST; `:frontchannel_logout_uri` drives the logout page's
+  iframe. Either may be `nil` (never both).
+  """
   @type target :: %{
           required(:client_id) => String.t(),
-          required(:backchannel_logout_uri) => String.t(),
+          required(:backchannel_logout_uri) => String.t() | nil,
           required(:sid) => String.t() | nil,
-          required(:session_required) => boolean()
+          required(:session_required) => boolean(),
+          required(:frontchannel_logout_uri) => String.t() | nil,
+          required(:frontchannel_session_required) => boolean()
         }
 
   @doc """
   Record (idempotently on `(sid, client_id)`) that `client_id` holds a
-  back-channel-logout-capable session `sid` for `subject`, reachable at
-  `backchannel_logout_uri`. Called when an ID Token is minted to such a client.
+  logout-capable session `sid` for `subject`, reachable at the entry's
+  back-channel and/or front-channel logout URI. Called when an ID Token is
+  minted to such a client.
   """
   @callback record(entry()) :: :ok
 

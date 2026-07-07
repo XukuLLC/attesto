@@ -60,6 +60,9 @@ defmodule Attesto.Discovery do
     end_session_endpoint
     backchannel_logout_supported
     backchannel_logout_session_supported
+    frontchannel_logout_supported
+    frontchannel_logout_session_supported
+    check_session_iframe
     require_signed_request_object
     request_object_signing_alg_values_supported
     client_id_metadata_document_supported
