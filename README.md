@@ -14,12 +14,20 @@ A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://op
 
 <a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
-Attesto 1.0.0 is [OpenID Certified](https://openid.net/certification/certified-openid-connect-implementations/)
-by Xuku LLC to the **Basic OP**, **RP-Initiated Logout OP**, and **Back-Channel
-Logout OP** profiles of the OpenID Connect protocol, as an authorization server
-built from `attesto` + [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix).
+Attesto is [OpenID Certified](https://openid.net/certification/certified-openid-connect-implementations/)
+by Xuku LLC, as an authorization server built from `attesto` +
+[`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix), to:
+
+- **FAPI 2.0 Security Profile Final — OP** and **FAPI 2.0 Message Signing
+  Final — OP** ([Financial-grade API](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/))
+- **OpenID Connect Core — Basic OP**
+- **RP-Initiated Logout — OP** and **Back-Channel Logout — OP**
+
 Certification runs against the OpenID Foundation's conformance suite and the
-results are published on the OIDF site.
+results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade
+sender-constrained ([DPoP](https://datatracker.ietf.org/doc/html/rfc9449) /
+mTLS) tokens with signed request objects (JAR) and responses (JARM) — are the
+first for an Elixir provider.
 
 ## Where it fits
 
