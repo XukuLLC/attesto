@@ -92,6 +92,26 @@ defmodule Attesto.DiscoveryTest do
       refute Map.has_key?(meta, "request_object_signing_alg_values_supported")
     end
 
+    test "advertises the front-channel logout and session-management metadata when supplied" do
+      meta =
+        Discovery.metadata(config(),
+          frontchannel_logout_supported: true,
+          frontchannel_logout_session_supported: true,
+          check_session_iframe: "https://auth.example.com/oauth/check_session"
+        )
+
+      assert meta["frontchannel_logout_supported"] == true
+      assert meta["frontchannel_logout_session_supported"] == true
+      assert meta["check_session_iframe"] == "https://auth.example.com/oauth/check_session"
+    end
+
+    test "omits the front-channel logout and session-management metadata when not supplied" do
+      meta = Discovery.metadata(config())
+      refute Map.has_key?(meta, "frontchannel_logout_supported")
+      refute Map.has_key?(meta, "frontchannel_logout_session_supported")
+      refute Map.has_key?(meta, "check_session_iframe")
+    end
+
     test "advertises client_id_metadata_document_supported when supplied" do
       meta = Discovery.metadata(config(), client_id_metadata_document_supported: true)
       assert meta["client_id_metadata_document_supported"] == true

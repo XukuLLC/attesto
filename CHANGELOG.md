@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **OpenID Connect Front-Channel Logout 1.0 (OP side).**
+  - `Attesto.FrontChannelLogout.logout_uri/3` builds the exact URI an OP
+    logout page loads in an iframe for one Relying Party: the registered
+    `frontchannel_logout_uri` with `iss` + `sid` query parameters appended
+    whenever the session's `sid` is known (both together or neither, §2).
+  - `Attesto.LogoutSessionStore` records both logout channels: an entry now
+    carries `frontchannel_logout_uri` / `frontchannel_session_required`
+    alongside the back-channel fields, and `backchannel_logout_uri` is
+    optional — a row exists for any RP that registered at least one logout
+    URI.
+  - `Attesto.Discovery` accepts the `frontchannel_logout_supported` and
+    `frontchannel_logout_session_supported` host members (§3).
+- **OpenID Connect Session Management 1.0 (OP side).**
+  - `Attesto.SessionState` computes the §3.2 `session_state` value
+    (lowercase-hex SHA-256 over `client_id <> " " <> origin <> " " <>
+    op_browser_state <> " " <> salt`, dot, salt) plus the browser-form
+    `origin/1` of a `redirect_uri` and the salt / OP-browser-state generators
+    — the pure computation the OP's authorization response and the
+    `check_session_iframe`'s JavaScript recomputation must agree on.
+  - `Attesto.Discovery` accepts the `check_session_iframe` host member (§3.3).
+
 ## [1.0.0] - 2026-07-04
 
 First stable release; the public API is now under semantic versioning. No
