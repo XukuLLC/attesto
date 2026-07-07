@@ -6,8 +6,20 @@
 [![Elixir CI](https://github.com/XukuLLC/attesto/actions/workflows/elixir.yml/badge.svg)](https://github.com/XukuLLC/attesto/actions/workflows/elixir.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/XukuLLC/attesto/blob/main/LICENSE)
 [![Elixir](https://img.shields.io/badge/elixir-%E2%89%A5%201.18-purple)](https://elixir-lang.org)
+[![OpenID Certified](https://img.shields.io/badge/OpenID-Certified-F78C40)](https://openid.net/certification/certified-openid-connect-implementations/)
 
 A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://openid.net/developers/how-connect-works/) engine for Elixir APIs that need modern token security, with first-class support for sender-constrained access tokens: [DPoP](https://datatracker.ietf.org/doc/html/rfc9449) and mutual TLS. It also provides the conn-free protocol pieces for JAR, JARM, token introspection, and FAPI 2.0 Message Signing.
+
+## Certification
+
+<a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
+
+Attesto 1.0.0 is [OpenID Certified](https://openid.net/certification/certified-openid-connect-implementations/)
+by Xuku LLC to the **Basic OP**, **RP-Initiated Logout OP**, and **Back-Channel
+Logout OP** profiles of the OpenID Connect protocol, as an authorization server
+built from `attesto` + [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix).
+Certification runs against the OpenID Foundation's conformance suite and the
+results are published on the OIDF site.
 
 ## Where it fits
 
@@ -57,6 +69,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
 
 ## Contents
 
+- [Certification](#certification)
 - [Where it fits](#where-it-fits)
 - [Why this library](#why-this-library)
 - [Installation](#installation)
