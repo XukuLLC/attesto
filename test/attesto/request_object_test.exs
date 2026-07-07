@@ -280,6 +280,102 @@ defmodule Attesto.RequestObjectTest do
     end
   end
 
+  describe ":require_iat and :require_jti (CIBA Core §7.1.1)" do
+    test "default accepts an object without iat or jti" do
+      key = ec_key()
+      jwt = sign_without(key, "iat")
+
+      assert {:ok, _params} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+
+    test "require_iat rejects an object without iat" do
+      key = ec_key()
+      jwt = sign_without(key, "iat")
+
+      assert {:error, :invalid_request_object} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [require_iat: true]
+               )
+    end
+
+    test "require_iat accepts an object with a valid iat" do
+      key = ec_key()
+      jwt = request_object(key)
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [require_iat: true]
+               )
+    end
+
+    test "require_jti rejects a missing, empty, or non-string jti" do
+      key = ec_key()
+
+      for claims <- [%{}, %{"jti" => ""}, %{"jti" => 42}] do
+        jwt = request_object(key, claims)
+
+        assert {:error, :invalid_request_object} =
+                 RequestObject.verify(
+                   jwt,
+                   %{"keys" => [public_jwk(key)]},
+                   base_opts() ++ [require_jti: true]
+                 ),
+               "expected reject for #{inspect(claims)}"
+      end
+    end
+
+    test "require_jti accepts an object with a jti" do
+      key = ec_key()
+      jwt = request_object(key, %{"jti" => "jti-1"})
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [require_jti: true]
+               )
+    end
+  end
+
+  describe ":require_client_id_claim (CIBA Core §7.1.1 profile)" do
+    test "default requires the client_id claim to match iss" do
+      key = ec_key()
+      jwt = sign_without(key, "client_id")
+
+      assert {:error, :invalid_issuer} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+
+    test "when disabled, iss alone names the client and is still matched against :issuer" do
+      key = ec_key()
+      jwt = sign_without(key, "client_id")
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [require_client_id_claim: false]
+               )
+
+      # A wrong iss still fails against the caller-supplied :issuer.
+      wrong_iss = request_object(key, %{"iss" => "someone-else"})
+
+      assert {:error, :invalid_issuer} =
+               RequestObject.verify(
+                 wrong_iss,
+                 %{"keys" => [public_jwk(key)]},
+                 issuer: @issuer,
+                 audience: @audience,
+                 require_client_id_claim: false
+               )
+    end
+  end
+
   describe ":accepted_typ" do
     test "default accepts any typ including absence" do
       key = ec_key()

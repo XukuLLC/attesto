@@ -20,6 +20,9 @@ defmodule Attesto.RequestObject do
           | {:require_nbf, boolean()}
           | {:max_nbf_age_seconds, pos_integer() | nil}
           | {:require_exp, boolean()}
+          | {:require_iat, boolean()}
+          | {:require_jti, boolean()}
+          | {:require_client_id_claim, boolean()}
           | {:max_lifetime_seconds, pos_integer() | nil}
           | {:accepted_typ, [String.t() | nil] | nil}
         ]
@@ -54,6 +57,18 @@ defmodule Attesto.RequestObject do
       Defaults to `nil` (no lower bound).
     * `:require_exp` - when `true`, reject an object without an `exp` claim.
       Defaults to `false`.
+    * `:require_iat` - when `true`, reject an object without a valid `iat`
+      NumericDate claim. Defaults to `false`. (CIBA Core §7.1.1 makes `iat`
+      REQUIRED in a signed authentication request.)
+    * `:require_jti` - when `true`, reject an object without a non-empty
+      string `jti` claim. Defaults to `false`. (CIBA Core §7.1.1 makes `jti`
+      REQUIRED; replay tracking against it is the caller's concern.)
+    * `:require_client_id_claim` - when `false`, skip the requirement that the
+      object carry a `client_id` claim equal to `iss`. RFC 9101 request
+      objects carry `client_id`; a CIBA signed authentication request
+      (CIBA Core §7.1.1) does not - its `iss` alone names the client and is
+      still matched against the caller-supplied `:issuer`. Defaults to `true`
+      (the RFC 9101 behaviour).
     * `:max_lifetime_seconds` - when set, require valid `nbf` and `exp`
       NumericDate anchors and reject an `exp` greater than `nbf + N`. Defaults
       to `nil` (no lifetime bound).
@@ -72,12 +87,13 @@ defmodule Attesto.RequestObject do
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
          :ok <- check_no_nested_request(claims),
-         :ok <- check_claim_issuer(claims),
+         :ok <- check_claim_issuer(claims, opts),
          :ok <- check_issuer(claims, Keyword.get(opts, :issuer)),
          :ok <- check_audience(claims, Keyword.get(opts, :audience)),
          :ok <- check_expiry(claims, opts),
          :ok <- check_iat(claims, opts),
          :ok <- check_nbf(claims, opts),
+         :ok <- check_jti(claims, opts),
          :ok <- check_lifetime(claims, opts) do
       {:ok, claims_to_params(claims)}
     end
@@ -139,10 +155,20 @@ defmodule Attesto.RequestObject do
     end
   end
 
-  defp check_claim_issuer(%{"client_id" => client_id, "iss" => client_id})
-       when is_binary(client_id) and client_id != "", do: :ok
-
-  defp check_claim_issuer(_claims), do: {:error, :invalid_issuer}
+  # RFC 9101 request objects carry a `client_id` claim that must equal `iss`.
+  # A profile whose objects name the client through `iss` alone (CIBA Core
+  # §7.1.1) opts out with `require_client_id_claim: false`; `iss` is still
+  # matched against the caller-supplied `:issuer` in `check_issuer/2`.
+  defp check_claim_issuer(claims, opts) do
+    if Keyword.get(opts, :require_client_id_claim, true) do
+      case claims do
+        %{"client_id" => client_id, "iss" => client_id} when is_binary(client_id) and client_id != "" -> :ok
+        _ -> {:error, :invalid_issuer}
+      end
+    else
+      :ok
+    end
+  end
 
   defp check_issuer(_claims, nil), do: {:error, :invalid_issuer}
   defp check_issuer(%{"iss" => iss}, iss), do: :ok
@@ -185,7 +211,28 @@ defmodule Attesto.RequestObject do
   end
 
   defp check_iat(%{"iat" => _}, _opts), do: {:error, :not_yet_valid}
-  defp check_iat(_claims, _opts), do: :ok
+
+  # Under `require_iat: true` (CIBA Core §7.1.1) a missing `iat` is a failure;
+  # a present one was validated above.
+  defp check_iat(_claims, opts) do
+    if Keyword.get(opts, :require_iat, false) == true,
+      do: {:error, :invalid_request_object},
+      else: :ok
+  end
+
+  # Under `require_jti: true` (CIBA Core §7.1.1) the object must carry a
+  # non-empty string `jti`. Uniqueness/replay tracking is the caller's concern;
+  # this verifier is stateless.
+  defp check_jti(claims, opts) do
+    if Keyword.get(opts, :require_jti, false) == true do
+      case Map.get(claims, "jti") do
+        jti when is_binary(jti) and jti != "" -> :ok
+        _ -> {:error, :invalid_request_object}
+      end
+    else
+      :ok
+    end
+  end
 
   # RFC 7519 §4.1.5 not-before + RFC 9101 / FAPI Message Signing 2.0 §5.3.1
   # strict-JAR policy. Whenever `nbf` is present as a NumericDate it must not
