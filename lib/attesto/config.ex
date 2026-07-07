@@ -153,7 +153,13 @@ defmodule Attesto.Config do
     cond do
       uri.scheme != "https" ->
         raise ArgumentError,
-              "Attesto.Config :issuer must be an https URL (RFC 8414 §2); got #{inspect(issuer)}"
+              "Attesto.Config :issuer must be an https URL (RFC 8414 §2); got #{inspect(issuer)}. " <>
+                "For local development, don't downgrade to http — serve a locally-trusted " <>
+                "certificate so the issuer stays https. The quickest path is mkcert " <>
+                "(https://github.com/FiloSottile/mkcert): `mkcert -install` once, then " <>
+                "`mkcert -cert-file priv/cert/localhost.pem -key-file priv/cert/localhost-key.pem " <>
+                "localhost 127.0.0.1 ::1`, and point your endpoint's `https:` listener at that pair. " <>
+                "See the attesto_phoenix local-HTTPS guide."
 
       uri.host in [nil, ""] ->
         raise ArgumentError, "Attesto.Config :issuer must include a host; got #{inspect(issuer)}"
