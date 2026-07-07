@@ -68,4 +68,64 @@ defmodule Attesto.SessionStateTest do
       assert length(Enum.uniq(states)) == 32
     end
   end
+
+  describe "mint_browser_state/2 + browser_state_valid?/3 (OP-owned, login-bound)" do
+    @secret :crypto.strong_rand_bytes(32)
+    @binding "user-42\n1700000000\nsid-1"
+
+    test "a freshly minted value verifies for its own secret and login binding" do
+      value = SessionState.mint_browser_state(@secret, @binding)
+      assert SessionState.browser_state_valid?(@secret, value, @binding)
+    end
+
+    test "the value is a valid op_browser_state: no space, three base64url parts" do
+      value = SessionState.mint_browser_state(@secret, @binding)
+
+      refute value =~ " "
+      assert [random, login_tag, mac] = String.split(value, ".", parts: 3)
+
+      for part <- [random, login_tag, mac] do
+        assert part =~ ~r/\A[A-Za-z0-9_-]+\z/
+      end
+    end
+
+    test "each mint has fresh random entropy (values differ) but all verify" do
+      values = for _ <- 1..16, do: SessionState.mint_browser_state(@secret, @binding)
+
+      assert length(Enum.uniq(values)) == 16
+      assert Enum.all?(values, &SessionState.browser_state_valid?(@secret, &1, @binding))
+    end
+
+    test "a value not minted by this OP (wrong/forged) is rejected" do
+      value = SessionState.mint_browser_state(@secret, @binding)
+
+      # Wrong secret.
+      refute SessionState.browser_state_valid?(:crypto.strong_rand_bytes(32), value, @binding)
+      # An attacker-known, un-MAC'd string (the injected-cookie attack).
+      refute SessionState.browser_state_valid?(@secret, "known-injected-value", @binding)
+      # A tampered MAC.
+      [random, login_tag, _mac] = String.split(value, ".", parts: 3)
+      refute SessionState.browser_state_valid?(@secret, "#{random}.#{login_tag}.forged", @binding)
+    end
+
+    test "a value bound to a different login state is rejected (rotation trigger)" do
+      value = SessionState.mint_browser_state(@secret, @binding)
+
+      refute SessionState.browser_state_valid?(@secret, value, "user-42\n1700009999\nsid-1")
+      refute SessionState.browser_state_valid?(@secret, value, "user-99\n1700000000\nsid-1")
+      refute SessionState.browser_state_valid?(@secret, value, "user-42\n1700000000\nsid-2")
+      # Still valid for the exact same binding.
+      assert SessionState.browser_state_valid?(@secret, value, @binding)
+    end
+
+    test "a swapped login_tag from a valid value does not verify (login tag is MAC-bound)" do
+      value = SessionState.mint_browser_state(@secret, "user-1\n1\n")
+      other = SessionState.mint_browser_state(@secret, "user-2\n2\n")
+      [random, _tag, mac] = String.split(value, ".", parts: 3)
+      [_r2, other_tag, _m2] = String.split(other, ".", parts: 3)
+
+      # Splice user-2's login tag onto user-1's value: the MAC no longer covers it.
+      refute SessionState.browser_state_valid?(@secret, "#{random}.#{other_tag}.#{mac}", "user-2\n2\n")
+    end
+  end
 end

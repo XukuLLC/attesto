@@ -30,7 +30,33 @@ defmodule Attesto.SessionState do
   Like the rest of attesto core this module is pure: the host owns the browser
   state cookie and the `check_session_iframe` page; this module owns the
   computation both sides must agree on.
+
+  ## OP-owned, login-bound browser state
+
+  The `session_state` recipe treats `op_browser_state` as an opaque string, so
+  the OP is free to give that string internal structure. Session Management
+  requires the OP browser state to be **OP-owned** (an RP-visible / injected
+  value must not be able to forge `unchanged`) and to **change when the
+  End-User's login state changes** (§3.2). `mint_browser_state/2` and
+  `browser_state_valid?/3` give the value both properties without changing what
+  the iframe hashes:
+
+      random . login_tag . mac
+
+    * `random` — fresh 128-bit entropy, unguessable cross-origin;
+    * `login_tag` — `HMAC(secret, login_binding)`, a stable fingerprint of the
+      current End-User login state (subject / auth_time / sid); a re-auth or
+      account switch changes it, so a stale cookie fails `browser_state_valid?/3`
+      and the OP rotates;
+    * `mac` — `HMAC(secret, random . login_tag)`, so a value the OP did not mint
+      (a cookie injected by a sibling/parent-domain origin) cannot verify.
+
+  Only the OP knows `secret`. The whole `random . login_tag . mac` string is
+  still what `compute/4` hashes as `op_browser_state`, so the iframe recipe is
+  unchanged.
   """
+
+  alias Attesto.SecureCompare
 
   # 128-bit values: the salt only needs to be unique per response, and the
   # browser state unguessable enough that it cannot be predicted cross-origin.
@@ -87,6 +113,66 @@ defmodule Attesto.SessionState do
   @spec generate_browser_state() :: String.t()
   def generate_browser_state do
     @entropy_bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+  end
+
+  @doc """
+  Mint an OP browser-state value that is OP-owned and bound to the End-User's
+  current login state (see the module doc).
+
+  `secret` is an OP-only HMAC key; `login_binding` is a caller-chosen string
+  that captures the current login state (e.g. `subject`, `auth_time`, and `sid`
+  joined together). The returned `random . login_tag . mac` string contains no
+  space or `.`-ambiguity in its parts (each part is base64url-no-pad), so it is
+  a valid `op_browser_state` for `compute/4` and splits back cleanly in
+  `browser_state_valid?/3`.
+  """
+  @spec mint_browser_state(binary(), binary()) :: String.t()
+  def mint_browser_state(secret, login_binding)
+      when is_binary(secret) and is_binary(login_binding) do
+    payload = generate_browser_state() <> "." <> login_tag(secret, login_binding)
+    payload <> "." <> mac(secret, payload)
+  end
+
+  @doc """
+  Whether `value` is an OP browser-state string this OP minted (under `secret`)
+  for the current `login_binding`.
+
+  Returns `false` — so the caller mints a fresh value — when either:
+
+    * the value is malformed or its MAC does not verify: a value the OP never
+      minted (a forged / cross-origin-injected cookie), which must not be
+      trusted as authoritative browser state; or
+    * the MAC verifies but the embedded `login_tag` is for a different login
+      state: the End-User re-authenticated or switched accounts, so the OP
+      browser state MUST rotate (Session Management 1.0 §3.2) and any earlier
+      RP `session_state` becomes `changed`.
+
+  Both comparisons are constant-time.
+  """
+  @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
+  def browser_state_valid?(secret, value, login_binding)
+      when is_binary(secret) and is_binary(value) and is_binary(login_binding) do
+    case String.split(value, ".", parts: 3) do
+      [random, login_tag, mac] ->
+        SecureCompare.equal?(mac, mac(secret, random <> "." <> login_tag)) and
+          SecureCompare.equal?(login_tag, login_tag(secret, login_binding))
+
+      _ ->
+        false
+    end
+  end
+
+  # HMAC over the login binding, domain-separated from the value MAC. Rotating
+  # when this tag changes is what makes an account switch / prompt=login /
+  # max_age=0 re-auth flip a stale `session_state` to `changed` (§3.2).
+  defp login_tag(secret, login_binding), do: hmac(secret, "attesto.opbs.login:" <> login_binding)
+
+  # HMAC binding the OP as the author of `random . login_tag`, domain-separated
+  # from the login tag. An injected/forged cookie cannot produce a verifying mac.
+  defp mac(secret, payload), do: hmac(secret, "attesto.opbs.mac:" <> payload)
+
+  defp hmac(secret, data) do
+    :hmac |> :crypto.mac(:sha256, secret, data) |> Base.url_encode64(padding: false)
   end
 
   # A default port is omitted from a browser origin; any other port is kept.
