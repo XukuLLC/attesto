@@ -31,6 +31,22 @@ defmodule Attesto.CIBA.Request do
   requests be signed (`require_signed_request: true`) and bounds the
   `nbf`→`exp` lifetime to 60 minutes (the `:max_request_lifetime_seconds`
   default).
+
+  Each known CIBA authentication-request parameter carried in the signed JWT
+  (`scope`, the hints, `binding_message`, `user_code`, `acr_values`,
+  `client_notification_token`) MUST be a JSON string per §7.1.1; a non-string
+  value is rejected as `invalid_request` rather than coerced. `requested_expiry`
+  may be a string or a number.
+
+  ## Replay defense (FAPI-CIBA §5.2.2)
+
+  A verified signed request exposes its `jti` and `exp` on the returned struct
+  as `request_jti` / `request_exp` (both `nil` for an unsigned request). The
+  core does NOT track `jti` - it is stateless by design - so **the host MUST
+  record each signed request's `request_jti` for the request's lifetime (until
+  `request_exp`) and reject a repeat** at the `validate/3` boundary. Without
+  this, a captured signed authentication request can be replayed to start
+  duplicate CIBA transactions within its lifetime.
   """
 
   alias Attesto.RequestObject
@@ -38,6 +54,17 @@ defmodule Attesto.CIBA.Request do
   alias Attesto.SigningAlg
 
   @hint_params ~w(login_hint login_hint_token id_token_hint)
+
+  # CIBA Core §7.1.1: the known authentication-request parameters MUST be JSON
+  # strings in a signed request (a non-string value is invalid_request, not a
+  # coerced string). `requested_expiry` is deliberately excluded - §7.1.1 lets
+  # it be a string OR a number - as are extension claims, which may be other
+  # JSON types. This is CIBA-signed-request specific: RFC 9101 JAR keeps the
+  # lenient claim coercion.
+  @signed_string_params ~w(
+    scope login_hint login_hint_token id_token_hint binding_message
+    user_code acr_values client_notification_token
+  )
 
   # RFC 6750 §2.1 b64token syntax, the required form of a
   # client_notification_token (CIBA Core §7.1).
@@ -64,6 +91,8 @@ defmodule Attesto.CIBA.Request do
     :client_notification_token,
     :delivery_mode,
     :hint,
+    :request_exp,
+    :request_jti,
     :requested_expiry,
     :user_code,
     acr_values: [],
@@ -83,6 +112,8 @@ defmodule Attesto.CIBA.Request do
           client_notification_token: String.t() | nil,
           delivery_mode: delivery_mode(),
           hint: hint(),
+          request_exp: non_neg_integer() | nil,
+          request_jti: String.t() | nil,
           requested_expiry: pos_integer() | nil,
           scope: [String.t()],
           signed?: boolean(),
@@ -159,7 +190,7 @@ defmodule Attesto.CIBA.Request do
   @spec validate(client(), map(), keyword()) :: {:ok, t()} | {:error, error()}
   def validate(client, params, opts \\ []) when is_map(client) and is_map(params) and is_list(opts) do
     with {:ok, client_id, mode} <- validate_client(client),
-         {:ok, params, signed?} <- unwrap_signed_request(client, params, opts),
+         {:ok, params, signed} <- unwrap_signed_request(client, params, opts),
          :ok <- reject_request_uri(params),
          {:ok, scope} <- validate_scope(params),
          {:ok, hint} <- validate_hint(params),
@@ -176,9 +207,11 @@ defmodule Attesto.CIBA.Request do
          client_notification_token: notification_token,
          delivery_mode: mode,
          hint: hint,
+         request_exp: signed.exp,
+         request_jti: signed.jti,
          requested_expiry: requested_expiry,
          scope: scope,
-         signed?: signed?,
+         signed?: signed.signed?,
          user_code: user_code
        }}
     end
@@ -201,15 +234,17 @@ defmodule Attesto.CIBA.Request do
     with :ok <- require_lone_request_param(params),
          {:ok, algs} <- signed_request_algs(client, opts),
          {:ok, jwks} <- registered_jwks(client),
-         {:ok, unwrapped} <- verify_signed_request(jwt, jwks, client, algs, opts) do
-      {:ok, unwrapped, true}
+         {:ok, unwrapped, claims} <- verify_signed_request(jwt, jwks, client, algs, opts) do
+      # §7.1.1 makes jti/exp REQUIRED and RequestObject verified them, so they
+      # are present; surface them for the host's FAPI-CIBA replay guard.
+      {:ok, unwrapped, %{signed?: true, jti: Map.get(claims, "jti"), exp: Map.get(claims, "exp")}}
     end
   end
 
   defp unwrap_signed_request(_client, params, opts) do
     if Keyword.get(opts, :require_signed_request, false) == true,
       do: {:error, :invalid_request},
-      else: {:ok, params, false}
+      else: {:ok, params, %{signed?: false, jti: nil, exp: nil}}
   end
 
   defp require_lone_request_param(params) do
@@ -251,11 +286,14 @@ defmodule Attesto.CIBA.Request do
         require_iat: true,
         require_nbf: true,
         require_jti: true,
-        max_lifetime_seconds: Keyword.get(opts, :max_request_lifetime_seconds, @default_max_request_lifetime_seconds)
+        max_lifetime_seconds: Keyword.get(opts, :max_request_lifetime_seconds, @default_max_request_lifetime_seconds),
+        # §7.1.1: known CIBA authentication-request parameters MUST be JSON
+        # strings; reject a non-string value instead of coercing it.
+        string_valued_claims: @signed_string_params
       ]
 
-      case RequestObject.verify(jwt, jwks, verify_opts) do
-        {:ok, unwrapped} -> {:ok, unwrapped}
+      case RequestObject.verify_with_claims(jwt, jwks, verify_opts) do
+        {:ok, unwrapped, claims} -> {:ok, unwrapped, claims}
         # CIBA §13 has no request-object-specific error code; every
         # verification failure is an invalid_request at this endpoint.
         {:error, _reason} -> {:error, :invalid_request}

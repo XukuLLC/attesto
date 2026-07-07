@@ -299,8 +299,14 @@ Flag for the security review.
 1. `login_hint_token` support: CIBA leaves its format to the deployment; suggest NOT
    advertising/accepting it in v1 (`unknown_user_id` on receipt) — the suite's
    plain_fapi profile uses `login_hint`/`id_token_hint`.
-2. Signed-request `jti` replay tracking: worthwhile hardening; reuse the DPoP replay
-   seam or skip for v1 (spec does not mandate OP-side tracking).
+2. Signed-request `jti` replay tracking: **host obligation for FAPI-CIBA.** The core
+   verifies `jti`/`exp` (both REQUIRED by §7.1.1) but is stateless by design, so it
+   does NOT dedupe. `Attesto.CIBA.Request.validate/3` now surfaces the verified values
+   as `request_jti` / `request_exp` (nil for an unsigned request); the host MUST record
+   each signed request's `request_jti` until `request_exp` and reject a repeat at the
+   `validate/3` boundary (reuse the DPoP/`EctoReplayCheck` replay seam). Without this a
+   captured signed request can start duplicate CIBA transactions within its lifetime.
+   Plain (unsigned) deployments have no `jti` to track.
 3. `client_notification_token` at-rest handling (see §5 note).
 4. Whether `notify_ciba_user` failures should auto-deny after a timeout (operational
    dead-letter policy; conformance doesn't exercise it).

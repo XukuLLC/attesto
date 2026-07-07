@@ -394,6 +394,60 @@ defmodule Attesto.CIBA.RequestTest do
     end
   end
 
+  describe "signed-request jti/exp exposure (FAPI-CIBA replay defense)" do
+    test "a signed request surfaces its jti and exp for host-side dedupe" do
+      key = ec_key()
+      exp = System.system_time(:second) + 300
+      jwt = signed_request(key, %{"jti" => "replay-key-1", "exp" => exp})
+
+      assert {:ok, %Request{signed?: true, request_jti: "replay-key-1", request_exp: ^exp}} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+
+    test "an unsigned request has no jti/exp to track" do
+      assert {:ok, %Request{signed?: false, request_jti: nil, request_exp: nil}} =
+               Request.validate(client(), params())
+    end
+  end
+
+  describe "signed-request known-parameter typing (§7.1.1: JSON strings)" do
+    test "a non-string known parameter is invalid_request, never coerced" do
+      key = ec_key()
+
+      for {claim, bad} <- [
+            {"scope", ["openid", "email"]},
+            {"login_hint", 123},
+            {"binding_message", 456},
+            {"acr_values", ["urn:mace:phr"]},
+            {"user_code", 987_654}
+          ] do
+        # `scope`/hints are also required; keep the request otherwise well-formed
+        # by only overriding the one claim under test to a non-string value.
+        jwt = signed_request(key, %{claim => bad})
+
+        assert {:error, :invalid_request} =
+                 Request.validate(signing_client(key), %{"request" => jwt}, signed_opts()),
+               "expected reject for #{claim} = #{inspect(bad)}"
+      end
+    end
+
+    test "an array-containing-an-object returns an error instead of raising" do
+      key = ec_key()
+      jwt = signed_request(key, %{"scope" => ["openid", %{"nested" => "object"}]})
+
+      assert {:error, :invalid_request} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+
+    test "requested_expiry may still be a JSON number (§7.1.1 exception)" do
+      key = ec_key()
+      jwt = signed_request(key, %{"requested_expiry" => 240})
+
+      assert {:ok, %Request{requested_expiry: 240}} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+  end
+
   describe "require_signed_request (FAPI-CIBA §5.2.2)" do
     test "rejects a plain-parameter request when signing is required" do
       assert {:error, :invalid_request} = Request.validate(client(), params(), require_signed_request: true)

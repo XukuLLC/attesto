@@ -25,6 +25,7 @@ defmodule Attesto.RequestObject do
           | {:require_client_id_claim, boolean()}
           | {:max_lifetime_seconds, pos_integer() | nil}
           | {:accepted_typ, [String.t() | nil] | nil}
+          | {:string_valued_claims, [String.t()]}
         ]
 
   @type verify_error ::
@@ -75,11 +76,39 @@ defmodule Attesto.RequestObject do
     * `:accepted_typ` - when a list, require the JOSE header `typ` to be a
       member; `nil` in the list permits an absent `typ`. Defaults to `nil`,
       which accepts any `typ` including its absence.
+    * `:string_valued_claims` - when a list of claim names, each named claim
+      that is present MUST be a JSON string, else `:invalid_request_object`.
+      This runs BEFORE the claim → parameter coercion, so a non-string value
+      (number, boolean, array, object) is rejected rather than stringified /
+      space-joined / JSON-encoded, and a malformed value can never reach
+      `claims_to_params/1`'s coercion (so it cannot raise). Defaults to `[]`
+      (no typing constraint - the lenient JAR/OIDC §6.1 coercion). CIBA Core
+      §7.1.1 uses this to require its known authentication-request parameters
+      be JSON strings in a signed request; RFC 9101 JAR leaves it unset.
   """
   @spec verify(String.t(), map() | [map()] | map(), verify_opts()) :: {:ok, map()} | {:error, verify_error()}
-  def verify(jwt, trusted_jwks, opts \\ [])
+  def verify(jwt, trusted_jwks, opts \\ []) do
+    case verify_with_claims(jwt, trusted_jwks, opts) do
+      {:ok, params, _claims} -> {:ok, params}
+      {:error, _reason} = error -> error
+    end
+  end
 
-  def verify(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
+  @doc """
+  Like `verify/3`, but also returns the raw verified JWT claims alongside the
+  parameter map: `{:ok, params, claims}`.
+
+  A profile that must act on reserved claims the parameter map deliberately
+  drops - CIBA Core §7.1.1 needs the signed request's `jti` and `exp` to
+  implement replay defense at the host boundary - uses this to read them
+  without decoding/verifying the JWT a second time. `params` is identical to
+  what `verify/3` returns.
+  """
+  @spec verify_with_claims(String.t(), map() | [map()] | map(), verify_opts()) ::
+          {:ok, map(), map()} | {:error, verify_error()}
+  def verify_with_claims(jwt, trusted_jwks, opts \\ [])
+
+  def verify_with_claims(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
     with :ok <- check_compact_form(jwt),
          {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
@@ -94,12 +123,13 @@ defmodule Attesto.RequestObject do
          :ok <- check_iat(claims, opts),
          :ok <- check_nbf(claims, opts),
          :ok <- check_jti(claims, opts),
-         :ok <- check_lifetime(claims, opts) do
-      {:ok, claims_to_params(claims)}
+         :ok <- check_lifetime(claims, opts),
+         :ok <- check_string_valued_claims(claims, opts) do
+      {:ok, claims_to_params(claims), claims}
     end
   end
 
-  def verify(_jwt, _trusted_jwks, _opts), do: {:error, :invalid_request_object}
+  def verify_with_claims(_jwt, _trusted_jwks, _opts), do: {:error, :invalid_request_object}
 
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
@@ -231,6 +261,35 @@ defmodule Attesto.RequestObject do
       end
     else
       :ok
+    end
+  end
+
+  # CIBA Core §7.1.1: the named authentication-request parameters MUST be JSON
+  # strings in a signed request (only `requested_expiry` may additionally be a
+  # number, and extension claims may be other JSON types - neither is listed
+  # here). Enforced BEFORE `claims_to_params/1`, so a non-string known
+  # parameter (number/boolean/array/object) is an `invalid_request_object`
+  # rather than a silently coerced value, and an array-containing-an-object can
+  # never reach the coercion's `Enum.join/2` (which would raise). Default `[]`
+  # (RFC 9101 JAR) applies no constraint and leaves the coercion untouched.
+  defp check_string_valued_claims(claims, opts) do
+    case Keyword.get(opts, :string_valued_claims, []) do
+      [_ | _] = names ->
+        if Enum.all?(names, &string_valued_claim?(claims, &1)),
+          do: :ok,
+          else: {:error, :invalid_request_object}
+
+      _none ->
+        :ok
+    end
+  end
+
+  # An absent claim is fine (the parameter validators handle requiredness); a
+  # present one must be a JSON string.
+  defp string_valued_claim?(claims, name) do
+    case Map.get(claims, name, :__absent__) do
+      :__absent__ -> true
+      value -> is_binary(value)
     end
   end
 
