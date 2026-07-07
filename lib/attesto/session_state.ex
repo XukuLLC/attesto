@@ -127,8 +127,7 @@ defmodule Attesto.SessionState do
   `browser_state_valid?/3`.
   """
   @spec mint_browser_state(binary(), binary()) :: String.t()
-  def mint_browser_state(secret, login_binding)
-      when is_binary(secret) and is_binary(login_binding) do
+  def mint_browser_state(secret, login_binding) when is_binary(secret) and is_binary(login_binding) do
     payload = generate_browser_state() <> "." <> login_tag(secret, login_binding)
     payload <> "." <> mac(secret, payload)
   end
