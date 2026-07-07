@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **OpenID Connect Client-Initiated Backchannel Authentication (CIBA Core
+  1.0).** New `Attesto.CIBA` primitive - the device grant's async sibling:
+  `Attesto.CIBA.Request.validate/3` runs the §7.1 backchannel authentication
+  request rules (scope-with-`openid`, exactly-one-hint, ping/push
+  `client_notification_token` entropy/length/charset, `binding_message` /
+  `user_code` / `requested_expiry` shape) and verifies §7.1.1 **signed
+  authentication requests** against the client's registered JWKS (all six
+  REQUIRED claims enforced; FAPI-CIBA's 60-minute lifetime bound by default);
+  `issue/4` mints a 256-bit `auth_req_id` (only its hash is stored) with the
+  §7.3 acknowledgement fields; `approve/4` / `deny/3` record the user's
+  decision atomically and return the ping-mode §10.2 notification data;
+  `redeem/4` runs the token-endpoint state machine with the exact §11
+  vocabulary (`authorization_pending` / `slow_down` / `expired_token` /
+  `access_denied` / `invalid_grant`), single-use, expiry-beats-approval,
+  client- and DPoP-binding checked before consume. Plus `Attesto.CIBA.Grant`,
+  the `Attesto.CIBAStore` behaviour (every transition a single atomic guarded
+  operation; the poll interval is frozen into the record at issue time), and
+  an ETS reference store.
+- `Attesto.RequestObject.verify/3` gains `:require_iat`, `:require_jti`, and
+  `:require_client_id_claim` options for the CIBA signed-request profile
+  (defaults preserve the RFC 9101 behaviour).
+- Discovery (`Attesto.Discovery`) accepts the CIBA Core §4 metadata:
+  `backchannel_authentication_endpoint`,
+  `backchannel_token_delivery_modes_supported`,
+  `backchannel_authentication_request_signing_alg_values_supported`, and
+  `backchannel_user_code_parameter_supported`.
+
 ## [1.0.0] - 2026-07-04
 
 First stable release; the public API is now under semantic versioning. No
