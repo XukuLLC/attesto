@@ -14,8 +14,8 @@ A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://op
 
 <a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
-Attesto is [OpenID Certified](https://openid.net/certification/certified-openid-connect-implementations/)
-by Xuku LLC, as an authorization server built from `attesto` +
+Attesto is [OpenID Certified](https://openid.net/certification/certified-openid-connect-implementations/),
+as an authorization server built from `attesto` +
 [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix), to:
 
 - **FAPI 2.0 Security Profile Final — OP** and **FAPI 2.0 Message Signing
@@ -277,6 +277,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | --- | --- | --- |
 | RFC 7519 | JSON Web Token (JWT) | Supported |
 | RFC 7515 | JSON Web Signature (JWS) | Supported |
+| RFC 7518 | JSON Web Algorithms (JWA) — the signing/verification alg set behind the JWT/JWS support | Supported (`Attesto.SigningAlg`) |
 | RFC 7517 | JSON Web Key (JWK) | Supported |
 | RFC 7638 | JWK Thumbprint | Supported |
 | RFC 7800 | Proof-of-Possession Key Semantics (`cnf`) | Supported |
@@ -285,6 +286,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 6749 §4.1 | Authorization-code grant (single-use, PKCE-mandatory) | Supported |
 | RFC 6749 §6 / §10.4 | Refresh-token rotation + reuse detection | Supported |
 | RFC 6749 §3.3 | Access-token scope | Supported |
+| RFC 9700 | OAuth 2.0 Security BCP — the current best-practice hardening (PKCE-everywhere, refresh rotation + reuse detection, registered redirect URIs) | Supported |
 | RFC 7523 §4 | JWT-assertion grant (`jwt-bearer`; ID-JAG draft) | Supported |
 | RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (one or more resources; `Attesto.ResourceIndicator`) |
 | RFC 9470 | Step-Up Authentication Challenge (`acr`/`auth_time`) | Supported (`Attesto.StepUp`) |
@@ -292,6 +294,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | CIBA Core 1.0 | Client-Initiated Backchannel Authentication (poll/ping; signed requests per FAPI-CIBA) | Supported (`Attesto.CIBA`) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
+| RFC 9126 | Pushed Authorization Requests (PAR) — the client pushes the auth request to the AS for a one-time `request_uri`, so request params never ride the browser/URL | Supported (discovery advertisement + request-object primitives; the `request_uri` endpoint/store live in `attesto_phoenix`) |
 | RFC 9728 | Protected Resource Metadata | Supported |
 | CIMD draft | Client ID Metadata Documents (`https`-URL client ids) | Supported |
 | RFC 7517 | JSON Web Key Set publication (JWKS endpoint) | Supported |

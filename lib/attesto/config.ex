@@ -159,7 +159,7 @@ defmodule Attesto.Config do
                 "(https://github.com/FiloSottile/mkcert): `mkcert -install` once, then " <>
                 "`mkcert -cert-file priv/cert/localhost.pem -key-file priv/cert/localhost-key.pem " <>
                 "localhost 127.0.0.1 ::1`, and point your endpoint's `https:` listener at that pair. " <>
-                "See the attesto_phoenix local-HTTPS guide."
+                "Full guide: https://hexdocs.pm/attesto_phoenix/local_https.html"
 
       uri.host in [nil, ""] ->
         raise ArgumentError, "Attesto.Config :issuer must include a host; got #{inspect(issuer)}"
