@@ -17,3 +17,6 @@ erl_crash.dump
 # Python bytecode from the parity-test reference module.
 __pycache__/
 *.pyc
+
+# JS parity reference deps (installed via npm; not shipped)
+/test/support/js/node_modules/
