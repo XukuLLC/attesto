@@ -144,6 +144,13 @@ config =
   )
 ```
 
+The `:issuer` must be an `https` URL (RFC 8414 §2), including in development.
+Don't downgrade to plain `http` locally — serve a locally-trusted
+[mkcert](https://github.com/FiloSottile/mkcert) certificate so `https://localhost`
+just works. If you use `attesto_phoenix`, `mix attesto_phoenix.gen.dev_https` and
+`AttestoPhoenix.DevTLS.https_opts/1` wire it in one step; see its
+[Local HTTPS guide](https://hexdocs.pm/attesto_phoenix/local_https.html).
+
 The static keystore reads its signing key from application config:
 
 ```elixir
