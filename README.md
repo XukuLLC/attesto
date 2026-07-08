@@ -13,6 +13,7 @@ A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://op
 ## Certification
 
 [![FAPI 2.0 Certified](https://img.shields.io/badge/FAPI_2.0-Certified-F78C40)](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)
+[![FAPI-CIBA Certified](https://img.shields.io/badge/FAPI--CIBA-Certified-F78C40)](https://openid.net/certification/certified-fapi-ciba-openid-providers-profiles/)
 
 <a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
@@ -24,6 +25,7 @@ as an authorization server built from `attesto` +
   Final — OP** ([Financial-grade API](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/))
 - **OpenID Connect Core — Basic OP**
 - **RP-Initiated Logout — OP** and **Back-Channel Logout — OP**
+- **FAPI-CIBA — OP** (Client-Initiated Backchannel Authentication; poll and ping)
 
 Certification runs against the OpenID Foundation's conformance suite and the
 results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade
