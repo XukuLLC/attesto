@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-08
+
+### Changed
+
+- `Attesto.Config` now raises a **guiding** error when the `:issuer` is not an
+  `https` URL (RFC 8414 §2). Instead of a bare rejection, the message points
+  developers at [mkcert](https://github.com/FiloSottile/mkcert) to serve a
+  locally-trusted certificate so the issuer stays `https` — local development
+  never needs to downgrade to plain http. There is deliberately no
+  https-disable switch in the library.
+
 ## [1.1.0] - 2026-07-07
 
 ### Added
