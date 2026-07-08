@@ -56,6 +56,13 @@ jobs:
       - name: Install Python parity dependencies
         run: python -m pip install --upgrade pip joserfc cryptography
 
+      # The JavaScript parity leg (@moduletag :parity) drives a `jose`
+      # reference through a Node worker pool (Attesto.Test.NodeBridge). Node
+      # ships on the runner; install the JS deps so the leg runs rather than
+      # self-skipping.
+      - name: Install Node parity dependencies (jose)
+        run: npm install --no-audit --no-fund --prefix test/support/js
+
       - name: Restore dependencies cache
         uses: actions/cache@v4
         with:
