@@ -23,9 +23,10 @@ as an authorization server built from `attesto` +
 
 - **FAPI 2.0 Security Profile Final — OP** and **FAPI 2.0 Message Signing
   Final — OP** ([Financial-grade API](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/))
-- **OpenID Connect Core — Basic OP**
-- **RP-Initiated Logout — OP** and **Back-Channel Logout — OP**
 - **FAPI-CIBA — OP** (Client-Initiated Backchannel Authentication; poll and ping)
+- **OpenID Connect Core — Basic OP** and **Config OP**
+- **RP-Initiated**, **Back-Channel**, and **Front-Channel Logout — OP**
+- **Session Management — OP**
 
 Certification runs against the OpenID Foundation's conformance suite and the
 results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade
