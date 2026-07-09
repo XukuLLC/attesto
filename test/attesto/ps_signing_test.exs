@@ -63,6 +63,37 @@ defmodule Attesto.PSSigningTest do
     assert {:ok, _claims} = Token.verify(config, jwt)
   end
 
+  test "PS256 configured via signing_alg alone (no key_algs) still verifies its own tokens" do
+    pem = Factory.rsa_pem()
+
+    # signing_alg set, key_algs DELIBERATELY omitted. Before the Static keystore
+    # labelled the signing key from signing_alg, verify inferred RS256 from the
+    # RSA key and rejected the server's own PS256 tokens as :invalid_signature.
+    Application.put_env(:attesto, Static, signing_pem: pem, signing_alg: "PS256")
+    on_exit(fn -> Application.delete_env(:attesto, Static) end)
+
+    config =
+      Config.new(
+        issuer: "https://oidc.example.test",
+        audience: "https://api.example.test",
+        keystore: Static,
+        principal_kinds: [
+          PrincipalKind.new("client", "oc_", required_claims: [{"client_id", :non_empty_string}])
+        ]
+      )
+
+    principal = %{
+      kind: "client",
+      sub: "oc_fapi_client",
+      scopes: ["openid"],
+      claims: %{"client_id" => "oc_fapi_client"}
+    }
+
+    assert {:ok, %{access_token: jwt}} = Token.mint(config, principal)
+    assert protected_header(jwt)["alg"] == "PS256"
+    assert {:ok, _claims} = Token.verify(config, jwt)
+  end
+
   defp protected_header(jwt) do
     jwt
     |> JOSE.JWS.peek_protected()

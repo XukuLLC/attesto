@@ -95,15 +95,29 @@ defmodule Attesto.Keystore.Static do
 
   @impl true
   def key_algs do
-    case fetch(:key_algs) do
-      nil ->
-        %{}
+    configured =
+      case fetch(:key_algs) do
+        nil ->
+          %{}
 
-      algs when is_map(algs) or is_list(algs) ->
-        Map.new(algs)
+        algs when is_map(algs) or is_list(algs) ->
+          Map.new(algs)
 
-      other ->
-        raise ArgumentError, "#{inspect(__MODULE__)} :key_algs must be a map or keyword/list; got #{inspect(other)}."
+        other ->
+          raise ArgumentError, "#{inspect(__MODULE__)} :key_algs must be a map or keyword/list; got #{inspect(other)}."
+      end
+
+    # When :signing_alg is set explicitly, label the signing key's own kid with
+    # it so verification agrees with signing. Otherwise verification infers the
+    # alg from the key type (e.g. RS256 for an RSA key configured to sign PS256)
+    # and rejects the server's own tokens as :invalid_signature. An explicit
+    # :key_algs entry for that kid still wins.
+    case fetch(:signing_alg) do
+      alg when is_binary(alg) ->
+        Map.put_new(configured, Attesto.Key.kid(signing_pem()), Attesto.SigningAlg.validate!(alg))
+
+      _ ->
+        configured
     end
   end
 
