@@ -36,3 +36,12 @@ async function ping() {
   return typeof j.jwtVerify === "function" ? "pong" : "no-jose";
 }
 module.exports.ping = ping;
+
+// RFC 8705 §3.1 x5t#S256 = base64url(SHA-256(DER cert)). jose has no cert
+// thumbprint; use node crypto directly over the DER bytes (passed base64).
+const crypto = require("crypto");
+function x5tS256(derBase64) {
+  const der = Buffer.from(derBase64, "base64");
+  return crypto.createHash("sha256").update(der).digest("base64url");
+}
+module.exports.x5tS256 = x5tS256;

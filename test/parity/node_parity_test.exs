@@ -184,6 +184,18 @@ defmodule Attesto.Parity.NodeParityTest do
         assert p["state"] == "xyz"
       end
     end
+
+    test "an mTLS cnf.x5t#S256 matches an independent JS SHA-256 over the cert DER",
+         %{node_ready: ready} do
+      if ready do
+        %{cert: der} = :public_key.pkix_test_root_cert(~c"cn=attesto-parity", [])
+
+        {:ok, attesto_x5t} = Attesto.MTLS.compute_thumbprint(der)
+        js_x5t = NodeBridge.call!("attesto_compat", :x5tS256, [Base.encode64(der)])
+
+        assert attesto_x5t == js_x5t
+      end
+    end
   end
 
   defp alg_pem("PS256"), do: Factory.rsa_pem()
