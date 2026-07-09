@@ -120,6 +120,72 @@ defmodule Attesto.Parity.NodeParityTest do
     end
   end
 
+  # The signed FAPI artifacts Attesto emits are ordinary compact JWS: prove a
+  # third-party JS verifier accepts each and decodes the artifact-specific
+  # claims (the event object, the RFC 7662 body, the authorization params).
+  describe "FAPI artifact parity (Attesto -> JS jose)" do
+    test "a back-channel logout token verifies in jose with its event claim intact",
+         %{node_ready: ready} do
+      if ready do
+        pem = Factory.rsa_pem()
+        config = Factory.config(pem)
+        public_pem = Attesto.Key.public_pem(pem)
+
+        {:ok, jwt} = Attesto.LogoutToken.mint(config, "client-123", sub: "usr_1", sid: "sess-9")
+
+        %{"payload" => p, "header" => h} =
+          NodeBridge.call!("attesto_compat", :verifyJwt, [jwt, public_pem, "RS256"])
+
+        assert h["alg"] == "RS256"
+        assert p["aud"] == "client-123"
+        assert p["sub"] == "usr_1"
+        assert p["sid"] == "sess-9"
+        # Back-Channel Logout 1.0 §2.4: the events claim names the event -> {}.
+        assert p["events"] == %{"http://schemas.openid.net/event/backchannel-logout" => %{}}
+        # §2.4: a logout token MUST NOT contain a nonce.
+        refute Map.has_key?(p, "nonce")
+      end
+    end
+
+    test "a signed introspection response verifies in jose and wraps the RFC 7662 body",
+         %{node_ready: ready} do
+      if ready do
+        pem = Factory.rsa_pem()
+        config = Factory.config(pem)
+        public_pem = Attesto.Key.public_pem(pem)
+        body = %{"active" => true, "scope" => "documents.read", "client_id" => "c", "sub" => "usr_1"}
+
+        {:ok, jwt} = Attesto.SignedIntrospection.response_jwt(config, "rs-audience", body)
+
+        %{"payload" => p, "header" => h} =
+          NodeBridge.call!("attesto_compat", :verifyJwt, [jwt, public_pem, "RS256"])
+
+        # RFC 9701 §5: the explicit media type on the header.
+        assert h["typ"] == "token-introspection+jwt"
+        assert p["aud"] == "rs-audience"
+        assert p["token_introspection"] == body
+      end
+    end
+
+    test "a JARM authorization response verifies in jose with the response params",
+         %{node_ready: ready} do
+      if ready do
+        pem = Factory.rsa_pem()
+        config = Factory.config(pem)
+        public_pem = Attesto.Key.public_pem(pem)
+
+        {:ok, jwt} = Attesto.JARM.response_jwt(config, "client-123", %{"code" => "abc", "state" => "xyz"})
+
+        %{"payload" => p} =
+          NodeBridge.call!("attesto_compat", :verifyJwt, [jwt, public_pem, "RS256"])
+
+        assert p["aud"] == "client-123"
+        assert p["code"] == "abc"
+        assert p["state"] == "xyz"
+      end
+    end
+  end
+
   defp alg_pem("PS256"), do: Factory.rsa_pem()
   defp alg_pem("ES256"), do: Factory.ec_pem()
   defp alg_pem("EdDSA"), do: Factory.ed_pem()
