@@ -217,7 +217,7 @@ defmodule Attesto.Parity.NodeParityTest do
         "nonce" => "n-js"
       }
 
-      {:ok, config: config, priv_jwk: priv_jwk, now: now, base: base}
+      {:ok, config: config, priv_jwk: priv_jwk, public_pem: Attesto.Key.public_pem(pem), now: now, base: base}
     end
 
     test "a jose-signed ID Token verifies in Attesto", ctx do
@@ -259,6 +259,93 @@ defmodule Attesto.Parity.NodeParityTest do
                  )
 
         assert reason == :invalid_signature
+      end
+    end
+
+    test "a jose alg:none ID Token is rejected on alg grounds", ctx do
+      if ctx.node_ready do
+        token = NodeBridge.call!("attesto_compat", :signAlgNone, [ctx.base, "JWT"])
+
+        # :invalid_signature (not a claim error) proves the alg pinning fired
+        # before any claim was trusted - an alg != RS256 has no trusted key.
+        assert {:error, :invalid_signature} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+      end
+    end
+
+    test "an HS256 alg-confusion token (public key as HMAC secret) is rejected on alg grounds", ctx do
+      if ctx.node_ready do
+        # The classic RS256->HS256 attack: sign HS256 using the server's own
+        # RSA public key bytes as the shared secret. Attesto pins asymmetric
+        # algs, so no trusted key matches -> :invalid_signature, never accepted.
+        secret = Base.encode64(ctx.public_pem)
+        token = NodeBridge.call!("attesto_compat", :signHs256, [ctx.base, secret, "JWT"])
+
+        assert {:error, :invalid_signature} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+      end
+    end
+
+    test "a jose-signed ID Token with the wrong issuer is rejected", ctx do
+      if ctx.node_ready do
+        claims = %{ctx.base | "iss" => "https://evil.example/"}
+        token = NodeBridge.call!("attesto_compat", :signJwtJwk, [claims, ctx.priv_jwk, "RS256", "JWT"])
+
+        assert {:error, _reason} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+      end
+    end
+
+    test "a jose-signed ID Token for a different audience is rejected", ctx do
+      if ctx.node_ready do
+        claims = %{ctx.base | "aud" => "some-other-client"}
+        token = NodeBridge.call!("attesto_compat", :signJwtJwk, [claims, ctx.priv_jwk, "RS256", "JWT"])
+
+        assert {:error, _reason} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+      end
+    end
+
+    test "a jose-signed expired ID Token is rejected", ctx do
+      if ctx.node_ready do
+        claims = %{ctx.base | "exp" => ctx.now - 30, "iat" => ctx.now - 3600}
+        token = NodeBridge.call!("attesto_compat", :signJwtJwk, [claims, ctx.priv_jwk, "RS256", "JWT"])
+
+        assert {:error, _reason} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+      end
+    end
+
+    test "a jose-signed ID Token with a mismatched nonce is rejected", ctx do
+      if ctx.node_ready do
+        token = NodeBridge.call!("attesto_compat", :signJwtJwk, [ctx.base, ctx.priv_jwk, "RS256", "JWT"])
+
+        assert {:error, _reason} =
+                 Attesto.IDToken.verify(ctx.config, token,
+                   client_id: "client-js",
+                   nonce: "a-different-nonce",
+                   now: ctx.now
+                 )
       end
     end
 

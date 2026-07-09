@@ -72,3 +72,26 @@ async function signJwtJwk(claims, jwk, alg, typ) {
     .sign(key);
 }
 module.exports.signJwtJwk = signJwtJwk;
+
+// --- adversarial artifact producers (must be REJECTED by Attesto) ---
+
+function b64urlJson(obj) {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+
+// An unsecured (alg:none) JWT: header.payload. with an empty signature.
+async function signAlgNone(claims, typ) {
+  return b64urlJson({ alg: "none", typ: typ || "JWT" }) + "." + b64urlJson(claims) + ".";
+}
+module.exports.signAlgNone = signAlgNone;
+
+// HS256 signed with an arbitrary secret (base64). The classic RS256->HS256
+// confusion attack passes the server's RSA public key bytes as the HMAC key.
+async function signHs256(claims, secretBase64, typ) {
+  const j = await jose();
+  const secret = Buffer.from(secretBase64, "base64");
+  return await new j.SignJWT(claims)
+    .setProtectedHeader({ alg: "HS256", typ: typ || "JWT" })
+    .sign(secret);
+}
+module.exports.signHs256 = signHs256;
