@@ -82,4 +82,56 @@ defmodule Attesto.Parity.NodeParityTest do
       end
     end
   end
+
+  # FAPI 2 mandates PS256 and also permits ES256 / EdDSA (RS256 is excluded).
+  # Prove Attesto mints each of the FAPI signing algorithms to wire that the
+  # JS `jose` verifier accepts and decodes identically.
+  describe "FAPI algorithm parity (Attesto -> JS jose)" do
+    for alg <- ~w(PS256 ES256 EdDSA) do
+      test "an Attesto-minted #{alg} token verifies in jose with identical claims",
+           %{node_ready: ready} do
+        if ready do
+          alg = unquote(alg)
+          pem = alg_pem(alg)
+          config = Factory.config(pem, signing_alg: alg, key_algs: %{Attesto.Key.kid(pem) => alg})
+          # jose's importSPKI needs SPKI: Attesto.Key.public_pem gives that for
+          # RSA (PS256); JOSE gives SPKI for the EC/OKP public keys.
+          public_pem =
+            if alg == "PS256", do: Attesto.Key.public_pem(pem), else: jose_public_pem(pem)
+
+          {:ok, token} =
+            Attesto.Token.mint(config, %{
+              kind: "client",
+              sub: "oc_fapi_#{String.downcase(alg)}",
+              scopes: ["documents.read"],
+              claims: %{"client_id" => "oc_fapi"}
+            })
+
+          %{"payload" => payload, "header" => header} =
+            NodeBridge.call!("attesto_compat", :verifyJwt, [token.access_token, public_pem, alg])
+
+          assert header["alg"] == alg
+          assert payload["sub"] == "oc_fapi_#{String.downcase(alg)}"
+
+          {:ok, attesto_claims} = Attesto.Token.verify(config, token.access_token)
+          assert payload["sub"] == attesto_claims["sub"]
+        end
+      end
+    end
+  end
+
+  defp alg_pem("PS256"), do: Factory.rsa_pem()
+  defp alg_pem("ES256"), do: Factory.ec_pem()
+  defp alg_pem("EdDSA"), do: Factory.ed_pem()
+
+  defp jose_public_pem(pem) do
+    pem
+    |> JOSE.JWK.from_pem()
+    |> JOSE.JWK.to_public()
+    |> JOSE.JWK.to_pem()
+    |> case do
+      {_meta, public_pem} when is_binary(public_pem) -> public_pem
+      public_pem when is_binary(public_pem) -> public_pem
+    end
+  end
 end

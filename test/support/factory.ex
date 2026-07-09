@@ -11,12 +11,29 @@ defmodule Attesto.Test.Factory do
     :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, priv)])
   end
 
+  @doc "A fresh EC signing key PEM (default P-256 -> ES256)."
+  def ec_pem(curve \\ "P-256"), do: to_pem(JOSE.JWK.generate_key({:ec, curve}))
+
+  @doc "A fresh Ed25519 (OKP) signing key PEM -> EdDSA."
+  def ed_pem, do: to_pem(JOSE.JWK.generate_key({:okp, :Ed25519}))
+
+  # JOSE.JWK.to_pem/1 returns {kty_meta, pem} for EC/OKP keys; take the PEM.
+  defp to_pem(jwk) do
+    case JOSE.JWK.to_pem(jwk) do
+      {_meta, pem} when is_binary(pem) -> pem
+      pem when is_binary(pem) -> pem
+    end
+  end
+
   @doc """
   Configure `Attesto.Keystore.Static` with `pem` and return a Config with
   two principal kinds (client, user). Installs and tears down the app env.
   """
   def config(pem, overrides \\ []) do
-    Application.put_env(:attesto, Static, signing_pem: pem)
+    # `:signing_alg` / `:key_algs` configure the Static keystore (not the
+    # Config), e.g. an RSA key labelled PS256 or an EC/Ed key for ES256/EdDSA.
+    {static_env, overrides} = Keyword.split(overrides, [:signing_alg, :key_algs])
+    Application.put_env(:attesto, Static, [signing_pem: pem] ++ static_env)
     ExUnit.Callbacks.on_exit(fn -> Application.delete_env(:attesto, Static) end)
 
     Keyword.merge(
