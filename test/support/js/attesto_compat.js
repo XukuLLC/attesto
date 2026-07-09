@@ -45,3 +45,30 @@ function x5tS256(derBase64) {
   return crypto.createHash("sha256").update(der).digest("base64url");
 }
 module.exports.x5tS256 = x5tS256;
+
+// Build an ES256 DPoP proof with a fresh key (embedded public jwk in the
+// header, per RFC 9449) for the inbound leg: a real JS client proof that
+// Attesto.DPoP.verify_proof must accept. Returns {proof, jkt}.
+async function buildDpopProof(htm, htu, iat, jti) {
+  const j = await jose();
+  const { publicKey, privateKey } = await j.generateKeyPair("ES256", { extractable: true });
+  const publicJwk = await j.exportJWK(publicKey);
+  const jkt = await j.calculateJwkThumbprint(publicJwk, "sha256");
+  const proof = await new j.SignJWT({ htm, htu, iat, jti })
+    .setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk: publicJwk })
+    .sign(privateKey);
+  return { proof, jkt };
+}
+module.exports.buildDpopProof = buildDpopProof;
+
+// Sign a JWT from a JWK (private) - the inbound leg passes Attesto's keystore
+// key as a JWK map so jose signs a token Attesto's verifier must accept.
+// `typ` overrides the header typ (used for the at+jwt confusion test).
+async function signJwtJwk(claims, jwk, alg, typ) {
+  const j = await jose();
+  const key = await j.importJWK(jwk, alg);
+  return await new j.SignJWT(claims)
+    .setProtectedHeader({ alg, typ: typ || "JWT" })
+    .sign(key);
+}
+module.exports.signJwtJwk = signJwtJwk;

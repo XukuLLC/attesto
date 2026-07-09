@@ -198,6 +198,88 @@ defmodule Attesto.Parity.NodeParityTest do
     end
   end
 
+  # The bug-rich direction: a fully independent JS issuer/client produces the
+  # artifacts and Attesto's verifiers must accept the valid ones and reject the
+  # adversarial ones (typ confusion, tampered signature).
+  describe "inbound + adversarial parity (JS jose -> Attesto verifier)" do
+    setup do
+      pem = Factory.rsa_pem()
+      config = Factory.config(pem)
+      {_meta, priv_jwk} = pem |> JOSE.JWK.from_pem() |> JOSE.JWK.to_map()
+      now = System.system_time(:second)
+
+      base = %{
+        "iss" => config.issuer,
+        "sub" => "usr_js",
+        "aud" => "client-js",
+        "iat" => now,
+        "exp" => now + 3600,
+        "nonce" => "n-js"
+      }
+
+      {:ok, config: config, priv_jwk: priv_jwk, now: now, base: base}
+    end
+
+    test "a jose-signed ID Token verifies in Attesto", ctx do
+      if ctx.node_ready do
+        id_token = NodeBridge.call!("attesto_compat", :signJwtJwk, [ctx.base, ctx.priv_jwk, "RS256", "JWT"])
+
+        assert {:ok, verified} =
+                 Attesto.IDToken.verify(ctx.config, id_token,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+
+        assert verified["sub"] == "usr_js"
+      end
+    end
+
+    test "a jose-signed at+jwt typ is rejected as an ID Token", ctx do
+      if ctx.node_ready do
+        token = NodeBridge.call!("attesto_compat", :signJwtJwk, [ctx.base, ctx.priv_jwk, "RS256", "at+jwt"])
+
+        assert {:error, :unexpected_typ} =
+                 Attesto.IDToken.verify(ctx.config, token, client_id: "client-js", now: ctx.now)
+      end
+    end
+
+    test "a jose-signed ID Token with a tampered signature is rejected", ctx do
+      if ctx.node_ready do
+        id_token = NodeBridge.call!("attesto_compat", :signJwtJwk, [ctx.base, ctx.priv_jwk, "RS256", "JWT"])
+        [h, p, s] = String.split(id_token, ".")
+        flipped = if String.first(s) == "a", do: "b", else: "a"
+        tampered = "#{h}.#{p}.#{flipped}#{String.slice(s, 1..-1//1)}"
+
+        assert {:error, reason} =
+                 Attesto.IDToken.verify(ctx.config, tampered,
+                   client_id: "client-js",
+                   nonce: "n-js",
+                   now: ctx.now
+                 )
+
+        assert reason == :invalid_signature
+      end
+    end
+
+    test "a jose ES256 DPoP proof verifies in Attesto with the matching jkt", ctx do
+      if ctx.node_ready do
+        htu = "https://api.example.com/oauth/token"
+        jti = "parity-#{System.unique_integer([:positive])}"
+
+        %{"proof" => proof, "jkt" => js_jkt} =
+          NodeBridge.call!("attesto_compat", :buildDpopProof, ["POST", htu, ctx.now, jti])
+
+        assert {:ok, verified} =
+                 Attesto.DPoP.verify_proof(proof, http_method: "POST", http_uri: htu, now: ctx.now)
+
+        assert verified.jkt == js_jkt
+        assert verified.htu == htu
+        assert verified.jti == jti
+      end
+    end
+  end
+
   defp alg_pem("PS256"), do: Factory.rsa_pem()
   defp alg_pem("ES256"), do: Factory.ec_pem()
   defp alg_pem("EdDSA"), do: Factory.ed_pem()
