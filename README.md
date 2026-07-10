@@ -17,6 +17,7 @@ A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://op
 [![OpenID Connect Certified](https://img.shields.io/badge/OpenID_Connect-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-profiles/)
 [![Logout Profiles Certified](https://img.shields.io/badge/Logout_Profiles-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
 [![Session Management Certified](https://img.shields.io/badge/Session_Management-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
+[![Relying Party Certified](https://img.shields.io/badge/Relying_Party-Certified-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
 
 <a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
@@ -30,6 +31,10 @@ as an authorization server built from `attesto` +
 - **OpenID Connect Core — Basic OP** and **Config OP**
 - **RP-Initiated**, **Back-Channel**, and **Front-Channel Logout — OP**
 - **Session Management — OP**
+
+The client side, [`attesto_client`](https://github.com/XukuLLC/attesto_client),
+is separately certified as a **Relying Party library** (Basic, Config, and
+Dynamic OP profiles).
 
 Certification runs against the OpenID Foundation's conformance suite and the
 results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade
