@@ -53,6 +53,7 @@ defmodule Attesto.Introspection do
   @type opts :: [
           refresh_store: module() | nil,
           token_type_hint: String.t() | nil,
+          trusted_audiences: [String.t()] | (map() -> [String.t()]) | nil,
           authorize: (response() -> boolean()) | nil,
           now: integer() | DateTime.t()
         ]
@@ -67,6 +68,15 @@ defmodule Attesto.Introspection do
       refresh tokens; when absent, only access tokens are introspected.
     * `:token_type_hint` - `"access_token"` or `"refresh_token"` (RFC 7662
       §2.1); reorders the attempts, never restricts them.
+    * `:trusted_audiences` - a non-empty allowlist of access-token audiences
+      this authorization server recognizes for introspection, or a one-arity
+      resolver receiving otherwise-verified claims whose `aud` has not yet
+      been authorized. Use the resolver only to select RFC 8707 resource policy
+      tied to the signed token's original OAuth client; never derive trust from
+      `aud` itself. An explicit policy replaces the configured-audience rule,
+      so include the configured audience when it should remain accepted. When
+      this option is absent, that configured audience remains the only accepted
+      value. A malformed value or failing resolver makes the token inactive.
     * `:authorize` - a 1-arity predicate `(response -> boolean)` consulted with
       the active response *before* it is returned (RFC 7662 §4 / RFC 9701 §5:
       the AS MAY restrict which tokens a caller may introspect). The transport
@@ -135,11 +145,13 @@ defmodule Attesto.Introspection do
   defp verify_opts(opts) do
     base = [expected_typ: "access", require_confirmation_binding: false]
 
-    case Keyword.fetch(opts, :now) do
-      {:ok, now} -> [{:now, now} | base]
-      :error -> base
-    end
+    base
+    |> put_if_present(:now, Keyword.get(opts, :now))
+    |> put_if_present(:trusted_audiences, Keyword.get(opts, :trusted_audiences))
   end
+
+  defp put_if_present(opts, _key, nil), do: opts
+  defp put_if_present(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp refresh_token_response(_config, token, opts) do
     with store when is_atom(store) and not is_nil(store) <- Keyword.get(opts, :refresh_store),

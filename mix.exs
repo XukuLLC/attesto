@@ -13,7 +13,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "1.2.1"
+  @version "1.2.2"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -57,7 +57,7 @@ defmodule Attesto.MixProject do
       {:jose, "~> 1.11"},
       # Optional: the Attesto.Plug.* integration layer. Hosts that use the
       # plugs already have Plug; the core library does not require it.
-      {:plug, "~> 1.16", optional: true},
+      {:plug, ">= 1.19.5 and < 2.0.0", optional: true},
 
       # test - cross-language parity / contract tests drive a reference
       # joserfc/cryptography stack in-process via the erlang_python `:py`
