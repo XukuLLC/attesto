@@ -8,8 +8,8 @@ defmodule Attesto.Parity.NodeParityTest do
   # driven through `Attesto.Test.NodeBridge` (a persistent Node worker pool).
   #
   # The reference helpers live in `test/support/js/attesto_compat.js`. The
-  # module self-skips when Node or `jose` is unavailable rather than failing
-  # the suite.
+  # tests receive a visible ExUnit skip tag when Node or `jose` is unavailable
+  # rather than silently passing without exercising their assertions.
 
   use ExUnit.Case, async: false
 
@@ -18,18 +18,13 @@ defmodule Attesto.Parity.NodeParityTest do
 
   @moduletag :parity
 
-  setup_all do
-    case NodeBridge.availability() do
-      :ok ->
-        %{node_ready: true}
+  case NodeBridge.availability() do
+    :ok ->
+      @moduletag node_ready: true
 
-      {:skip, reason} ->
-        # ExUnit does not honor a `skip` set from setup (tags are resolved
-        # before setup runs), so gate each test body on this flag instead -
-        # a machine without Node/jose passes trivially rather than failing.
-        IO.puts("\n[node parity] skipped - #{reason}")
-        %{node_ready: false}
-    end
+    {:skip, reason} ->
+      @moduletag node_ready: false
+      @moduletag skip: "Node/jose parity unavailable: #{reason}"
   end
 
   describe "JWT verify parity (Attesto RS256 -> JS jose)" do
@@ -241,6 +236,63 @@ defmodule Attesto.Parity.NodeParityTest do
 
         assert {:error, :unexpected_typ} =
                  Attesto.IDToken.verify(ctx.config, token, client_id: "client-js", now: ctx.now)
+      end
+    end
+
+    test "jose-signed resource audiences obey Attesto's explicit trust policy", ctx do
+      if ctx.node_ready do
+        resource_a = "https://resource.example/a"
+        resource_b = "https://resource.example/b"
+
+        base_claims = %{
+          "iss" => ctx.config.issuer,
+          "sub" => "oc_js_resource",
+          "iat" => ctx.now,
+          "exp" => ctx.now + 3600,
+          "jti" => "js-resource-token",
+          "scope" => "documents.read",
+          "principal_kind" => "client",
+          "typ" => "access",
+          "client_id" => "oc_js_resource"
+        }
+
+        scalar_claims = Map.put(base_claims, "aud", resource_a)
+
+        scalar =
+          NodeBridge.call!("attesto_compat", :signJwtJwk, [
+            scalar_claims,
+            ctx.priv_jwk,
+            "RS256",
+            "at+jwt"
+          ])
+
+        assert {:ok, %{"aud" => ^resource_a}} =
+                 Attesto.Token.verify(ctx.config, scalar,
+                   now: ctx.now,
+                   trusted_audiences: [resource_a]
+                 )
+
+        multiple_claims = Map.put(base_claims, "aud", [resource_a, resource_b])
+
+        multiple =
+          NodeBridge.call!("attesto_compat", :signJwtJwk, [
+            multiple_claims,
+            ctx.priv_jwk,
+            "RS256",
+            "at+jwt"
+          ])
+
+        assert {:ok, %{"aud" => [^resource_a, ^resource_b]}} =
+                 Attesto.Token.verify(ctx.config, multiple,
+                   now: ctx.now,
+                   trusted_audiences: [resource_a, resource_b]
+                 )
+
+        assert {:error, :invalid_audience} =
+                 Attesto.Token.verify(ctx.config, multiple,
+                   now: ctx.now,
+                   trusted_audiences: [resource_a]
+                 )
       end
     end
 

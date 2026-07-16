@@ -218,6 +218,103 @@ defmodule Attesto.TokenVerifyTest do
       assert {:ok, claims} = Token.verify(config, forged)
       assert claims["aud"] == ["https://other.example/", @audience]
     end
+
+    test ":trusted_audiences replaces the default rule and requires every array member", %{
+      config: config,
+      pem: pem
+    } do
+      resource_a = "https://resource.example/a"
+      resource_b = "https://resource.example/b"
+      scalar = forge(pem, client_claims(%{"aud" => resource_a}))
+      multiple = forge(pem, client_claims(%{"aud" => [resource_a, resource_b]}))
+      default = forge(pem, client_claims())
+
+      assert {:error, :invalid_audience} = Token.verify(config, scalar)
+      assert {:ok, %{"aud" => ^resource_a}} = Token.verify(config, scalar, trusted_audiences: [resource_a])
+
+      assert {:ok, %{"aud" => [^resource_a, ^resource_b]}} =
+               Token.verify(config, multiple, trusted_audiences: [resource_a, resource_b])
+
+      assert {:error, :invalid_audience} =
+               Token.verify(config, multiple, trusted_audiences: [resource_a])
+
+      assert {:error, :invalid_audience} =
+               Token.verify(config, default, trusted_audiences: [resource_a])
+    end
+
+    test ":trusted_audiences rejects malformed lists and resolver results", %{config: config, pem: pem} do
+      resource = "https://resource.example/a"
+      token = forge(pem, client_claims(%{"aud" => resource}))
+
+      policies = [
+        [],
+        [resource, ""],
+        [resource, 123],
+        resource,
+        fn _claims -> [] end,
+        fn _claims -> [resource, ""] end,
+        fn _claims -> [resource, 123] end,
+        fn _claims -> resource end,
+        fn _claims -> raise "policy failed" end,
+        fn _claims -> throw(:policy_failed) end,
+        fn _claims -> exit(:policy_failed) end
+      ]
+
+      for policy <- policies do
+        assert {:error, :invalid_audience} =
+                 Token.verify(config, token, trusted_audiences: policy)
+      end
+    end
+
+    test "an audience resolver runs only after every other token check succeeds", %{
+      config: config,
+      pem: pem
+    } do
+      now = unix_now()
+      resource = "https://resource.example/a"
+      test_pid = self()
+
+      resolver = fn claims ->
+        send(test_pid, {:audience_resolved, claims["client_id"]})
+        [resource]
+      end
+
+      foreign_pem = Factory.rsa_pem()
+
+      rejected = [
+        {forge(foreign_pem, client_claims(%{"aud" => resource})), :invalid_signature},
+        {forge(pem, client_claims(%{"aud" => resource, "iss" => "https://wrong.example"})), :invalid_issuer},
+        {forge(pem, client_claims(%{"aud" => resource, "exp" => now - 1, "iat" => now - 10})), :expired},
+        {forge(pem, client_claims(%{"aud" => resource, "nbf" => now + 3600})), :not_yet_valid},
+        {forge(pem, client_claims(%{"aud" => resource, "iat" => now + 3600, "exp" => now + 7200})), :not_yet_valid},
+        {forge(pem, client_claims(%{"aud" => resource, "client_id" => :__drop__})), :invalid_claims},
+        {forge(pem, client_claims(%{"aud" => resource, "client_id" => ""})), :invalid_claims},
+        {forge(
+           pem,
+           client_claims(%{
+             "aud" => resource,
+             "principal_kind" => "client",
+             "sub" => "usr_wrong_prefix"
+           })
+         ), :invalid_principal},
+        {forge(pem, client_claims(%{"aud" => resource, "typ" => "refresh"})), :unexpected_typ},
+        {forge(pem, client_claims(%{"aud" => resource, "cnf" => %{"jkt" => "invalid"}})), :unsupported_confirmation}
+      ]
+
+      for {token, reason} <- rejected do
+        assert {:error, ^reason} =
+                 Token.verify(config, token, now: now, trusted_audiences: resolver)
+
+        refute_received {:audience_resolved, _client_id}
+      end
+
+      valid = forge(pem, client_claims(%{"aud" => resource, "iat" => now, "exp" => now + 3600}))
+
+      assert {:ok, _claims} =
+               Token.verify(config, valid, now: now, trusted_audiences: resolver)
+
+      assert_received {:audience_resolved, "oc_abc123"}
+    end
   end
 
   describe "verify/3 expiry" do

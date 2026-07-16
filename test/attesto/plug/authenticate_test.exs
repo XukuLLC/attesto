@@ -84,6 +84,67 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert conn.assigns.who["sub"] == "oc_abc123"
     end
 
+    test "rejects a resource-audienced token without an explicit trust policy", %{config: config} do
+      resource = "https://resource.example/mcp"
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), audience: resource)
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
+    test "accepts a resource-audienced token with the route's explicit trust list", %{config: config} do
+      resource = "https://resource.example/mcp"
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), audience: resource)
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, trusted_audiences: [resource]))
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["aud"] == resource
+    end
+
+    test "forwards the trusted-audience resolver to token verification", %{config: config} do
+      resource = "https://resource.example/mcp"
+      test_pid = self()
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), audience: resource)
+
+      resolver = fn claims ->
+        send(test_pid, {:plug_audience_resolved, claims["client_id"]})
+        [resource]
+      end
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, trusted_audiences: resolver))
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["aud"] == resource
+      assert_received {:plug_audience_resolved, "oc_abc123"}
+    end
+
+    test "a malformed trusted-audience policy fails closed", %{config: config} do
+      resource = "https://resource.example/mcp"
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), audience: resource)
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, trusted_audiences: []))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
     test "rejects a form-body access_token by default",
          %{config: config} do
       {:ok, %{access_token: token}} = Token.mint(config, client_principal())

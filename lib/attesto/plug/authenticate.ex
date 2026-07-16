@@ -37,6 +37,14 @@ if Code.ensure_loaded?(Plug.Conn) do
         certificate the TLS layer authenticated. TLS termination varies, so
         the host supplies it. When it returns a certificate, its RFC 8705
         thumbprint is handed to `Attesto.Token.verify/3`.
+      * `:trusted_audiences` - a non-empty list of trusted audience
+        identifiers, or a one-arity resolver returning that list, forwarded
+        unchanged to `Attesto.Token.verify/3`. Configure this per protected
+        resource when it accepts RFC 8707 resource-audienced tokens. An
+        explicit list or resolver replaces the configured-audience policy, so
+        include `config.audience` when it should remain accepted. When absent,
+        the configured single-audience behavior is unchanged. Resolver safety
+        and fail-closed semantics are documented on `Attesto.Token.verify/3`.
       * `:htu` - `(conn -> https_uri_string)` overriding how the request URI
         (without query/fragment) is built; default uses `conn` directly,
         which requires the scheme/host to reflect the external request
@@ -124,7 +132,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       with {:ok, scheme, token} <- authorization(conn, opts),
            {:ok, dpop_jkt} <- verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumb} <- cert_thumbprint(conn, opts),
-           {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb) do
+           {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb, opts) do
         conn = assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
 
         # RFC 9470 §3: after the token is verified, enforce any route step-up
@@ -352,8 +360,12 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     # ----- access token -----
 
-    defp verify_token(config, token, dpop_jkt, mtls_thumb) do
-      case Token.verify(config, token, dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb) do
+    defp verify_token(config, token, dpop_jkt, mtls_thumb, opts) do
+      verify_opts =
+        [dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb] ++
+          Keyword.take(opts, [:trusted_audiences])
+
+      case Token.verify(config, token, verify_opts) do
         {:ok, claims} -> {:ok, claims}
         {:error, reason} -> {:token_error, reason}
       end

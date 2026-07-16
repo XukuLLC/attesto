@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-07-16
+
+### Fixed
+
+- Token verification, RFC 7662 introspection, and protected-resource Plug
+  authentication can now validate access tokens against an explicit, trusted
+  set of RFC 8707 resource audiences without disabling audience checks. The
+  Plug policy is configured per protected resource. Scalar audiences must occur
+  in the configured set; every member of an array audience must be trusted. The
+  default verifier behavior remains unchanged when no trusted set is supplied,
+  and malformed policy fails closed.
+
+### Security
+
+- Raise the optional Plug dependency floor to 1.19.5, excluding releases with
+  published multipart temp-file exhaustion, nested-parameter quadratic-time
+  denial-of-service, and cookie attribute-injection advisories.
+
 ## [1.2.1] - 2026-07-08
 
 ### Fixed

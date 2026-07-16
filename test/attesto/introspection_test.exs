@@ -86,6 +86,74 @@ defmodule Attesto.IntrospectionTest do
 
       assert Introspection.introspect(other, jwt, now: now) == %{"active" => false}
     end
+
+    test "an RFC 8707 resource-audienced token is active only when explicitly trusted", %{
+      config: config
+    } do
+      now = 1_700_000_000
+      resource = "https://resource.example/mcp"
+
+      {:ok, %{access_token: jwt}} =
+        Token.mint(config, client_principal(), now: now, audience: resource)
+
+      assert Introspection.introspect(config, jwt, now: now) == %{"active" => false}
+
+      response =
+        Introspection.introspect(config, jwt,
+          now: now,
+          trusted_audiences: [config.audience, resource]
+        )
+
+      assert response["active"] == true
+      assert response["aud"] == resource
+
+      assert Introspection.introspect(config, jwt,
+               now: now,
+               trusted_audiences: [config.audience, "https://other.example/mcp"]
+             ) == %{"active" => false}
+    end
+
+    test "trusted audiences fail closed for malformed policy and partially untrusted arrays", %{
+      config: config
+    } do
+      now = 1_700_000_000
+      trusted = "https://resource.example/a"
+      untrusted = "https://resource.example/not-allowed"
+
+      {:ok, %{access_token: array_jwt}} =
+        Token.mint(config, client_principal(),
+          now: now,
+          audience: [trusted, untrusted]
+        )
+
+      assert Introspection.introspect(config, array_jwt,
+               now: now,
+               trusted_audiences: [config.audience, trusted]
+             ) == %{"active" => false}
+
+      {:ok, %{access_token: scalar_jwt}} =
+        Token.mint(config, client_principal(), now: now, audience: trusted)
+
+      for malformed <- [[], [trusted, 123], [trusted, ""], trusted] do
+        assert Introspection.introspect(config, scalar_jwt,
+                 now: now,
+                 trusted_audiences: malformed
+               ) == %{"active" => false}
+      end
+
+      assert Introspection.introspect(config, scalar_jwt,
+               now: now,
+               trusted_audiences: fn claims ->
+                 assert claims["client_id"] == "oc_abc123"
+                 [config.audience, trusted]
+               end
+             )["active"] == true
+
+      assert Introspection.introspect(config, scalar_jwt,
+               now: now,
+               trusted_audiences: fn _claims -> raise "broken policy" end
+             ) == %{"active" => false}
+    end
   end
 
   describe "introspect/3 - :authorize caller policy (RFC 7662 §4 / RFC 9701 §5)" do

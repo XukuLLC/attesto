@@ -115,6 +115,7 @@ defmodule Attesto.Token do
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
           | {:expected_typ, String.t()}
+          | {:trusted_audiences, [String.t()] | (claims() -> [String.t()])}
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
           | {:require_confirmation_binding, boolean()}
@@ -258,7 +259,10 @@ defmodule Attesto.Token do
        silently strip the binding).
     3. **`iss`** equals the configured issuer.
     4. **`aud`** equals (or, in array form, contains) the configured
-       audience.
+       audience. When a `:trusted_audiences` list is supplied, a scalar
+       audience must be in that explicit set and every member of an array
+       audience must be trusted. A resolver-backed audience decision is
+       deferred until every other token check succeeds.
     5. **Temporal.** `exp` is strictly greater than `now` (no skew
        leeway). If `nbf` is present it MUST be an integer no later than
        `now` (RFC 7519 §4.1.5; a small clock-skew tolerance applies), else
@@ -283,6 +287,21 @@ defmodule Attesto.Token do
 
     * `:now` - clock override.
     * `:expected_typ` - `"access"` (default) or `"refresh"`.
+    * `:trusted_audiences` - a non-empty list of trusted audience identifiers,
+      or a one-arity resolver returning that list.
+      This is intended for authorization-server operations such as RFC 7662
+      introspection that recognize multiple RFC 8707 resource audiences. The
+      resolver receives claims only after signature, exact issuer, temporal,
+      required-claim, principal, purpose, and confirmation checks succeed; the
+      `aud` claim is syntactically valid but has not yet been authorized. Use
+      those claims only to select audience policy. Do not derive trust from
+      `aud` itself or perform irreversible work in the resolver. A resolver
+      failure or malformed return fails closed. This option never disables
+      audience verification. Array-valued `aud` claims are accepted only when
+      every member occurs in the resolved list. An explicit list or resolver
+      replaces the configured-audience rule, so include `config.audience` when
+      it should remain accepted. When absent, verification retains the
+      configured single-audience behavior.
     * `:dpop_jkt` - the verified DPoP proof's `jkt` (from
       `Attesto.DPoP.verify_proof/2`). Required iff the token carries
       `cnf.jkt`.
@@ -300,7 +319,7 @@ defmodule Attesto.Token do
     with {:ok, claims} <- verify_signature(config, jwt),
          :ok <- check_confirmation_shape(claims),
          :ok <- check_issuer(config, claims),
-         :ok <- check_audience(config, claims),
+         :ok <- check_audience_before_claim_validation(config, claims, opts),
          :ok <- check_expiry(claims, opts),
          :ok <- check_not_before(claims, opts),
          :ok <- check_required_claims(config, claims),
@@ -308,7 +327,8 @@ defmodule Attesto.Token do
          {:ok, kind} <- check_principal(config, claims),
          :ok <- check_principal_identity_claims(kind, claims),
          :ok <- check_typ(claims, opts),
-         :ok <- maybe_check_confirmation_binding(claims, opts) do
+         :ok <- maybe_check_confirmation_binding(claims, opts),
+         :ok <- check_deferred_audience(claims, opts) do
       {:ok, claims}
     end
   end
@@ -738,7 +758,41 @@ defmodule Attesto.Token do
   # the array form every member must be a string (a mixed array carrying a
   # non-string alongside the expected audience is malformed and rejected,
   # not silently tolerated).
-  defp check_audience(config, %{"aud" => aud}) do
+  # Keep the long-standing configured-audience and explicit-list checks in
+  # their original position, preserving error precedence. A callback may do
+  # host work (for example, resolve the signed token client), so validate only
+  # the aud claim here and defer invoking it until every other token check has
+  # succeeded.
+  defp check_audience_before_claim_validation(config, claims, opts) do
+    case Keyword.fetch(opts, :trusted_audiences) do
+      :error -> check_configured_audience(config, claims)
+      {:ok, trusted} when is_list(trusted) -> check_trusted_audiences(claims, trusted)
+      {:ok, resolver} when is_function(resolver, 1) -> check_audience_claim(claims)
+      {:ok, _invalid} -> {:error, :invalid_audience}
+    end
+  end
+
+  defp check_deferred_audience(claims, opts) do
+    case Keyword.fetch(opts, :trusted_audiences) do
+      {:ok, resolver} when is_function(resolver, 1) ->
+        check_trusted_audiences(claims, resolve_trusted_audiences(resolver, claims))
+
+      _immediate_or_default ->
+        :ok
+    end
+  end
+
+  defp check_audience_claim(%{"aud" => aud}) when is_binary(aud) and aud != "", do: :ok
+
+  defp check_audience_claim(%{"aud" => audiences}) when is_list(audiences) and audiences != [] do
+    if Enum.all?(audiences, &(is_binary(&1) and &1 != "")),
+      do: :ok,
+      else: {:error, :invalid_audience}
+  end
+
+  defp check_audience_claim(_claims), do: {:error, :invalid_audience}
+
+  defp check_configured_audience(config, %{"aud" => aud}) do
     expected = config.audience
 
     cond do
@@ -748,7 +802,31 @@ defmodule Attesto.Token do
     end
   end
 
-  defp check_audience(_config, _claims), do: {:error, :invalid_audience}
+  defp check_configured_audience(_config, _claims), do: {:error, :invalid_audience}
+
+  defp check_trusted_audiences(%{"aud" => aud}, trusted) when is_list(trusted) and trusted != [] do
+    if Enum.all?(trusted, &(is_binary(&1) and &1 != "")) and trusted_audience?(aud, trusted),
+      do: :ok,
+      else: {:error, :invalid_audience}
+  end
+
+  defp check_trusted_audiences(_claims, _trusted), do: {:error, :invalid_audience}
+
+  defp resolve_trusted_audiences(resolver, claims) when is_function(resolver, 1) do
+    resolver.(claims)
+  rescue
+    _error -> :invalid
+  catch
+    _kind, _reason -> :invalid
+  end
+
+  defp trusted_audience?(aud, trusted) when is_binary(aud), do: aud in trusted
+
+  defp trusted_audience?(audiences, trusted) when is_list(audiences) do
+    audiences != [] and Enum.all?(audiences, &(is_binary(&1) and &1 in trusted))
+  end
+
+  defp trusted_audience?(_audience, _trusted), do: false
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
     if exp > unix_now(opts), do: :ok, else: {:error, :expired}

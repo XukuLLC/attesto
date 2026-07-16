@@ -330,6 +330,62 @@ defmodule Attesto.Parity.CrossLanguageParityTest do
     end
   end
 
+  describe "resource-audience parity (Python joserfc issuer -> Attesto verifier)" do
+    test "Python-signed scalar and array audiences obey the explicit trust policy", _ctx do
+      pem = Factory.rsa_pem()
+      config = Factory.config(pem)
+      now = System.system_time(:second)
+      resource_a = "https://resource.example/a"
+      resource_b = "https://resource.example/b"
+
+      base_claims = %{
+        "iss" => config.issuer,
+        "sub" => "oc_python_resource",
+        "iat" => now,
+        "exp" => now + 3600,
+        "jti" => "python-resource-token",
+        "scope" => "documents.read",
+        "principal_kind" => "client",
+        "typ" => "access",
+        "client_id" => "oc_python_resource"
+      }
+
+      scalar =
+        py_eval!("build_rs256_jwt(claims, private_pem, typ)", %{
+          "claims" => Map.put(base_claims, "aud", resource_a),
+          "private_pem" => pem,
+          "typ" => "at+jwt"
+        })
+
+      assert {:error, :invalid_audience} = Attesto.Token.verify(config, scalar, now: now)
+
+      assert {:ok, %{"aud" => ^resource_a}} =
+               Attesto.Token.verify(config, scalar,
+                 now: now,
+                 trusted_audiences: [resource_a]
+               )
+
+      multiple =
+        py_eval!("build_rs256_jwt(claims, private_pem, typ)", %{
+          "claims" => Map.put(base_claims, "aud", [resource_a, resource_b]),
+          "private_pem" => pem,
+          "typ" => "at+jwt"
+        })
+
+      assert {:ok, %{"aud" => [^resource_a, ^resource_b]}} =
+               Attesto.Token.verify(config, multiple,
+                 now: now,
+                 trusted_audiences: [resource_a, resource_b]
+               )
+
+      assert {:error, :invalid_audience} =
+               Attesto.Token.verify(config, multiple,
+                 now: now,
+                 trusted_audiences: [resource_a]
+               )
+    end
+  end
+
   describe "thumbprint parity (Attesto compute_jkt -> joserfc RFC 7638)" do
     test "an EC P-256 JWK yields the same RFC 7638 thumbprint in both stacks", _ctx do
       # Elixir is the source of the key here: generate a real EC P-256 key
