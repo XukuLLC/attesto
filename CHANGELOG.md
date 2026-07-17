@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-07-16
+
+### Security
+
+- Require JOSE 1.11.9 or later on the 1.11 release line. This excludes releases
+  affected by the PBES2 iteration-count denial of service and avoids the
+  unintended runtime Dialyxir dependency published in JOSE 1.11.7 and 1.11.8.
+
 ## [1.2.3] - 2026-07-16
 
 ### Security
