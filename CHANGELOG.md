@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - 2026-07-17
+
+### Fixed
+
+- Require JOSE 1.11.12 or later on the 1.11 release line. JOSE 1.11.9 and
+  1.11.10 cannot encode or decode EC private keys on OTP 28 after OTP changed
+  the `ECPrivateKey` version representation. JOSE 1.11.11 fixed EC handling but
+  introduced a builtin-JSON regression that encoded Elixir `nil` as the string
+  `"nil"`; 1.11.12 is the first release to include both fixes. Attesto's public
+  API and runtime policy are unchanged.
+
 ## [1.2.4] - 2026-07-16
 
 ### Security
