@@ -48,7 +48,7 @@ defmodule Attesto.LogoutTokenTest do
       assert claims["events"] == %{@event_uri => %{}}
     end
 
-    test "the JOSE header typ is logout+jwt, RS256/kid", %{config: config, pem: pem} do
+    test "the default RSA JOSE header is logout+jwt with RS256/kid", %{config: config, pem: pem} do
       assert {:ok, jwt} = LogoutToken.mint(config, @client_id, sub: @subject)
       header = header!(jwt)
       assert header["typ"] == "logout+jwt"

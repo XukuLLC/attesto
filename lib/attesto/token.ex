@@ -1,6 +1,6 @@
 defmodule Attesto.Token do
   @moduledoc """
-  Mint and verify RS256 JWT access tokens.
+  Mint and verify JWT access tokens with trusted, key-bound algorithms.
 
   This is the heart of the engine: a single mint point and a single
   verifier that one issuer uses for every kind of principal. The two
@@ -30,10 +30,22 @@ defmodule Attesto.Token do
     * any per-kind required claims (e.g. `client_id`).
     * `cnf` - present iff the token is sender-constrained (DPoP or mTLS).
 
-  Tokens are signed RS256 with the key the configured `Attesto.Keystore`
-  provides; the JWS header carries the key's `kid` (its RFC 7638
-  thumbprint). The algorithm is pinned: `verify/3` rejects anything but
-  RS256, so `none`/`HS256` alg-confusion is impossible by construction.
+  Tokens are signed with the key the configured `Attesto.Keystore` provides;
+  the JWS header carries the key's `kid` (its RFC 7638 thumbprint) and the
+  algorithm resolved by `Attesto.SigningAlg`. Minting resolves that algorithm
+  from per-key `key_algs/0` metadata, then `signing_alg/0` for the current
+  signing key, then the trusted key type and curve. The supported set is
+  RS256, PS256, ES256, ES384, ES512, and EdDSA; RSA defaults to RS256.
+
+  Verification never learns algorithm policy from the presented JWS header.
+  The header `kid` only narrows the configured verification-key set; each
+  candidate key's permitted algorithm is resolved independently from per-key
+  `key_algs/0` metadata or the key type and curve, then passed as a singleton
+  allowlist to JOSE's strict verifier. `Attesto.Keystore.Static` mirrors an
+  explicitly configured `signing_alg` onto the current key's `kid`, so its
+  mint and verification policies agree without weakening that binding. A
+  token carrying `none`, an `HS*` algorithm, or any asymmetric algorithm other
+  than the one bound to that trusted key fails as `:invalid_signature`.
 
   ## Sender constraints
 
@@ -244,14 +256,16 @@ defmodule Attesto.Token do
     1. **Signature.** The compact JWS is canonical - three base64url-no-pad
        segments (Attesto rejects `=` padding or any non-base64url byte at
        its boundary, refusing to verify a serialization the issuer never
-       emitted) - and its RS256 signature
-       verifies against a key the keystore trusts, selected by the JWS
-       header `kid`. A token whose `kid` names a key we do not hold, or
-       whose header `alg` is anything but RS256, fails as
-       `:invalid_signature` (alg-confusion is impossible). A token whose
-       protected header carries a `crit` parameter (RFC 7515 §4.1.11) is
-       rejected with `:unsupported_critical_header` - Attesto implements no
-       JWS extensions, so it must not honour a token that demands one.
+       emitted) - and its signature verifies against a key the keystore
+       trusts, selected by the JWS header `kid`. The accepted algorithm for
+       each candidate key comes from trusted keystore metadata or the key
+       type/curve, never from the presented header. A token whose `kid` names
+       a key we do not hold, or whose header `alg` does not exactly match the
+       algorithm bound to that key, fails as `:invalid_signature`
+       (alg-confusion is impossible). A token whose protected header carries
+       a `crit` parameter (RFC 7515 §4.1.11) is rejected with
+       `:unsupported_critical_header` - Attesto implements no JWS extensions,
+       so it must not honour a token that demands one.
     2. **Confirmation shape.** If a `cnf` is present it MUST be exactly
        `%{"jkt" => <thumbprint>}` (DPoP) or `%{"x5t#S256" => <thumbprint>}`
        (mTLS), with a canonical thumbprint and no other members; anything
@@ -350,9 +364,9 @@ defmodule Attesto.Token do
   end
 
   @doc """
-  Return a token's claims iff its RS256 signature verifies against a
-  keystore key. Skips every other check (`iss`, `aud`, `exp`, claim
-  shape, binding).
+  Return a token's claims iff its signature verifies against a keystore key
+  under that trusted key's configured or derived algorithm. Skips every other
+  check (`iss`, `aud`, `exp`, claim shape, binding).
 
   This is NOT an authentication primitive - the token may be expired,
   replayed, wrongly scoped, or bound to a key the request did not present.
@@ -656,9 +670,9 @@ defmodule Attesto.Token do
         {:ok, claims}
 
       {false, _jwt_struct, _jws_struct} ->
-        # Covers signature-tamper and alg-confusion: the whitelist passed
-        # to verify_strict forces any non-RS256 header here with
-        # verified? == false.
+        # Covers signature-tamper and alg-confusion: the singleton whitelist
+        # passed to verify_strict forces any header algorithm other than the
+        # one bound to this trusted candidate key to verified? == false.
         {:error, :invalid_signature}
 
       _other ->

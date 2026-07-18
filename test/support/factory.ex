@@ -5,7 +5,7 @@ defmodule Attesto.Test.Factory do
 
   alias Attesto.Keystore.Static
 
-  @doc "A fresh PKCS#1 RSA private-key PEM (the shape Attesto.Key expects)."
+  @doc "A fresh PKCS#1 RSA private-key PEM for default-RSA fixtures."
   def rsa_pem(bits \\ 2048) do
     priv = :public_key.generate_key({:rsa, bits, 65_537})
     :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, priv)])

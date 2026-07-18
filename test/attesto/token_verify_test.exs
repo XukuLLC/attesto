@@ -23,7 +23,7 @@ defmodule Attesto.TokenVerifyTest do
   defp unix_in(delta) when is_integer(delta), do: unix_now() + delta
 
   # Sign an arbitrary claim map with `pem` so the signature is structurally
-  # valid, the way Attesto.Token.sign/2 does (RS256 + the key's kid). The
+  # valid under Attesto.Token's default RSA path (RS256 + the key's kid). The
   # mandatory `principal_kind` and `typ` claims default so claim-rejection
   # tests that do not care about them exercise an otherwise valid token; a
   # claim may be forced ABSENT with the :__drop__ sentinel.

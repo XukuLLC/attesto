@@ -86,7 +86,7 @@ defmodule Attesto.TokenMintTest do
       assert length(Enum.uniq(jtis)) == 20
     end
 
-    test "the JWS header pins alg=RS256 and carries the signing key kid", %{config: config, pem: pem} do
+    test "the default RSA JWS header carries alg=RS256 and the signing key kid", %{config: config, pem: pem} do
       assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
 
       header = header!(jwt)

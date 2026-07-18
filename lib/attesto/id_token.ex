@@ -11,10 +11,13 @@ defmodule Attesto.IDToken do
   kept in separate modules rather than overloading one mint path.
 
   Like `Attesto.Token`, the operations are pure: they read only the
-  `Attesto.Config` passed in. Signing uses the same keystore/`kid` path
-  and the same RS256 pinning, and every JOSE call funnels through
-  `JOSE.JWS` / `JOSE.JWT.verify_strict` so the alg whitelist (no `none`,
-  no `HS256` confusion) lives in one place and fails closed.
+  `Attesto.Config` passed in. Signing uses the same keystore/`kid` path and
+  trusted, key-bound algorithm resolution: RS256, PS256, ES256, ES384, ES512,
+  or EdDSA as selected by `Attesto.SigningAlg`. Verification derives each
+  candidate key's accepted algorithm from per-key keystore metadata or the
+  key type and curve rather than the presented header, then calls
+  `JOSE.JWT.verify_strict` with that singleton allowlist. `none`, `HS*`, and
+  any asymmetric algorithm not bound to the trusted key fail closed.
 
   ## Claims (OpenID Connect Core §2)
 
@@ -63,9 +66,9 @@ defmodule Attesto.IDToken do
 
   `at_hash` and `c_hash` use the same construction (OIDC Core §3.1.3.6,
   §3.3.2.11): hash the ASCII octets of the `access_token` / `code` with
-  the hash of the ID Token's signature algorithm (SHA-256 for RS256),
-  take the left-most half of the digest, and base64url-encode it without
-  padding.
+  the hash associated with the ID Token's signature algorithm (for example,
+  SHA-256 for RS256), take the left-most half of the digest, and
+  base64url-encode it without padding.
   """
 
   alias Attesto.Config
@@ -210,15 +213,17 @@ defmodule Attesto.IDToken do
   in order:
 
     1. **Signature.** The compact JWS is canonical - three base64url-no-pad
-       segments - and its RS256 signature verifies against a keystore key
-       selected by the JWS header `kid`. A `kid` naming a key we do not
-       hold, or an `alg` other than RS256, fails as `:invalid_signature`
-       (alg-confusion is impossible). A protected header carrying a `crit`
-       parameter (RFC 7515 §4.1.11) is rejected with
+       segments - and its signature verifies against a keystore key selected
+       by the JWS header `kid`. Each candidate key's accepted algorithm comes
+       from trusted keystore metadata or the key type/curve, never from the
+       presented header. A `kid` naming a key we do not hold, or an `alg` that
+       does not exactly match the algorithm bound to that key, fails as
+       `:invalid_signature` (alg-confusion is impossible). A protected header
+       carrying a `crit` parameter (RFC 7515 §4.1.11) is rejected with
        `:unsupported_critical_header`. The JOSE header `typ`, when present,
        MUST be `"JWT"`; an access-token header such as `"at+jwt"` is
-       `:unexpected_typ`. Verification also rejects access-token-only
-       payload claims such as `scope`, `typ: "access"`, and the configured
+       `:unexpected_typ`. Verification also rejects access-token-only payload
+       claims such as `scope`, `typ: "access"`, and the configured
        principal-kind claim, so token-type separation does not depend solely
        on the optional JOSE `typ` header.
     2. **`iss`** equals the configured issuer (OIDC Core §3.1.3.7 item 1).
@@ -369,7 +374,7 @@ defmodule Attesto.IDToken do
 
   # Mirrors `Attesto.Token`'s signature path: peek the protected header,
   # reject any `crit` member (RFC 7515 §4.1.11), select keystore keys by
-  # `kid`, and verify strictly against the RS256 whitelist.
+  # `kid`, and verify strictly against each trusted key's bound algorithm.
   defp verify_signature(config, jwt) do
     with :ok <- check_compact_form(jwt),
          {:ok, header} <- peek_protected_header(jwt),
@@ -447,8 +452,9 @@ defmodule Attesto.IDToken do
         {:ok, claims}
 
       {false, _jwt_struct, _jws_struct} ->
-        # Covers signature-tamper and alg-confusion: the whitelist forces
-        # any non-RS256 header to verified? == false.
+        # Covers signature-tamper and alg-confusion: the singleton whitelist
+        # forces any header algorithm other than this trusted key's bound
+        # algorithm to verified? == false.
         {:error, :invalid_signature}
 
       _other ->

@@ -174,7 +174,7 @@ defmodule Attesto.ConformanceVectorsTest do
       jwk = JOSE.JWK.from_map(@rfc7515_public_jwk)
 
       # Pin the algorithm explicitly: verify_strict rejects any alg other
-      # than RS256, exactly as Attesto.Token does (alg-confusion proof).
+      # than RS256, as Attesto.Token does for a key resolved to RS256.
       assert {true, %JOSE.JWT{}, %JOSE.JWS{}} =
                JOSE.JWT.verify_strict(jwk, ["RS256"], @rfc7515_jws)
     end

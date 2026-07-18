@@ -5,10 +5,10 @@ defmodule Attesto do
 
   Attesto implements the parts of OAuth/OIDC that are the same for every
   deployment and easy to get subtly wrong - JWT signing and verification
-  with a pinned algorithm and `kid`-based key selection, sender-constrained
-  tokens via DPoP (RFC 9449) and mutual-TLS (RFC 8705), PKCE (RFC 7636),
-  and the scope grant-form algebra. It deliberately does **not** implement
-  your identity model, persistence, or authorization policy.
+  with a trusted, key-bound algorithm and `kid`-based key selection,
+  sender-constrained tokens via DPoP (RFC 9449) and mutual-TLS (RFC 8705),
+  PKCE (RFC 7636), and the scope grant-form algebra. It deliberately does
+  **not** implement your identity model, persistence, or authorization policy.
 
   ## The split
 

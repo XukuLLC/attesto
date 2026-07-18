@@ -52,7 +52,7 @@ defmodule Attesto.IDTokenTest do
       refute Map.has_key?(payload!(jwt), "scope")
     end
 
-    test "the JOSE header is RS256/kid and typ JWT, never at+jwt", %{config: config, pem: pem} do
+    test "the default RSA JOSE header is RS256/kid and typ JWT, never at+jwt", %{config: config, pem: pem} do
       assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
 
       header = header!(jwt)
@@ -163,6 +163,35 @@ defmodule Attesto.IDTokenTest do
       dt = ~U[2026-01-01 00:00:00Z]
       assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id, now: dt)
       assert payload!(jwt)["iat"] == DateTime.to_unix(dt, :second)
+    end
+  end
+
+  describe "trusted key-bound signing algorithms" do
+    for {alg, key} <- [
+          {"RS256", :rsa},
+          {"PS256", :rsa},
+          {"ES256", {:ec, "P-256"}},
+          {"ES384", {:ec, "P-384"}},
+          {"ES512", {:ec, "P-521"}},
+          {"EdDSA", :ed25519}
+        ] do
+      test "#{alg} mint and verify agree" do
+        alg = unquote(alg)
+        pem = signing_pem(unquote(Macro.escape(key)))
+        config_opts = if alg == "PS256", do: [signing_alg: alg], else: []
+        config = Factory.config(pem, config_opts)
+
+        assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
+
+        assert header!(jwt) == %{
+                 "alg" => alg,
+                 "kid" => Key.kid(pem),
+                 "typ" => "JWT"
+               }
+
+        assert {:ok, claims} = IDToken.verify(config, jwt, client_id: @client_id)
+        assert claims["sub"] == @subject
+      end
     end
   end
 
@@ -482,4 +511,8 @@ defmodule Attesto.IDTokenTest do
     {_, jwt} = jwk |> JOSE.JWS.sign(JSON.encode!(claims), header) |> JOSE.JWS.compact()
     jwt
   end
+
+  defp signing_pem(:rsa), do: Factory.rsa_pem()
+  defp signing_pem({:ec, curve}), do: Factory.ec_pem(curve)
+  defp signing_pem(:ed25519), do: Factory.ed_pem()
 end

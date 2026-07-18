@@ -1,7 +1,7 @@
 defmodule Attesto.TokenTemporalTest do
   @moduledoc false
   # Temporal and audience edge cases for Attesto.Token.verify/3, exercised
-  # by forging RS256-signed tokens with arbitrary claims.
+  # by forging tokens with the fixture's trusted RS256 key and arbitrary claims.
   #
   # Each case mints a baseline valid token via Token.mint, decodes its
   # claims, overrides ONLY the claim under test, and re-signs with the same
@@ -48,9 +48,9 @@ defmodule Attesto.TokenTemporalTest do
     payload |> Base.url_decode64!(padding: false) |> JSON.decode!()
   end
 
-  # Re-sign `claims` with the config's keystore key the way Token.sign/2
-  # does: RS256 over the key's kid. The signature is genuine, so verify can
-  # only fail on the claim content.
+  # Re-sign `claims` with the config's keystore key the way Token.sign/2 does
+  # for this default RSA fixture: RS256 over the key's kid. The signature is
+  # genuine, so verify can only fail on the claim content.
   defp resign(pem, claims) do
     jwk = Key.signing_jwk(pem)
 
