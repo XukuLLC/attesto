@@ -12,9 +12,11 @@ defmodule Attesto.LogoutToken do
   or authorization claims.
 
   Like `Attesto.IDToken`, minting is pure: it reads only the `Attesto.Config`
-  passed in, signs through the same keystore/`kid`/RS256 path, and funnels the
-  JOSE call through the shared internal JWS signer so the alg whitelist lives in
-  one place.
+  passed in and signs through the same keystore/`kid` path. The algorithm is
+  bound to trusted keystore metadata or the signing key's type and curve by
+  `Attesto.SigningAlg`; the protected header records that resolved algorithm
+  but never supplies its policy. The JOSE call funnels through the shared
+  internal JWS signer.
 
   ## Claims (Back-Channel Logout 1.0 §2.4)
 

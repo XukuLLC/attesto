@@ -158,8 +158,8 @@ defmodule Attesto.SecurityNegativeTest do
     test "an HS256 token (symmetric, signed with the RSA public PEM as the secret) is rejected",
          %{config: config, pem: pem} do
       # The classic RS256->HS256 confusion: an attacker who knows the public
-      # key signs an HMAC with the public PEM bytes as the secret. Token pins
-      # RS256, so verify_strict's allow-list forces verified? == false.
+      # key signs an HMAC with the public PEM bytes as the secret. This trusted
+      # RSA key resolves to RS256, so verify_strict rejects the header.
       public_pem = Key.public_pem(pem)
       secret = JOSE.JWK.from_oct(public_pem)
 
@@ -206,10 +206,11 @@ defmodule Attesto.SecurityNegativeTest do
     end
 
     # RFC 7515 §4.1.11: a recipient that does not understand a parameter
-    # named in `crit` MUST reject the JWS. attesto pins RS256 and understands
-    # no extension parameters, so any `crit` member is rejected with
-    # `:unsupported_critical_header` (JOSE itself does no `crit` processing,
-    # so attesto enforces this in `verify/3` before trusting the token).
+    # named in `crit` MUST reject the JWS. This fixture's trusted key resolves
+    # to RS256 and Attesto understands no extension parameters, so `crit` is
+    # rejected with `:unsupported_critical_header` (JOSE itself does no `crit`
+    # processing, so Attesto enforces this in `verify/3` before trusting the
+    # token).
     test "a token whose protected header carries an unknown `crit` parameter is rejected",
          %{config: config, pem: pem} do
       jwt =

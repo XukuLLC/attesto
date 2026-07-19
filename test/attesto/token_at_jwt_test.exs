@@ -42,7 +42,7 @@ defmodule Attesto.TokenAtJwtTest do
       assert header["typ"] == "at+jwt"
     end
 
-    test "alg is RS256 and kid is present on every access token", %{pem: pem} do
+    test "the default RSA algorithm and kid are present on an access token", %{pem: pem} do
       config = Factory.config(pem)
 
       assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
@@ -78,23 +78,50 @@ defmodule Attesto.TokenAtJwtTest do
     end
   end
 
-  describe "non-RSA signing key" do
-    test "minting with an EC P-256 signing key uses ES256 and verifies" do
-      ec_pem =
-        {:ec, "P-256"}
-        |> JOSE.JWK.generate_key()
-        |> JOSE.JWK.to_pem()
-        |> elem(1)
+  describe "trusted key-bound signing algorithms" do
+    for {alg, key} <- [
+          {"RS256", :rsa},
+          {"PS256", :rsa},
+          {"ES256", {:ec, "P-256"}},
+          {"ES384", {:ec, "P-384"}},
+          {"ES512", {:ec, "P-521"}},
+          {"EdDSA", :ed25519}
+        ] do
+      test "#{alg} mint, verify, and signed-claims inspection agree" do
+        alg = unquote(alg)
+        pem = signing_pem(unquote(Macro.escape(key)))
+        config_opts = if alg == "PS256", do: [signing_alg: alg], else: []
+        config = Factory.config(pem, config_opts)
 
-      config = Factory.config(ec_pem)
+        assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
 
-      assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
+        assert %{"alg" => ^alg, "kid" => kid} = protected_header(jwt)
+        assert kid == Attesto.Key.kid(pem)
 
-      header = protected_header(jwt)
-      assert header["alg"] == "ES256"
-      assert header["kid"] == Attesto.Key.kid(ec_pem)
-      assert {:ok, claims} = Token.verify(config, jwt)
-      assert claims["sub"] == "oc_abc123"
+        assert {:ok, claims} = Token.verify(config, jwt)
+        assert claims["sub"] == "oc_abc123"
+
+        assert {:ok, signed_claims} = Token.peek_signed_claims(config, jwt)
+        assert signed_claims == claims
+      end
+    end
+
+    test "verification does not learn algorithm policy from a valid token header" do
+      pem = Factory.rsa_pem()
+      rs256_config = Factory.config(pem)
+
+      assert {:ok, %{access_token: jwt}} = Token.mint(rs256_config, client_principal())
+
+      assert protected_header(jwt) == %{
+               "alg" => "RS256",
+               "kid" => Attesto.Key.kid(pem),
+               "typ" => "at+jwt"
+             }
+
+      ps256_config = Factory.config(pem, signing_alg: "PS256")
+
+      assert {:error, :invalid_signature} = Token.verify(ps256_config, jwt)
+      assert {:error, :invalid_signature} = Token.peek_signed_claims(ps256_config, jwt)
     end
   end
 
@@ -123,4 +150,8 @@ defmodule Attesto.TokenAtJwtTest do
       refute Map.has_key?(header, "typ")
     end
   end
+
+  defp signing_pem(:rsa), do: Factory.rsa_pem()
+  defp signing_pem({:ec, curve}), do: Factory.ec_pem(curve)
+  defp signing_pem(:ed25519), do: Factory.ed_pem()
 end

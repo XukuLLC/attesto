@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Correct the token, ID Token, logout-token, and keystore documentation to
+  describe Attesto's existing multi-algorithm support. Signing and verification
+  bind RS256, PS256, ES256, ES384, ES512, or EdDSA to trusted keystore metadata
+  or the key type and curve; verification never learns algorithm policy from a
+  presented JWS header. Runtime behavior is unchanged.
+
 ## [1.2.5] - 2026-07-17
 
 ### Fixed

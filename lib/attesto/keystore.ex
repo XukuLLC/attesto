@@ -26,7 +26,10 @@ defmodule Attesto.Keystore do
   """
 
   @doc """
-  The private RSA key PEM used to sign newly issued tokens.
+  The private signing-key PEM used to sign newly issued tokens.
+
+  The key must support one of the asymmetric algorithms accepted by
+  `Attesto.SigningAlg`.
   """
   @callback signing_pem() :: String.t()
 
@@ -51,8 +54,11 @@ defmodule Attesto.Keystore do
   Optional global algorithm for the current signing key.
 
   This is a convenience for single-key RSA deployments that want PS256
-  without precomputing the signing key's `kid`. Verification still uses
-  `key_algs/0` when present, then key inference.
+  without precomputing the signing key's `kid`. A custom keystore whose value
+  differs from key inference MUST expose the same binding through `key_algs/0`
+  so its newly minted tokens also verify. `Attesto.Keystore.Static` does that
+  automatically. Verification otherwise uses `key_algs/0` when present, then
+  key inference.
   """
   @callback signing_alg() :: String.t()
 
