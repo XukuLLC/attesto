@@ -4,6 +4,7 @@ defmodule Attesto.LogoutTokenTest do
   # (Attesto.Keystore.Static singleton), so these run serially.
   use ExUnit.Case, async: false
 
+  alias __MODULE__.RotatingKeystore
   alias Attesto.IDToken
   alias Attesto.Key
   alias Attesto.LogoutToken
@@ -97,6 +98,20 @@ defmodule Attesto.LogoutTokenTest do
       jwk = Key.jwk(pem)
       assert {true, _, _} = JOSE.JWT.verify_strict(jwk, [IDToken.signing_alg()], jwt)
     end
+
+    test "reads a rotating keystore's signing PEM exactly once" do
+      first_pem = Factory.rsa_pem()
+      second_pem = Factory.ed_pem()
+      RotatingKeystore.install([first_pem, second_pem])
+      config = %{Factory.config(first_pem) | keystore: RotatingKeystore}
+
+      assert {:ok, jwt} = LogoutToken.mint(config, @client_id, sub: @subject)
+
+      assert RotatingKeystore.signing_pem_calls() == 1
+      assert header!(jwt)["alg"] == "RS256"
+      assert header!(jwt)["kid"] == Key.kid(first_pem)
+      assert {true, _, _} = JOSE.JWT.verify_strict(Key.jwk(first_pem), ["RS256"], jwt)
+    end
   end
 
   describe "mint/3 errors" do
@@ -113,5 +128,29 @@ defmodule Attesto.LogoutTokenTest do
   test "event_uri/0 and header_typ/0 expose the constants" do
     assert LogoutToken.event_uri() == @event_uri
     assert LogoutToken.header_typ() == "logout+jwt"
+  end
+
+  defmodule RotatingKeystore do
+    @moduledoc false
+    @behaviour Attesto.Keystore
+
+    def install(pems) do
+      Process.put({__MODULE__, :remaining}, pems)
+      Process.put({__MODULE__, :all}, pems)
+      Process.put({__MODULE__, :calls}, 0)
+    end
+
+    def signing_pem_calls, do: Process.get({__MODULE__, :calls}, 0)
+
+    @impl true
+    def signing_pem do
+      [pem | rest] = Process.get({__MODULE__, :remaining})
+      Process.put({__MODULE__, :remaining}, rest)
+      Process.put({__MODULE__, :calls}, signing_pem_calls() + 1)
+      pem
+    end
+
+    @impl true
+    def verification_pems, do: Process.get({__MODULE__, :all})
   end
 end

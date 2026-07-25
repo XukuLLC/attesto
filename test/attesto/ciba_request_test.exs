@@ -1,6 +1,6 @@
 defmodule Attesto.CIBA.RequestTest do
   @moduledoc false
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Attesto.CIBA.Request
 
@@ -207,7 +207,7 @@ defmodule Attesto.CIBA.RequestTest do
 
   defp ec_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
 
-  defp public_jwk(jwk, overrides \\ %{}) do
+  defp public_jwk(jwk, overrides) do
     {_kty, map} = JOSE.JWK.to_public_map(jwk)
     Map.merge(map, Map.merge(%{"kid" => JOSE.JWK.thumbprint(jwk), "alg" => "ES256"}, overrides))
   end
@@ -235,8 +235,9 @@ defmodule Attesto.CIBA.RequestTest do
     compact
   end
 
-  defp signing_client(jwk, overrides \\ %{}) do
-    client(Map.merge(%{jwks: %{"keys" => [public_jwk(jwk)]}}, overrides))
+  defp signing_client(jwk, overrides \\ %{}, alg \\ "ES256") do
+    trusted = public_jwk(jwk, %{"alg" => alg})
+    client(Map.merge(%{jwks: %{"keys" => [trusted]}}, overrides))
   end
 
   defp signed_opts, do: [issuer: @issuer]
@@ -288,6 +289,29 @@ defmodule Attesto.CIBA.RequestTest do
       assert {:error, :invalid_request} = Request.validate(client, %{"request" => jwt}, signed_opts())
     end
 
+    test "the derived FAPI policy rejects PS256 with an RSA modulus below 2048 bits" do
+      key = JOSE.JWK.generate_key({:rsa, 1024})
+      jwt = signed_request(key, %{}, %{"alg" => "PS256"})
+      client = signing_client(key, %{}, "PS256")
+
+      assert {:error, :invalid_request} =
+               Request.validate(client, %{"request" => jwt}, signed_opts())
+
+      assert {:error, :invalid_request} =
+               Request.validate(
+                 client,
+                 %{"request" => jwt},
+                 signed_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: true]
+               )
+
+      assert {:ok, _request} =
+               Request.validate(
+                 client,
+                 %{"request" => jwt},
+                 signed_opts() ++ [accepted_algs: ["PS256"]]
+               )
+    end
+
     test "the client's registered signing alg pins the accepted algorithm" do
       key = ec_key()
       jwt = signed_request(key)
@@ -318,6 +342,42 @@ defmodule Attesto.CIBA.RequestTest do
                  %{"request" => jwt},
                  signed_opts() ++ [accepted_algs: ["PS256"]]
                )
+    end
+
+    test "the derived default policy accepts Ed25519 identifiers but still rejects Ed448" do
+      ed25519 = JOSE.JWK.generate_key({:okp, :Ed25519})
+
+      for alg <- ["EdDSA", "Ed25519"] do
+        jwt = signed_request(ed25519, %{}, %{"alg" => alg})
+
+        assert {:ok, _request} =
+                 Request.validate(signing_client(ed25519, %{}, alg), %{"request" => jwt}, signed_opts())
+      end
+
+      enable_ed448_support()
+      ed448 = JOSE.JWK.generate_key({:okp, :Ed448})
+
+      for alg <- ["EdDSA", "Ed448"] do
+        jwt = signed_request(ed448, %{}, %{"alg" => alg})
+        client = signing_client(ed448, %{}, alg)
+
+        assert {:error, :invalid_request} =
+                 Request.validate(client, %{"request" => jwt}, signed_opts())
+
+        assert {:error, :invalid_request} =
+                 Request.validate(
+                   client,
+                   %{"request" => jwt},
+                   signed_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: true]
+                 )
+
+        assert {:ok, _request} =
+                 Request.validate(
+                   client,
+                   %{"request" => jwt},
+                   signed_opts() ++ [accepted_algs: [alg]]
+                 )
+      end
     end
 
     test "each of the §7.1.1 REQUIRED claims is enforced" do
@@ -464,5 +524,11 @@ defmodule Attesto.CIBA.RequestTest do
                  signed_opts() ++ [require_signed_request: true]
                )
     end
+  end
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end

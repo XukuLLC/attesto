@@ -108,7 +108,8 @@ defmodule Attesto.LogoutToken do
          {:ok, identifiers} <- subject_identifiers(opts) do
       iat = unix_now(opts)
       lifetime = lifetime_seconds(opts)
-      alg = signing_alg(config)
+      pem = config.keystore.signing_pem()
+      alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
 
       claims =
         %{
@@ -121,7 +122,7 @@ defmodule Attesto.LogoutToken do
         }
         |> Map.merge(identifiers)
 
-      {:ok, sign(config, claims, alg)}
+      {:ok, sign(pem, claims, alg)}
     end
   end
 
@@ -154,14 +155,8 @@ defmodule Attesto.LogoutToken do
     end
   end
 
-  defp sign(config, claims, alg) do
-    pem = config.keystore.signing_pem()
+  defp sign(pem, claims, alg) do
     Attesto.JWS.sign_compact(pem, jose_header(pem, alg), claims)
-  end
-
-  defp signing_alg(config) do
-    pem = config.keystore.signing_pem()
-    SigningAlg.for_key(config.keystore, pem, signing?: true)
   end
 
   defp jose_header(pem, alg) do

@@ -1,6 +1,6 @@
 defmodule Attesto.ClientAssertionTest do
   @moduledoc false
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Attesto.ClientAssertion
 
@@ -14,7 +14,7 @@ defmodule Attesto.ClientAssertionTest do
     Map.merge(map, Map.merge(%{"kid" => JOSE.JWK.thumbprint(jwk), "alg" => "ES256"}, overrides))
   end
 
-  defp assertion(jwk, overrides \\ %{}) do
+  defp assertion(jwk, overrides \\ %{}, alg \\ "ES256") do
     now = System.system_time(:second)
 
     claims =
@@ -30,7 +30,7 @@ defmodule Attesto.ClientAssertionTest do
         overrides
       )
 
-    header = %{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}
+    header = %{"alg" => alg, "kid" => JOSE.JWK.thumbprint(jwk)}
     {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
     compact
   end
@@ -106,6 +106,24 @@ defmodule Attesto.ClientAssertionTest do
              ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [jwk]})
   end
 
+  test "the FAPI default rejects PS256 with an RSA modulus below 2048 bits" do
+    key = JOSE.JWK.generate_key({:rsa, 1024})
+    jwt = assertion(key, %{}, "PS256")
+    trusted = public_jwk(key, %{"alg" => "PS256"})
+
+    assert {:error, :invalid_signature} =
+             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]})
+
+    assert {:error, :invalid_signature} =
+             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+               accepted_algs: ["PS256"],
+               enforce_fapi_alg_policy: true
+             )
+
+    assert {:ok, _claims} =
+             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: ["PS256"])
+  end
+
   test "default :accepted_algs keeps the FAPI set (current behaviour)" do
     key = ec_key()
     jwt = assertion(key)
@@ -132,5 +150,45 @@ defmodule Attesto.ClientAssertionTest do
              ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [public_jwk(key)]},
                accepted_algs: ["ES256"]
              )
+  end
+
+  test "the FAPI default accepts legacy EdDSA and RFC 9864 Ed25519 only over Ed25519" do
+    key = JOSE.JWK.generate_key({:okp, :Ed25519})
+
+    for alg <- ["EdDSA", "Ed25519"] do
+      jwt = assertion(key, %{}, alg)
+      trusted = public_jwk(key, %{"alg" => alg})
+
+      assert {:ok, _claims} =
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]})
+    end
+  end
+
+  test "the FAPI default rejects Ed448 but an explicit non-FAPI policy can opt in" do
+    enable_ed448_support()
+    key = JOSE.JWK.generate_key({:okp, :Ed448})
+
+    for alg <- ["EdDSA", "Ed448"] do
+      jwt = assertion(key, %{}, alg)
+      trusted = public_jwk(key, %{"alg" => alg})
+
+      assert {:error, :invalid_signature} =
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]})
+
+      assert {:error, :invalid_signature} =
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+                 accepted_algs: [alg],
+                 enforce_fapi_alg_policy: true
+               )
+
+      assert {:ok, _claims} =
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: [alg])
+    end
+  end
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end

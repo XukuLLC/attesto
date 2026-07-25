@@ -85,12 +85,13 @@ defmodule Attesto.TokenAtJwtTest do
           {"ES256", {:ec, "P-256"}},
           {"ES384", {:ec, "P-384"}},
           {"ES512", {:ec, "P-521"}},
-          {"EdDSA", :ed25519}
+          {"EdDSA", :ed25519},
+          {"Ed25519", :ed25519}
         ] do
       test "#{alg} mint, verify, and signed-claims inspection agree" do
         alg = unquote(alg)
         pem = signing_pem(unquote(Macro.escape(key)))
-        config_opts = if alg == "PS256", do: [signing_alg: alg], else: []
+        config_opts = if alg in ["PS256", "Ed25519"], do: [signing_alg: alg], else: []
         config = Factory.config(pem, config_opts)
 
         assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
@@ -103,6 +104,20 @@ defmodule Attesto.TokenAtJwtTest do
 
         assert {:ok, signed_claims} = Token.peek_signed_claims(config, jwt)
         assert signed_claims == claims
+      end
+    end
+
+    test "legacy EdDSA and explicit Ed448 access tokens mint and verify over Ed448" do
+      enable_ed448_support()
+      pem = Factory.ed448_pem()
+
+      for alg <- ["EdDSA", "Ed448"] do
+        config_opts = if alg == "Ed448", do: [signing_alg: alg], else: []
+        config = Factory.config(pem, config_opts)
+
+        assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
+        assert %{"alg" => ^alg} = protected_header(jwt)
+        assert {:ok, _claims} = Token.verify(config, jwt)
       end
     end
 
@@ -154,4 +169,10 @@ defmodule Attesto.TokenAtJwtTest do
   defp signing_pem(:rsa), do: Factory.rsa_pem()
   defp signing_pem({:ec, curve}), do: Factory.ec_pem(curve)
   defp signing_pem(:ed25519), do: Factory.ed_pem()
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
+  end
 end

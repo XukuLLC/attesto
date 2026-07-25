@@ -35,9 +35,12 @@ defmodule Attesto.DPoP do
 
   Per RFC 9449 §4.2, DPoP proofs MUST be signed with an asymmetric
   algorithm. This verifier whitelists `ES256`, `ES384`, `ES512`, `RS256`,
-  `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, and `EdDSA`. Symmetric
-  algorithms (`HS*`) and the unsecured `none` algorithm are rejected;
-  there is no caller-facing knob to relax this.
+  `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, legacy `EdDSA`, and RFC 9864
+  `Ed25519` / `Ed448`, intersected with the algorithms the configured JOSE
+  backend reports as available. The explicit Edwards identifiers must match
+  the embedded public JWK's curve, and RSA proof keys must have a modulus of
+  at least 2048 bits. Symmetric algorithms (`HS*`) and the unsecured `none`
+  algorithm are rejected; there is no caller-facing knob to relax this.
 
   ## Replay protection
 
@@ -65,10 +68,13 @@ defmodule Attesto.DPoP do
   """
 
   alias Attesto.SecureCompare
+  alias Attesto.SigningAlg
   alias Attesto.Thumbprint
 
   # RFC 9449 §4.2: asymmetric algorithms only.
-  @allowed_algs ~w(ES256 ES384 ES512 RS256 RS384 RS512 PS256 PS384 PS512 EdDSA)
+  @allowed_algs ~w(ES256 ES384 ES512 RS256 RS384 RS512 PS256 PS384 PS512 EdDSA Ed25519 Ed448)
+  @rsa_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
+  @minimum_rsa_modulus_bits 2048
   @proof_typ "dpop+jwt"
   @default_max_age_seconds 60
   # Match the verifier-wide clock skew used for JWT assertions and ID/access
@@ -182,6 +188,8 @@ defmodule Attesto.DPoP do
          :ok <- check_alg(header),
          :ok <- check_crit(header),
          {:ok, jwk} <- extract_jwk(header),
+         :ok <- check_key_strength(header["alg"], jwk),
+         :ok <- check_edwards_alg_curve(header["alg"], jwk),
          {:ok, claims} <- verify_signature(proof, header["alg"], jwk),
          :ok <- check_htm(claims, opts),
          :ok <- check_htu(claims, opts),
@@ -236,10 +244,13 @@ defmodule Attesto.DPoP do
 
   @doc """
   The list of JOSE `alg` values accepted on a DPoP proof's protected
-  header.
+  header, filtered by the configured JOSE backend's current capabilities.
   """
   @spec allowed_algs() :: [String.t()]
-  def allowed_algs, do: @allowed_algs
+  def allowed_algs do
+    supported = jose_jws_algs()
+    Enum.filter(@allowed_algs, &(&1 in supported))
+  end
 
   # ----- internal: header parsing -----
 
@@ -296,7 +307,7 @@ defmodule Attesto.DPoP do
   defp check_typ(_header), do: {:error, :invalid_typ}
 
   defp check_alg(%{"alg" => alg}) when is_binary(alg) do
-    if alg in @allowed_algs, do: :ok, else: {:error, :invalid_alg}
+    if alg in allowed_algs(), do: :ok, else: {:error, :invalid_alg}
   end
 
   defp check_alg(_header), do: {:error, :invalid_alg}
@@ -344,6 +355,38 @@ defmodule Attesto.DPoP do
     _ -> {:error, :invalid_jwk}
   catch
     _, _ -> {:error, :invalid_jwk}
+  end
+
+  defp check_edwards_alg_curve(alg, jwk) when alg in ["EdDSA", "Ed25519", "Ed448"] do
+    SigningAlg.validate_for_key!(alg, jwk)
+    :ok
+  rescue
+    _ -> {:error, :invalid_jwk}
+  end
+
+  defp check_edwards_alg_curve(_alg, _jwk), do: :ok
+
+  defp check_key_strength(alg, jwk) when alg in @rsa_algs do
+    case JOSE.JWK.to_public_map(jwk) do
+      {_metadata, %{"kty" => "RSA"}} ->
+        if SigningAlg.rsa_modulus_at_least?(jwk, @minimum_rsa_modulus_bits),
+          do: :ok,
+          else: {:error, :invalid_jwk}
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp check_key_strength(_alg, _jwk), do: :ok
+
+  defp jose_jws_algs do
+    case Keyword.get(JOSE.JWA.supports(), :jws) do
+      {:alg, algorithms} when is_list(algorithms) -> algorithms
+      _ -> []
+    end
+  rescue
+    _ -> []
   end
 
   # Private-key components per RFC 7518 §6.2.2 / §6.3.2. Any of these in a

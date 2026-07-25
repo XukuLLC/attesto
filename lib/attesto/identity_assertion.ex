@@ -165,7 +165,7 @@ defmodule Attesto.IdentityAssertion do
     |> Enum.map(fn jwk_map ->
       jwk = JOSE.JWK.from_map(jwk_map)
       alg = Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
-      {Map.get(jwk_map, "kid"), SigningAlg.validate!(alg), jwk}
+      {Map.get(jwk_map, "kid"), SigningAlg.validate_for_key!(alg, jwk), jwk}
     end)
     |> Enum.filter(fn {_kid, alg, _jwk} -> alg in accepted_algs end)
     |> filter_by_kid(header_kid)

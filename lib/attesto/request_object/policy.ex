@@ -15,6 +15,7 @@ defmodule Attesto.RequestObject.Policy do
 
   @type t :: %__MODULE__{
           accepted_algs: [SigningAlg.alg()] | nil,
+          enforce_fapi_alg_policy: boolean() | nil,
           require_nbf: boolean(),
           max_nbf_age_seconds: pos_integer() | nil,
           require_exp: boolean(),
@@ -24,6 +25,7 @@ defmodule Attesto.RequestObject.Policy do
         }
 
   defstruct accepted_algs: nil,
+            enforce_fapi_alg_policy: nil,
             require_nbf: false,
             max_nbf_age_seconds: nil,
             require_exp: false,
@@ -56,7 +58,10 @@ defmodule Attesto.RequestObject.Policy do
       NOT required.
 
   `accepted_algs` is left `nil` to inherit `Attesto.RequestObject.verify/3`'s
-  default (`Attesto.SigningAlg.fapi_algs/0`: PS256, ES256, EdDSA).
+  default (`Attesto.SigningAlg.fapi_algs/0`: PS256, ES256, legacy EdDSA over
+  Ed25519, and explicit Ed25519). `enforce_fapi_alg_policy` is set explicitly
+  so a caller can narrow `accepted_algs` without disabling the profile's RSA
+  modulus and Edwards-curve checks.
 
   Note on `typ`: §5.3.1's "shall accept that typ" requires an OP to *accept* the
   `oauth-authz-req+jwt` type when a client sends it - it does not license
@@ -70,6 +75,7 @@ defmodule Attesto.RequestObject.Policy do
   @spec fapi_message_signing() :: t()
   def fapi_message_signing do
     %__MODULE__{
+      enforce_fapi_alg_policy: true,
       require_nbf: true,
       max_nbf_age_seconds: 3600,
       require_exp: true,
@@ -89,10 +95,12 @@ defmodule Attesto.RequestObject.Policy do
   def require_request_object?(%__MODULE__{require_request_object: required}), do: required == true
 
   @doc """
-  Flatten the policy to `Attesto.RequestObject.verify/3` options, dropping `nil`
-  values so `verify/3` keeps its own defaults (notably `accepted_algs`, which
-  defaults to `Attesto.SigningAlg.fapi_algs/0`) and the non-verification
-  presence fields (`#{inspect(@non_verify_keys)}`).
+  Flatten the policy to `Attesto.RequestObject.verify/3` options, dropping
+  `nil` values so `verify/3` keeps its own defaults (notably `accepted_algs`,
+  which defaults to `Attesto.SigningAlg.fapi_algs/0`) and the non-verification
+  presence fields (`#{inspect(@non_verify_keys)}`). Boolean `false` remains
+  present, allowing a generic non-FAPI policy to opt out of the FAPI key gate
+  explicitly.
   """
   @spec to_verify_opts(t()) :: keyword()
   def to_verify_opts(%__MODULE__{} = policy) do

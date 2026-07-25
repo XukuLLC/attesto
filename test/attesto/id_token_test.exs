@@ -4,6 +4,7 @@ defmodule Attesto.IDTokenTest do
   # env (Attesto.Keystore.Static singleton), so these run serially.
   use ExUnit.Case, async: false
 
+  alias __MODULE__.RotatingKeystore
   alias Attesto.IDToken
   alias Attesto.Key
   alias Attesto.Test.Factory
@@ -167,21 +168,30 @@ defmodule Attesto.IDTokenTest do
   end
 
   describe "trusted key-bound signing algorithms" do
-    for {alg, key} <- [
-          {"RS256", :rsa},
-          {"PS256", :rsa},
-          {"ES256", {:ec, "P-256"}},
-          {"ES384", {:ec, "P-384"}},
-          {"ES512", {:ec, "P-521"}},
-          {"EdDSA", :ed25519}
+    for {alg, key, digest, half_bytes} <- [
+          {"RS256", :rsa, :sha256, 16},
+          {"PS256", :rsa, :sha256, 16},
+          {"ES256", {:ec, "P-256"}, :sha256, 16},
+          {"ES384", {:ec, "P-384"}, :sha384, 24},
+          {"ES512", {:ec, "P-521"}, :sha512, 32},
+          {"EdDSA", :ed25519, :sha512, 32},
+          {"Ed25519", :ed25519, :sha512, 32}
         ] do
-      test "#{alg} mint and verify agree" do
+      test "#{alg} mint, verify, and OIDC hash claims agree" do
         alg = unquote(alg)
+        digest = unquote(digest)
+        half_bytes = unquote(half_bytes)
         pem = signing_pem(unquote(Macro.escape(key)))
-        config_opts = if alg == "PS256", do: [signing_alg: alg], else: []
+        config_opts = if alg in ["PS256", "Ed25519"], do: [signing_alg: alg], else: []
         config = Factory.config(pem, config_opts)
+        access_token = "access-token-#{alg}"
+        code = "authorization-code-#{alg}"
 
-        assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
+        assert {:ok, jwt} =
+                 IDToken.mint(config, @subject, @client_id,
+                   access_token: access_token,
+                   code: code
+                 )
 
         assert header!(jwt) == %{
                  "alg" => alg,
@@ -189,9 +199,67 @@ defmodule Attesto.IDTokenTest do
                  "typ" => "JWT"
                }
 
+        assert payload!(jwt)["at_hash"] == oidc_hash(access_token, digest, half_bytes)
+        assert payload!(jwt)["c_hash"] == oidc_hash(code, digest, half_bytes)
+
         assert {:ok, claims} = IDToken.verify(config, jwt, client_id: @client_id)
         assert claims["sub"] == @subject
       end
+    end
+
+    test "Ed448 mint, verify, and OIDC hash claims use SHAKE256/114 left 57" do
+      enable_ed448_support()
+      pem = Factory.ed448_pem()
+      config = Factory.config(pem)
+      access_token = "access-token-Ed448"
+      code = "authorization-code-Ed448"
+
+      assert {:ok, jwt} =
+               IDToken.mint(config, @subject, @client_id,
+                 access_token: access_token,
+                 code: code
+               )
+
+      assert header!(jwt) == %{
+               "alg" => "EdDSA",
+               "kid" => Key.kid(pem),
+               "typ" => "JWT"
+             }
+
+      assert payload!(jwt)["at_hash"] == oidc_shake256_hash(access_token)
+      assert payload!(jwt)["c_hash"] == oidc_shake256_hash(code)
+
+      assert {:ok, claims} = IDToken.verify(config, jwt, client_id: @client_id)
+      assert claims["sub"] == @subject
+    end
+
+    test "RFC 9864 Ed448 mint and verify uses the explicit identifier with the same hash profile" do
+      enable_ed448_support()
+      pem = Factory.ed448_pem()
+      config = Factory.config(pem, signing_alg: "Ed448")
+      access_token = "access-token-explicit-Ed448"
+
+      assert {:ok, jwt} =
+               IDToken.mint(config, @subject, @client_id, access_token: access_token)
+
+      assert header!(jwt)["alg"] == "Ed448"
+      assert payload!(jwt)["at_hash"] == oidc_shake256_hash(access_token)
+      assert {:ok, _claims} = IDToken.verify(config, jwt, client_id: @client_id)
+    end
+
+    test "mint reads a rotating keystore's signing PEM exactly once" do
+      first_pem = Factory.rsa_pem()
+      second_pem = Factory.ed_pem()
+      RotatingKeystore.install([first_pem, second_pem])
+      config = %{Factory.config(first_pem) | keystore: RotatingKeystore}
+
+      assert {:ok, jwt} =
+               IDToken.mint(config, @subject, @client_id, access_token: "rotation-race-access-token")
+
+      assert RotatingKeystore.signing_pem_calls() == 1
+      assert header!(jwt)["alg"] == "RS256"
+      assert header!(jwt)["kid"] == Key.kid(first_pem)
+      assert {:ok, _claims} = IDToken.verify(config, jwt, client_id: @client_id)
     end
   end
 
@@ -515,4 +583,48 @@ defmodule Attesto.IDTokenTest do
   defp signing_pem(:rsa), do: Factory.rsa_pem()
   defp signing_pem({:ec, curve}), do: Factory.ec_pem(curve)
   defp signing_pem(:ed25519), do: Factory.ed_pem()
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
+  end
+
+  defp oidc_hash(value, digest, half_bytes) do
+    value
+    |> then(&:crypto.hash(digest, &1))
+    |> binary_part(0, half_bytes)
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp oidc_shake256_hash(value) do
+    value
+    |> JOSE.sha3_module().shake256(114)
+    |> binary_part(0, 57)
+    |> Base.url_encode64(padding: false)
+  end
+
+  defmodule RotatingKeystore do
+    @moduledoc false
+    @behaviour Attesto.Keystore
+
+    def install(pems) do
+      Process.put({__MODULE__, :remaining}, pems)
+      Process.put({__MODULE__, :all}, pems)
+      Process.put({__MODULE__, :calls}, 0)
+    end
+
+    def signing_pem_calls, do: Process.get({__MODULE__, :calls}, 0)
+
+    @impl true
+    def signing_pem do
+      [pem | rest] = Process.get({__MODULE__, :remaining})
+      Process.put({__MODULE__, :remaining}, rest)
+      Process.put({__MODULE__, :calls}, signing_pem_calls() + 1)
+      pem
+    end
+
+    @impl true
+    def verification_pems, do: Process.get({__MODULE__, :all})
+  end
 end

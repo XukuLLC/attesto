@@ -65,6 +65,32 @@ defmodule Attesto.Test.DPoPTest do
       refute Map.has_key?(header["jwk"], "d")
     end
 
+    test "can opt into RFC 9864's explicit Ed25519 identifier" do
+      jwk = JOSE.JWK.generate_key({:okp, :Ed25519})
+      proof = Fixture.proof(jwk, "GET", "https://api.example/x", alg: "Ed25519")
+      [header_b64, _, _] = String.split(proof, ".")
+      header = header_b64 |> Base.url_decode64!(padding: false) |> JSON.decode!()
+
+      assert header["alg"] == "Ed25519"
+
+      assert {:ok, _result} =
+               Attesto.DPoP.verify_proof(proof,
+                 http_method: "GET",
+                 http_uri: "https://api.example/x"
+               )
+    end
+
+    test "algorithm override retains the broader DPoP RSA allowlist" do
+      jwk = JOSE.JWK.generate_key({:rsa, 2048})
+      proof = Fixture.proof(jwk, "GET", "https://api.example/x", alg: "PS384")
+
+      assert {:ok, _result} =
+               Attesto.DPoP.verify_proof(proof,
+                 http_method: "GET",
+                 http_uri: "https://api.example/x"
+               )
+    end
+
     test "binds ath to a presented access token", ctx do
       {token, _} = Fixture.mint_access_token(ctx.config, ctx.principal, ctx.jwk)
 

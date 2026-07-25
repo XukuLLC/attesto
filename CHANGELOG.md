@@ -4,15 +4,49 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-07-25
+
+### Changed
+
+- Admit compatible JOSE releases through the 1.x line while retaining 1.11.12
+  as the minimum security- and runtime-compatible version. This lets hosts use
+  newer native cryptographic adapters without another Attesto release.
+
+### Fixed
+
+- Derive OIDC `at_hash` and `c_hash` claims for Ed25519-signed ID Tokens with
+  SHA-512 and Ed448-signed ID Tokens with SHAKE256, matching their signature
+  primitives and interoperable OIDC validators. Previously EdDSA used SHA-256
+  unconditionally, contrary to OIDC's generic hash rule when applied to RFC
+  8032. ID Token and logout-token minting now snapshot the signing PEM once so
+  algorithm, curve-specific hash, `kid`, and signature cannot straddle a
+  keystore rotation. Algorithm selection remains bound to trusted keystore
+  metadata and key material; Ed448 uses JOSE's configured Curve448 and SHA3
+  backends. The ambiguous keyless `hash_alg/1` and `hash_half_bytes/1` helpers
+  remain Ed25519-compatible but are deprecated in favor of key-aware
+  `oidc_hash_profile/2` and `oidc_hash/3`. A missing SHAKE256 backend now raises
+  a direct configuration error.
+- Support RFC 9864's exact `Ed25519` and `Ed448` JOSE identifiers in trusted
+  key metadata, signing, verification, ID Token hash profiles, and DPoP while
+  retaining legacy `EdDSA` inference for wire compatibility. DPoP discovery
+  advertises the new identifiers only when the configured JOSE backend reports
+  them available. Default FAPI client-assertion, signed-request-object, and
+  CIBA policies accept EdDSA only over a trusted Ed25519 key and accept exact
+  Ed25519, never Ed448, and require PS256 RSA moduli to be at least 2048 bits;
+  an explicit non-FAPI allowlist can opt into Ed448 or a weaker RSA key, while
+  named FAPI policies retain the key gate when their algorithm list is
+  narrowed. DPoP rejects RSA proof keys with moduli below 2048 bits for every
+  accepted RSASSA and RSA-PSS proof algorithm. FAPI server keystores must also
+  provision RSA keys of at least 2048 bits; generic keystore resolution remains
+  profile-neutral for backward compatibility.
 
 ### Documentation
 
 - Correct the token, ID Token, logout-token, and keystore documentation to
   describe Attesto's existing multi-algorithm support. Signing and verification
-  bind RS256, PS256, ES256, ES384, ES512, or EdDSA to trusted keystore metadata
-  or the key type and curve; verification never learns algorithm policy from a
-  presented JWS header. Runtime behavior is unchanged.
+  bind RS256, PS256, ES256, ES384, ES512, legacy EdDSA, Ed25519, or Ed448 to
+  trusted keystore metadata or the key type and curve; verification never
+  learns algorithm policy from a presented JWS header.
 
 ## [1.2.5] - 2026-07-17
 

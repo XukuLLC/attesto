@@ -17,6 +17,9 @@ defmodule Attesto.Test.Factory do
   @doc "A fresh Ed25519 (OKP) signing key PEM -> EdDSA."
   def ed_pem, do: to_pem(JOSE.JWK.generate_key({:okp, :Ed25519}))
 
+  @doc "A fresh Ed448 (OKP) signing key PEM -> EdDSA; requires a JOSE Curve448 backend."
+  def ed448_pem, do: to_pem(JOSE.JWK.generate_key({:okp, :Ed448}))
+
   # JOSE.JWK.to_pem/1 returns {kty_meta, pem} for EC/OKP keys; take the PEM.
   defp to_pem(jwk) do
     case JOSE.JWK.to_pem(jwk) do

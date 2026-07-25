@@ -78,11 +78,12 @@ defmodule Attesto.Parity.NodeParityTest do
     end
   end
 
-  # FAPI 2 mandates PS256 and also permits ES256 / EdDSA (RS256 is excluded).
+  # FAPI 2 mandates PS256 and also permits ES256 / EdDSA over Ed25519 plus
+  # RFC 9864's exact Ed25519 identifier (RS256 and Ed448 are excluded).
   # Prove Attesto mints each of the FAPI signing algorithms to wire that the
   # JS `jose` verifier accepts and decodes identically.
   describe "FAPI algorithm parity (Attesto -> JS jose)" do
-    for alg <- ~w(PS256 ES256 EdDSA) do
+    for alg <- ~w(PS256 ES256 EdDSA Ed25519) do
       test "an Attesto-minted #{alg} token verifies in jose with identical claims",
            %{node_ready: ready} do
         if ready do
@@ -110,6 +111,49 @@ defmodule Attesto.Parity.NodeParityTest do
 
           {:ok, attesto_claims} = Attesto.Token.verify(config, token.access_token)
           assert payload["sub"] == attesto_claims["sub"]
+        end
+      end
+    end
+  end
+
+  # Apply OIDC's generic hash-claim rule to RFC 8032's hash functions and
+  # cross-check the result outside the Elixir/JOSE implementation. Ed448 is
+  # intentionally included here even though FAPI 2 excludes that curve.
+  describe "Edwards OIDC hash parity (Attesto -> Node crypto)" do
+    for {alg, curve} <- [
+          {"EdDSA", "Ed25519"},
+          {"EdDSA", "Ed448"},
+          {"Ed25519", "Ed25519"},
+          {"Ed448", "Ed448"}
+        ] do
+      test "an #{alg}/#{curve} ID Token at_hash matches the independent JS OIDC calculation",
+           %{node_ready: ready} do
+        if ready do
+          alg = unquote(alg)
+          curve = unquote(curve)
+          maybe_enable_ed448(curve)
+          pem = if curve == "Ed448", do: Factory.ed448_pem(), else: Factory.ed_pem()
+          config_opts = if alg in ["Ed25519", "Ed448"], do: [signing_alg: alg], else: []
+          config = Factory.config(pem, config_opts)
+          access_token = "#{String.downcase(alg)}-#{String.downcase(curve)}-reference-access-token"
+
+          assert {:ok, jwt} =
+                   Attesto.IDToken.mint(config, "usr_#{String.downcase(curve)}", "client-#{String.downcase(curve)}",
+                     access_token: access_token
+                   )
+
+          verifier = if alg == "Ed448", do: :verifyEdwardsJwt, else: :verifyJwt
+
+          verifier_args =
+            if alg == "Ed448", do: [jwt, jose_public_pem(pem)], else: [jwt, jose_public_pem(pem), alg]
+
+          %{"payload" => payload, "header" => header} =
+            NodeBridge.call!("attesto_compat", verifier, verifier_args)
+
+          expected = NodeBridge.call!("attesto_compat", :oidcHash, [access_token, alg, curve])
+
+          assert header["alg"] == alg
+          assert payload["at_hash"] == expected
         end
       end
     end
@@ -422,6 +466,7 @@ defmodule Attesto.Parity.NodeParityTest do
   defp alg_pem("PS256"), do: Factory.rsa_pem()
   defp alg_pem("ES256"), do: Factory.ec_pem()
   defp alg_pem("EdDSA"), do: Factory.ed_pem()
+  defp alg_pem("Ed25519"), do: Factory.ed_pem()
 
   defp jose_public_pem(pem) do
     pem
@@ -432,5 +477,13 @@ defmodule Attesto.Parity.NodeParityTest do
       {_meta, public_pem} when is_binary(public_pem) -> public_pem
       public_pem when is_binary(public_pem) -> public_pem
     end
+  end
+
+  defp maybe_enable_ed448("Ed25519"), do: :ok
+
+  defp maybe_enable_ed448("Ed448") do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end

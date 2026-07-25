@@ -122,9 +122,9 @@ defmodule Attesto.Test.DPoP do
   The proof carries the protected header `%{"typ" => "dpop+jwt", "alg" =>
   ..., "jwk" => <public jwk>}` and the payload `%{"htm" => htm, "htu" =>
   htu, "iat" => now, "jti" => <random>}` (RFC 9449 §4.2). The signing
-  `alg` is derived from the key shape via `Attesto.SigningAlg`, and only
-  the key's public half is embedded, so the result verifies under
-  `Attesto.DPoP.verify_proof/2`.
+  `alg` defaults to the legacy identifier derived from the key via
+  `Attesto.SigningAlg`, and only the key's public half is embedded, so the
+  result verifies under `Attesto.DPoP.verify_proof/2`.
 
   Options:
 
@@ -138,10 +138,13 @@ defmodule Attesto.Test.DPoP do
       to `DateTime.utc_now/0`.
     * `:jti` - override the random replay identifier (e.g. to drive a
       replay test that presents the same `jti` twice).
+    * `:alg` - override the inferred identifier with any key-compatible
+      algorithm accepted by `Attesto.DPoP.allowed_algs/0`, including RFC 9864
+      `Ed25519` or `Ed448` when the configured JOSE backend supports it.
   """
   @spec proof(JOSE.JWK.t(), String.t(), String.t(), keyword()) :: String.t()
   def proof(%JOSE.JWK{} = jwk, htm, htu, opts \\ []) when is_binary(htm) and is_binary(htu) and is_list(opts) do
-    sign(jwk, payload(htm, htu, opts))
+    sign(jwk, payload(htm, htu, opts), opts)
   end
 
   @doc """
@@ -158,7 +161,7 @@ defmodule Attesto.Test.DPoP do
   @spec invalid_proof(JOSE.JWK.t(), flaw(), String.t(), String.t(), keyword()) :: String.t()
   def invalid_proof(%JOSE.JWK{} = jwk, flaw, htm, htu, opts \\ [])
       when is_binary(htm) and is_binary(htu) and is_list(opts) do
-    sign(jwk, flawed_payload(flaw, htm, htu, opts))
+    sign(jwk, flawed_payload(flaw, htm, htu, opts), opts)
   end
 
   # ----- internal: payloads -----
@@ -222,9 +225,10 @@ defmodule Attesto.Test.DPoP do
   # `JOSE.JWT`) so the protected header is emitted verbatim and the
   # `typ: "dpop+jwt"` survives, then compact. Only the public half of the
   # key is embedded in `jwk`, as RFC 9449 §4.2 requires.
-  defp sign(jwk, payload) do
+  defp sign(jwk, payload, opts) do
     pub = public_jwk(jwk)
-    alg = SigningAlg.infer(jwk)
+    alg = Keyword.get(opts, :alg, SigningAlg.infer(jwk))
+    alg = validate_dpop_alg!(alg, jwk)
     header = %{"typ" => @proof_typ, "alg" => alg, "jwk" => public_jwk_map(pub)}
     signed = JOSE.JWS.sign(jwk, JSON.encode!(payload), header)
     {_protected, compact} = JOSE.JWS.compact(signed)
@@ -232,6 +236,19 @@ defmodule Attesto.Test.DPoP do
   end
 
   defp public_jwk(jwk), do: JOSE.JWK.to_public(jwk)
+
+  defp validate_dpop_alg!(alg, jwk) when is_binary(alg) do
+    if alg not in DPoP.allowed_algs() do
+      raise ArgumentError, "unsupported DPoP signing algorithm #{inspect(alg)} for the configured JOSE backend"
+    end
+
+    {_modules, fields} = JOSE.JWK.to_public_map(jwk)
+
+    case {alg, fields} do
+      {rsa_alg, %{"kty" => "RSA"}} when rsa_alg in ~w(RS256 RS384 RS512 PS256 PS384 PS512) -> alg
+      _ -> SigningAlg.validate_for_key!(alg, jwk)
+    end
+  end
 
   defp public_jwk_map(pub) do
     {_modules, map} = JOSE.JWK.to_map(pub)

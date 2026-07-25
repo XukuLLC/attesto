@@ -1,8 +1,9 @@
 defmodule Attesto.RequestObjectTest do
   @moduledoc false
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Attesto.RequestObject
+  alias Attesto.RequestObject.Policy
 
   @client_id "client-123"
   @issuer @client_id
@@ -58,6 +59,29 @@ defmodule Attesto.RequestObjectTest do
                RequestObject.verify(jwt, %{"keys" => [jwk]}, base_opts())
     end
 
+    test "the FAPI default rejects PS256 with an RSA modulus below 2048 bits" do
+      key = JOSE.JWK.generate_key({:rsa, 1024})
+      jwt = request_object(key, %{}, %{"alg" => "PS256"})
+      trusted = public_jwk(key, %{"alg" => "PS256"})
+
+      assert {:error, :invalid_signature} =
+               RequestObject.verify(jwt, %{"keys" => [trusted]}, base_opts())
+
+      assert {:error, :invalid_signature} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [trusted]},
+                 base_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: true]
+               )
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [trusted]},
+                 base_opts() ++ [accepted_algs: ["PS256"]]
+               )
+    end
+
     test "explicitly narrowing accepted_algs rejects an otherwise-accepted alg" do
       key = ec_key()
       jwt = request_object(key)
@@ -80,6 +104,68 @@ defmodule Attesto.RequestObjectTest do
                  %{"keys" => [public_jwk(key)]},
                  base_opts() ++ [accepted_algs: ["ES256"]]
                )
+    end
+
+    test "the FAPI default accepts legacy EdDSA and RFC 9864 Ed25519 only over Ed25519" do
+      key = JOSE.JWK.generate_key({:okp, :Ed25519})
+
+      for alg <- ["EdDSA", "Ed25519"] do
+        jwt = request_object(key, %{}, %{"alg" => alg})
+        trusted = public_jwk(key, %{"alg" => alg})
+
+        assert {:ok, _params} =
+                 RequestObject.verify(jwt, %{"keys" => [trusted]}, base_opts())
+      end
+    end
+
+    test "the FAPI default rejects Ed448 but an explicit non-FAPI policy can opt in" do
+      enable_ed448_support()
+      key = JOSE.JWK.generate_key({:okp, :Ed448})
+
+      for alg <- ["EdDSA", "Ed448"] do
+        jwt = request_object(key, %{}, %{"alg" => alg})
+        trusted = public_jwk(key, %{"alg" => alg})
+
+        assert {:error, :invalid_signature} =
+                 RequestObject.verify(jwt, %{"keys" => [trusted]}, base_opts())
+
+        assert {:error, :invalid_signature} =
+                 RequestObject.verify(
+                   jwt,
+                   %{"keys" => [trusted]},
+                   base_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: true]
+                 )
+
+        assert {:ok, _params} =
+                 RequestObject.verify(
+                   jwt,
+                   %{"keys" => [trusted]},
+                   base_opts() ++ [accepted_algs: [alg]]
+                 )
+      end
+    end
+
+    test "a narrowed FAPI policy retains RSA strength and Edwards curve checks" do
+      weak_rsa = JOSE.JWK.generate_key({:rsa, 1024})
+      weak_rsa_jwt = request_object(weak_rsa, %{}, %{"alg" => "PS256", "typ" => "oauth-authz-req+jwt"})
+      weak_rsa_trusted = public_jwk(weak_rsa, %{"alg" => "PS256"})
+
+      rsa_policy = %{Policy.fapi_message_signing() | accepted_algs: ["PS256"]}
+      rsa_opts = base_opts() ++ Policy.to_verify_opts(rsa_policy)
+
+      assert {:error, :invalid_signature} =
+               RequestObject.verify(weak_rsa_jwt, %{"keys" => [weak_rsa_trusted]}, rsa_opts)
+
+      enable_ed448_support()
+      ed448 = JOSE.JWK.generate_key({:okp, :Ed448})
+      ed448_jwt = request_object(ed448, %{}, %{"alg" => "EdDSA", "typ" => "oauth-authz-req+jwt"})
+      ed448_trusted = public_jwk(ed448, %{"alg" => "EdDSA"})
+
+      edwards_policy = %{Policy.fapi_message_signing() | accepted_algs: ["EdDSA"]}
+      edwards_opts = base_opts() ++ Policy.to_verify_opts(edwards_policy)
+
+      assert {:error, :invalid_signature} =
+               RequestObject.verify(ed448_jwt, %{"keys" => [ed448_trusted]}, edwards_opts)
     end
   end
 
@@ -533,5 +619,11 @@ defmodule Attesto.RequestObjectTest do
     header = %{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}
     {_meta, compact} = jwk |> JOSE.JWS.sign(payload, header) |> JOSE.JWS.compact()
     compact
+  end
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end

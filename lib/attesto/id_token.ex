@@ -13,7 +13,8 @@ defmodule Attesto.IDToken do
   Like `Attesto.Token`, the operations are pure: they read only the
   `Attesto.Config` passed in. Signing uses the same keystore/`kid` path and
   trusted, key-bound algorithm resolution: RS256, PS256, ES256, ES384, ES512,
-  or EdDSA as selected by `Attesto.SigningAlg`. Verification derives each
+  legacy EdDSA, or RFC 9864 Ed25519 / Ed448 as selected by
+  `Attesto.SigningAlg`. Verification derives each
   candidate key's accepted algorithm from per-key keystore metadata or the
   key type and curve rather than the presented header, then calls
   `JOSE.JWT.verify_strict` with that singleton allowlist. `none`, `HS*`, and
@@ -68,7 +69,10 @@ defmodule Attesto.IDToken do
   §3.3.2.11): hash the ASCII octets of the `access_token` / `code` with
   the hash associated with the ID Token's signature algorithm (for example,
   SHA-256 for RS256), take the left-most half of the digest, and
-  base64url-encode it without padding.
+  base64url-encode it without padding. Applying that generic rule to RFC 8032,
+  Ed25519 uses SHA-512 and takes 32 bytes; Ed448 uses SHAKE256 with 114 bytes
+  of output and takes 57 bytes. The trusted signing key curve selects between
+  them; the untrusted JWS header never selects the digest.
   """
 
   alias Attesto.Config
@@ -180,7 +184,9 @@ defmodule Attesto.IDToken do
          {:ok, extra} <- normalize_extra_claims(opts) do
       iat = unix_now(opts)
       lifetime = lifetime_seconds(opts)
-      alg = signing_alg(config)
+      pem = config.keystore.signing_pem()
+      jwk = Key.jwk(pem)
+      alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
 
       claims =
         %{
@@ -195,12 +201,12 @@ defmodule Attesto.IDToken do
         |> put_optional("auth_time", Keyword.get(opts, :auth_time))
         |> put_optional("acr", Keyword.get(opts, :acr))
         |> put_optional("amr", Keyword.get(opts, :amr))
-        |> put_optional("at_hash", hash_claim(Keyword.get(opts, :access_token), alg))
-        |> put_optional("c_hash", hash_claim(Keyword.get(opts, :code), alg))
+        |> put_optional("at_hash", hash_claim(Keyword.get(opts, :access_token), alg, jwk))
+        |> put_optional("c_hash", hash_claim(Keyword.get(opts, :code), alg, jwk))
         |> put_optional("sid", Keyword.get(opts, :sid))
         |> Map.merge(extra)
 
-      {:ok, sign(config, claims, alg)}
+      {:ok, sign(pem, claims, alg)}
     end
   end
 
@@ -316,15 +322,9 @@ defmodule Attesto.IDToken do
 
   # OIDC Core §3.1.3.6: left-most half of the hash of the ASCII octets of
   # the value, base64url-encoded without padding. nil means "not requested".
-  defp hash_claim(nil, _alg), do: nil
+  defp hash_claim(nil, _alg, _jwk), do: nil
 
-  defp hash_claim(value, alg) when is_binary(value) do
-    alg
-    |> SigningAlg.hash_alg()
-    |> :crypto.hash(value)
-    |> binary_part(0, SigningAlg.hash_half_bytes(alg))
-    |> Base.url_encode64(padding: false)
-  end
+  defp hash_claim(value, alg, jwk) when is_binary(value), do: SigningAlg.oidc_hash(value, alg, jwk)
 
   defp normalize_extra_claims(opts) do
     case Keyword.get(opts, :extra_claims) do
@@ -347,14 +347,8 @@ defmodule Attesto.IDToken do
   # `typ: "JWT"` only when the header omits it): emit the protected header
   # `jose_header/1` computes verbatim, exactly as `Attesto.Token` does, so
   # the `typ` is the deliberate `JWT` and the `kid`/`alg` are pinned.
-  defp sign(config, claims, alg) do
-    pem = config.keystore.signing_pem()
+  defp sign(pem, claims, alg) do
     Attesto.JWS.sign_compact(pem, jose_header(pem, alg), claims)
-  end
-
-  defp signing_alg(config) do
-    pem = config.keystore.signing_pem()
-    SigningAlg.for_key(config.keystore, pem, signing?: true)
   end
 
   defp jose_header(pem, alg) do
