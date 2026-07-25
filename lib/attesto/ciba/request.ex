@@ -159,10 +159,17 @@ defmodule Attesto.CIBA.Request do
     * `:require_signed_request` - when `true`, reject a plain-parameter
       request (FAPI-CIBA §5.2.2 requires signed requests). Default `false`.
     * `:accepted_algs` - JOSE algorithms acceptable for signed requests.
-      Defaults to `Attesto.SigningAlg.default_client_algs/0`; a FAPI-CIBA
-      deployment narrows this to `["PS256", "ES256"]`. The client's registered
-      `:request_signing_alg`, when set, must be inside this set and becomes
-      the only accepted algorithm.
+      Defaults to `Attesto.SigningAlg.default_client_algs/0`, including legacy
+      EdDSA only over Ed25519 and RFC 9864 Ed25519, never Ed448. Supplying a
+      list selects an explicit non-FAPI algorithm policy unless
+      `:enforce_fapi_alg_policy` is also `true`. The client's registered
+      `:request_signing_alg`, when set, must be inside this set and becomes the
+      only accepted algorithm.
+    * `:enforce_fapi_alg_policy` - enforce the FAPI RSA modulus and Edwards
+      curve restrictions in addition to `:accepted_algs`. Defaults to `true`
+      when `:accepted_algs` is omitted and `false` when the caller supplies an
+      explicit algorithm policy. Composed FAPI profiles that narrow the
+      allowlist must pass `true`.
     * `:max_request_lifetime_seconds` - bound on a signed request's
       `nbf`→`exp` lifetime. Default `#{@default_max_request_lifetime_seconds}`
       (FAPI-CIBA §5.2.2's 60 minutes).
@@ -281,6 +288,8 @@ defmodule Attesto.CIBA.Request do
         # §7.1.1: `aud` MUST contain the OP's Issuer Identifier.
         audience: issuer,
         accepted_algs: algs,
+        enforce_fapi_alg_policy:
+          Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs)),
         # §7.1.1 makes exp, iat, nbf, and jti all REQUIRED.
         require_exp: true,
         require_iat: true,

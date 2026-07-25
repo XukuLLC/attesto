@@ -14,6 +14,7 @@ defmodule Attesto.RequestObject.PolicyTest do
       refute Keyword.has_key?(opts, :max_nbf_age_seconds)
       refute Keyword.has_key?(opts, :max_lifetime_seconds)
       refute Keyword.has_key?(opts, :accepted_typ)
+      refute Keyword.has_key?(opts, :enforce_fapi_alg_policy)
       assert Keyword.get(opts, :require_nbf) == false
       assert Keyword.get(opts, :require_exp) == false
     end
@@ -31,6 +32,15 @@ defmodule Attesto.RequestObject.PolicyTest do
       assert Keyword.get(opts, :accepted_typ) == ["oauth-authz-req+jwt", nil]
       # accepted_algs is left nil so verify/3's fapi_algs() default applies.
       refute Keyword.has_key?(opts, :accepted_algs)
+      assert Keyword.get(opts, :enforce_fapi_alg_policy) == true
+    end
+
+    test "algorithm-policy intent survives a narrowed allowlist" do
+      fapi_policy = %{Policy.fapi_message_signing() | accepted_algs: ["PS256"]}
+      assert Keyword.get(Policy.to_verify_opts(fapi_policy), :enforce_fapi_alg_policy) == true
+
+      non_fapi_policy = %Policy{accepted_algs: ["PS256"], enforce_fapi_alg_policy: false}
+      assert Keyword.get(Policy.to_verify_opts(non_fapi_policy), :enforce_fapi_alg_policy) == false
     end
 
     test "the presence flag is never leaked into the per-object verify opts" do

@@ -1,6 +1,6 @@
 defmodule Attesto.DPoPTest do
   @moduledoc false
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Attesto.DPoP
   alias Attesto.Test.Factory
@@ -111,6 +111,46 @@ defmodule Attesto.DPoPTest do
 
       assert {:ok, %{jkt: jkt}} = DPoP.verify_proof(proof, base_opts())
       assert jkt == JOSE.JWK.thumbprint(key)
+    end
+
+    test "rejects RSA proof keys with moduli below 2048 bits" do
+      key = gen_rsa_key(1024)
+
+      for alg <- ~w(RS256 RS384 RS512 PS256 PS384 PS512) do
+        header = build_header(public_map(key), %{"alg" => alg})
+        proof = sign_proof(key, header, build_claims())
+
+        assert {:error, :invalid_jwk} = DPoP.verify_proof(proof, base_opts()),
+               "expected 1024-bit #{alg} proof key to be rejected"
+      end
+    end
+
+    test "verifies RFC 9864 Ed25519 and Ed448 proofs" do
+      ed25519 = JOSE.JWK.generate_key({:okp, :Ed25519})
+      ed25519_proof = sign_proof(ed25519, build_header(public_map(ed25519), %{"alg" => "Ed25519"}), build_claims())
+      assert {:ok, _result} = DPoP.verify_proof(ed25519_proof, base_opts())
+
+      enable_ed448_support()
+      ed448 = JOSE.JWK.generate_key({:okp, :Ed448})
+      ed448_proof = sign_proof(ed448, build_header(public_map(ed448), %{"alg" => "Ed448"}), build_claims())
+      assert {:ok, _result} = DPoP.verify_proof(ed448_proof, base_opts())
+    end
+
+    test "rejects an explicit Edwards identifier that does not match the embedded curve" do
+      enable_ed448_support()
+      key = JOSE.JWK.generate_key({:okp, :Ed448})
+      proof = sign_proof(key, build_header(public_map(key), %{"alg" => "Ed448"}), build_claims())
+      [_header, payload, signature] = String.split(proof, ".")
+
+      mismatched_header =
+        key
+        |> public_map()
+        |> build_header(%{"alg" => "Ed25519"})
+        |> JSON.encode!()
+        |> Base.url_encode64(padding: false)
+
+      assert {:error, :invalid_jwk} =
+               DPoP.verify_proof(Enum.join([mismatched_header, payload, signature], "."), base_opts())
     end
 
     test "ath is verified when :access_token is provided" do
@@ -235,6 +275,10 @@ defmodule Attesto.DPoPTest do
       assert "RS256" in algs
       assert "PS256" in algs
       assert "EdDSA" in algs
+      assert "Ed25519" in algs
+
+      {:alg, jose_jws_algs} = Keyword.fetch!(JOSE.JWA.supports(), :jws)
+      assert "Ed448" in algs == "Ed448" in jose_jws_algs
     end
   end
 
@@ -778,6 +822,12 @@ defmodule Attesto.DPoPTest do
         end
       end
     end
+  end
+
+  defp enable_ed448_support do
+    previous = JOSE.crypto_fallback()
+    JOSE.crypto_fallback(true)
+    on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end
 

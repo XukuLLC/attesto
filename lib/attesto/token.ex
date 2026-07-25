@@ -35,7 +35,9 @@ defmodule Attesto.Token do
   algorithm resolved by `Attesto.SigningAlg`. Minting resolves that algorithm
   from per-key `key_algs/0` metadata, then `signing_alg/0` for the current
   signing key, then the trusted key type and curve. The supported set is
-  RS256, PS256, ES256, ES384, ES512, and EdDSA; RSA defaults to RS256.
+  RS256, PS256, ES256, ES384, ES512, legacy EdDSA, and RFC 9864 Ed25519 / Ed448;
+  RSA defaults to RS256, while Edwards-curve inference retains EdDSA for wire
+  compatibility unless trusted metadata selects an explicit identifier.
 
   Verification never learns algorithm policy from the presented JWS header.
   The header `kid` only narrows the configured verification-key set; each

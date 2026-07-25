@@ -17,6 +17,7 @@ defmodule Attesto.RequestObject do
           | {:issuer, String.t() | nil}
           | {:audience, String.t() | [String.t()]}
           | {:accepted_algs, [SigningAlg.alg()]}
+          | {:enforce_fapi_alg_policy, boolean()}
           | {:require_nbf, boolean()}
           | {:max_nbf_age_seconds, pos_integer() | nil}
           | {:require_exp, boolean()}
@@ -51,7 +52,13 @@ defmodule Attesto.RequestObject do
   caller that passes none observes no change:
 
     * `:accepted_algs` - JOSE algorithms a candidate trusted key may use.
-      Defaults to `SigningAlg.fapi_algs/0` (PS256, ES256, EdDSA).
+      Defaults to `SigningAlg.fapi_algs/0` (PS256, ES256, EdDSA over Ed25519,
+      and explicit Ed25519).
+    * `:enforce_fapi_alg_policy` - additionally enforce the FAPI key/algorithm
+      policy, rejecting RSA moduli below 2048 bits and legacy `EdDSA` over
+      Ed448. Defaults to `true` when `:accepted_algs` is omitted and `false`
+      when the caller supplies an explicit non-FAPI algorithm policy. Composed
+      FAPI profiles that narrow the allowlist must pass `true`.
     * `:require_nbf` - when `true`, reject an object without an `nbf` claim.
       Defaults to `false`. (RFC 9101 / FAPI Message Signing 2.0 §5.3.1.)
     * `:max_nbf_age_seconds` - when set, reject an `nbf` older than `now - N`.
@@ -134,21 +141,26 @@ defmodule Attesto.RequestObject do
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
-    case candidates(trusted_jwks, Map.get(header, "kid"), accepted_algs) do
+    enforce_fapi_policy =
+      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+
+    case candidates(trusted_jwks, Map.get(header, "kid"), accepted_algs, enforce_fapi_policy) do
       [] -> {:error, :invalid_signature}
       jwks -> verify_against_any(jwks, jwt)
     end
   end
 
-  defp candidates(trusted_jwks, header_kid, accepted_algs) do
+  defp candidates(trusted_jwks, header_kid, accepted_algs, enforce_fapi_policy) do
     trusted_jwks
     |> normalize_jwks()
     |> Enum.map(fn jwk_map ->
       jwk = JOSE.JWK.from_map(jwk_map)
       alg = Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
-      {Map.get(jwk_map, "kid"), SigningAlg.validate!(alg), jwk}
+      {Map.get(jwk_map, "kid"), SigningAlg.validate_for_key!(alg, jwk), jwk}
     end)
-    |> Enum.filter(fn {_kid, alg, _jwk} -> alg in accepted_algs end)
+    |> Enum.filter(fn {_kid, alg, jwk} ->
+      alg in accepted_algs and (not enforce_fapi_policy or SigningAlg.fapi_compatible?(alg, jwk))
+    end)
     |> filter_by_kid(header_kid)
   rescue
     _ -> []

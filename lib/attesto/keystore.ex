@@ -21,6 +21,11 @@ defmodule Attesto.Keystore do
   consumes the PEMs, so the security-sensitive resolution and any
   fail-fast boot checks stay in the host application.
 
+  A FAPI deployment that uses RSA must provision every server signing and
+  verification key with a modulus of at least 2048 bits. The generic keystore
+  contract remains profile-neutral so non-FAPI applications can make their
+  own compatibility decisions.
+
   `Attesto.Keystore.Static` is a ready-made implementation for the common
   single-key (or manually-rotated) case.
   """
@@ -29,7 +34,8 @@ defmodule Attesto.Keystore do
   The private signing-key PEM used to sign newly issued tokens.
 
   The key must support one of the asymmetric algorithms accepted by
-  `Attesto.SigningAlg`.
+  `Attesto.SigningAlg`. FAPI server deployments using RSA require a modulus of
+  at least 2048 bits.
   """
   @callback signing_pem() :: String.t()
 
@@ -43,10 +49,12 @@ defmodule Attesto.Keystore do
   @doc """
   Optional per-key JOSE algorithm metadata, keyed by RFC 7638 `kid`.
 
-  When omitted, Attesto infers an algorithm from the public key shape:
+  When omitted, Attesto infers an algorithm from the public key type and curve:
   RSA -> RS256, P-256 -> ES256, P-384 -> ES384, P-521 -> ES512, and
-  Ed25519/Ed448 -> EdDSA. Use this callback to label RSA keys that should
-  verify as PS256, or to make a rotation window explicit.
+  Ed25519/Ed448 -> legacy EdDSA. Use this callback to label RSA keys that
+  should verify as PS256, select RFC 9864 `Ed25519` / `Ed448` for the matching
+  curve, or make a rotation window explicit. Ed448 deployments must configure
+  JOSE with Curve448 and SHAKE256 support.
   """
   @callback key_algs() :: %{String.t() => String.t()} | keyword(String.t())
 
