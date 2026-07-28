@@ -313,7 +313,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 8628 | Device Authorization Grant (`device_code`/`user_code` polling) | Supported (`Attesto.DeviceCode`) |
 | CIBA Core 1.0 | Client-Initiated Backchannel Authentication (poll/ping; signed requests per FAPI-CIBA) | Supported (`Attesto.CIBA`) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
-| RFC 8252 §7.3 | OAuth 2.0 for Native Apps — loopback interface redirection (variable port) | Supported, opt-in (`Attesto.RedirectURI`; off by default, redirect matching stays exact) |
+| RFC 8252 §7.3 | OAuth 2.0 for Native Apps — loopback interface redirection (variable port) | Supported (`Attesto.RedirectURI`). The core defaults to exact RFC 6749 §3.1.2.3 matching; the caller opts a request in with `redirect_uri_matching: :exact_allow_loopback_port`. `attesto_phoenix` selects it per client from its `client_native?` mark |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
 | RFC 9126 | Pushed Authorization Requests (PAR) — the client pushes the auth request to the AS for a one-time `request_uri`, so request params never ride the browser/URL | Supported (discovery advertisement + request-object primitives; the `request_uri` endpoint/store live in `attesto_phoenix`) |
 | RFC 9728 | Protected Resource Metadata | Supported |
