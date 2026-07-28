@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-07-28
+
+### Documentation
+
+- Reconcile RFC 9700's wording of the loopback exception with the rule
+  `Attesto.RedirectURI` actually implements. RFC 9700 §2.1 and §4.1.3 phrase it
+  as applying to "`localhost` redirection URIs of native apps", which reads
+  wider than this module's literal-IP-only rule and could be mistaken for a
+  conformance gap. Both texts define the exception by reference — "as described
+  in Section 7.3 of [RFC8252]" — and §7.3 constructs the URI from the loopback
+  IP literal, not the name, so `localhost` there is shorthand for "the loopback
+  interface" and §7.3's construction is the normative content.
+
+  No behavior change: 1.4.0 already implements exactly this. A `localhost`
+  redirect URI still matches exactly; it just gets no port flexibility.
+
+- State in the README's RFC table where the §7.3 opt-in lives — the core
+  defaults to exact RFC 6749 §3.1.2.3 matching and the caller selects
+  `:exact_allow_loopback_port` per request — rather than the vaguer "opt-in,
+  off by default".
+
 ## [1.4.0] - 2026-07-28
 
 ### Added
