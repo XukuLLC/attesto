@@ -30,11 +30,24 @@ defmodule Attesto.RedirectURI do
           private-use scheme, and an upper-case `HTTP://` are all outside the
           exception and stay exact-match);
         * has an authority of exactly `127.0.0.1` or `[::1]`, optionally
-          followed by `:<port>` and nothing else. RFC 8252 §8.3 is explicit that
-          the literal IP address is required and the hostname `localhost` is NOT
-          acceptable, so `http://localhost:PORT/...` never matches. Any
-          userinfo, any other host, and any other spelling of the loopback
-          address are outside the exception;
+          followed by `:<port>` and nothing else. Any userinfo, any other host,
+          and any other spelling of the loopback address are outside the
+          exception.
+
+          `localhost` is deliberately excluded. RFC 8252 §8.3 makes the literal
+          IP preferable precisely because `localhost` is a *name*, resolved by
+          the device's host-name configuration, and so is not guaranteed to be
+          the loopback interface. Extending port flexibility to a name whose
+          resolution the server cannot reason about would widen the exception
+          past what §7.3 asks for, so `http://localhost:PORT/...` never matches
+          under it.
+
+          This scopes the exception, not registration: a client that has
+          registered a `localhost` redirect URI still reaches it by exact
+          match, since that URI is one the host deliberately registered and
+          §8.3's "NOT RECOMMENDED" is guidance to the client about which URI to
+          choose, not a requirement that the server refuse it. Such a client
+          simply gets no port flexibility;
         * carries no fragment (a redirect URI must not, RFC 6749 §3.1.2).
 
       The two sides differ in one respect. The **request** URI names an
