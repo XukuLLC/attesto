@@ -229,6 +229,49 @@ defmodule Attesto.RedirectURITest do
       refute RedirectURI.registered?("http://127.0.0.1:abc/cb", ["http://127.0.0.1:0/cb"], :exact_allow_loopback_port)
     end
 
+    # The request URI is a redirect TARGET, so a port it carries must be one a
+    # client can actually listen on. An unusable port is not minted into a
+    # Location header just because the rest of the URI looks like loopback.
+    test "a request port outside 1..65535 takes the URI outside the exception" do
+      # Registered with a port none of the refused URIs reproduce, so an exact
+      # match cannot rescue them and only the exception is under test.
+      registered = ["http://127.0.0.1:8080/cb"]
+
+      for uri <- [
+            "http://127.0.0.1:/cb",
+            "http://127.0.0.1:0/cb",
+            "http://127.0.0.1:65536/cb",
+            "http://127.0.0.1:999999999999999999999/cb"
+          ] do
+        refute RedirectURI.registered?(uri, registered, :exact_allow_loopback_port),
+               "expected request port in #{uri} to be refused"
+      end
+
+      # The boundaries themselves are usable.
+      assert RedirectURI.registered?("http://127.0.0.1:1/cb", registered, :exact_allow_loopback_port)
+      assert RedirectURI.registered?("http://127.0.0.1:65535/cb", registered, :exact_allow_loopback_port)
+    end
+
+    # The registered URI is a pattern, never a target: its port is discarded, so
+    # the `:0` placeholder convention keeps working.
+    test "the registered side accepts any port, including the :0 placeholder" do
+      for registered <- ["http://127.0.0.1:0/cb", "http://127.0.0.1:/cb", "http://127.0.0.1:99999999/cb"] do
+        assert RedirectURI.registered?("http://127.0.0.1:51823/cb", [registered], :exact_allow_loopback_port),
+               "expected registered #{registered} to still match a usable request port"
+      end
+    end
+
+    # `http://127.0.0.1:0/cb` as a REQUEST is refused by the exception, but an
+    # exact registration of it still matches exactly - the exception only ever
+    # adds matches.
+    test "an exact match still wins for a request port the exception would refuse" do
+      assert RedirectURI.registered?(
+               "http://127.0.0.1:0/cb",
+               ["http://127.0.0.1:0/cb"],
+               :exact_allow_loopback_port
+             )
+    end
+
     test "an empty registered set still matches nothing" do
       refute RedirectURI.registered?("http://127.0.0.1:51823/cb", [], :exact_allow_loopback_port)
     end

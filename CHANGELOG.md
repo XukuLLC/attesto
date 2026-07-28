@@ -21,6 +21,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   classified `{:direct, :redirect_uri_not_registered}` and is never used as a
   redirect target. The new matching logic lives in `Attesto.RedirectURI`.
 
+  The two sides of the comparison differ in one respect: a port on the
+  **request** URI must be decimal `1..65535` or absent, since it names an
+  endpoint a browser is about to be redirected to, while the **registered**
+  URI's port is discarded and so may be anything — including the conventional
+  `:0` placeholder.
+
   Defaults are unchanged: without the option, redirect matching is
   byte-identical to previous releases. Enabling the exception is incompatible
   with profiles that mandate exact redirect-URI matching, so it must be a

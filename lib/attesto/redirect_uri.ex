@@ -37,6 +37,14 @@ defmodule Attesto.RedirectURI do
           address are outside the exception;
         * carries no fragment (a redirect URI must not, RFC 6749 §3.1.2).
 
+      The two sides differ in one respect. The **request** URI names an
+      endpoint the server is about to redirect a browser to, so a port it
+      carries must be decimal `1..65535` or absent; an empty
+      (`http://127.0.0.1:/cb`) or out-of-range port is not a reachable endpoint
+      and falls back to exact comparison. The **registered** URI is a pattern
+      whose port is discarded, so any port stands there - including the
+      conventional `:0` placeholder for "an ephemeral port chosen at runtime".
+
       Two loopback URIs match when their scheme, host literal, path, and query
       are all identical; only the port is ignored. IPv4 and IPv6 loopback are
       distinct hosts and never match each other.
@@ -47,11 +55,10 @@ defmodule Attesto.RedirectURI do
 
   ## Registration convention
 
-  Because the port is ignored on both sides, a client registers its loopback
-  redirect URI with whatever port it likes (`http://127.0.0.1/cb`,
-  `http://127.0.0.1:0/cb`, or a fixed port) and any request port matches. Only
-  the port is variable; a request that differs in path or query is still
-  rejected.
+  A client registers its loopback redirect URI with whatever port it likes
+  (`http://127.0.0.1/cb`, `http://127.0.0.1:0/cb`, or a fixed port) and any
+  usable request port then matches. Only the port is variable; a request that
+  differs in path or query is still rejected.
 
   ## Failure is never a redirect
 
@@ -78,8 +85,15 @@ defmodule Attesto.RedirectURI do
   # else. Anchored, so userinfo (`user@127.0.0.1`), a different host, a trailing
   # dot (`127.0.0.1.`), an alternative encoding (`0177.0.0.1`, `[0:0:0:0:0:0:0:1]`),
   # and the hostname `localhost` (§8.3: NOT acceptable) all fail to match and
-  # fall back to exact comparison.
-  @loopback_authority ~r/\A(127\.0\.0\.1|\[::1\])(?::[0-9]*)?\z/
+  # fall back to exact comparison. The port is captured rather than skipped so
+  # `port_allowed?/2` can hold the request side to a usable range.
+  @loopback_authority ~r/\A(127\.0\.0\.1|\[::1\])(?::([0-9]*))?\z/
+
+  # A TCP port a client can actually bind and be redirected to. Port 0 is
+  # excluded on the request side: it is the "pick one for me" placeholder, not
+  # an endpoint a browser can reach.
+  @min_port 1
+  @max_port 65_535
 
   @doc """
   The supported matching modes. Exposed so a caller can validate host
@@ -137,17 +151,17 @@ defmodule Attesto.RedirectURI do
 
   # RFC 8252 §7.3: a loopback request URI matches a registered loopback URI
   # whose scheme, host literal, path, and query are identical. `nil` from
-  # `loopback_identity/1` means "not a loopback redirect URI", which never
+  # `loopback_identity/2` means "not a loopback redirect URI", which never
   # matches anything - including another non-loopback URI, since the request
   # side is checked first and short-circuits.
   defp loopback?(uri, registered) do
-    case loopback_identity(uri) do
+    case loopback_identity(uri, :request) do
       nil ->
         false
 
       identity ->
         Enum.any?(registered, fn candidate ->
-          is_binary(candidate) and loopback_identity(candidate) == identity
+          is_binary(candidate) and loopback_identity(candidate, :registered) == identity
         end)
     end
   end
@@ -157,18 +171,41 @@ defmodule Attesto.RedirectURI do
   # distinguishes one redirect target from another (host literal, path, query)
   # is carried, so two URIs share an identity only when they differ solely in
   # port.
-  defp loopback_identity(uri) do
+  #
+  # `role` distinguishes the two sides, which are not symmetric in what a port
+  # may be. The REQUEST URI names an endpoint the authorization server is about
+  # to redirect a browser to, so a port it carries must be one a client can
+  # actually listen on: absent, or decimal 1-65535. An empty port
+  # (`http://127.0.0.1:/cb`) or an out-of-range one
+  # (`http://127.0.0.1:999999999/cb`) is not a reachable endpoint and falls back
+  # to exact comparison rather than being minted a redirect target.
+  #
+  # The REGISTERED URI is a pattern, never a target: its port is discarded by
+  # construction, so any port stands. That is deliberate - `:0` is the
+  # conventional placeholder for "an ephemeral port chosen at runtime", and
+  # rejecting it would break the natural way to register a loopback callback.
+  defp loopback_identity(uri, role) do
     if String.starts_with?(uri, @http_scheme_prefix) do
-      uri |> URI.parse() |> identity()
+      uri |> URI.parse() |> identity(role)
     end
   end
 
-  defp identity(%URI{authority: authority, path: path, query: query, fragment: nil}) when is_binary(authority) do
+  defp identity(%URI{authority: authority, path: path, query: query, fragment: nil}, role) when is_binary(authority) do
     case Regex.run(@loopback_authority, authority) do
       [_authority, host] -> {host, path, query}
+      [_authority, host, port] -> if port_allowed?(port, role), do: {host, path, query}
       nil -> nil
     end
   end
 
-  defp identity(%URI{}), do: nil
+  defp identity(%URI{}, _role), do: nil
+
+  defp port_allowed?(_port, :registered), do: true
+
+  defp port_allowed?(port, :request) do
+    case Integer.parse(port) do
+      {number, ""} -> number in @min_port..@max_port
+      _ -> false
+    end
+  end
 end
