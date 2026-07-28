@@ -22,7 +22,9 @@ defmodule Attesto.AuthorizationRequest do
   It DOES check `redirect_uri` against the registered set the caller passes in
   `:registered_redirect_uris` by exact string match (RFC 6749 §3.1.2.3, OIDC
   Core §3.1.2.1): the registered set is a fact the host supplies, not a policy
-  decision this module makes.
+  decision this module makes. A caller running the RFC 8252 native-app profile
+  may widen that comparison to the loopback-port exception (§7.3) with
+  `:redirect_uri_matching`; see `Attesto.RedirectURI`.
 
   ## Error disposition (OIDC Core §3.1.2.6, RFC 6749 §4.1.2.1)
 
@@ -47,6 +49,7 @@ defmodule Attesto.AuthorizationRequest do
   """
 
   alias Attesto.PKCE
+  alias Attesto.RedirectURI
   alias Attesto.RequestObject
   alias Attesto.RequestObject.Policy
   alias Attesto.ResourceIndicator
@@ -77,6 +80,11 @@ defmodule Attesto.AuthorizationRequest do
   # RFC 9700 §2.1.1) by passing `require_pkce: false`. Even when relaxed, a
   # `code_challenge` that IS present is still fully enforced (S256, no `plain`).
   @default_require_pkce true
+
+  # RFC 6749 §3.1.2.3: redirect URIs are compared by simple string match. The
+  # RFC 8252 §7.3 loopback exception is opt-in, so an existing deployment sees
+  # byte-identical matching behavior.
+  @default_redirect_uri_matching :exact
 
   @typedoc """
   A normalized, validated authorization request.
@@ -173,6 +181,17 @@ defmodule Attesto.AuthorizationRequest do
       §3.1.2.1). An empty list rejects every request with
       `{:direct, :redirect_uri_not_registered}`.
 
+    * `:redirect_uri_matching` (optional, default `:exact`) - how the request
+      `redirect_uri` is compared against `:registered_redirect_uris`, one of
+      `Attesto.RedirectURI.matching_modes/0`. `:exact` is the RFC 6749
+      §3.1.2.3 simple string comparison. `:exact_allow_loopback_port` adds the
+      RFC 8252 §7.3 exception for native apps, under which a loopback redirect
+      URI (`http://127.0.0.1/...` or `http://[::1]/...`, never
+      `http://localhost/...` - §8.3) matches on any port while scheme, host,
+      path, and query still compare exactly; nothing else is relaxed. Enabling
+      it is a host decision, incompatible with profiles that mandate exact
+      redirect-URI matching. An unrecognized value raises `ArgumentError`.
+
     * `:require_nonce` (optional, default `false`) - the host's OP nonce policy.
       When `true`, an OpenID Connect Authentication Request (one whose EFFECTIVE
       scope - after any signed `request` object is merged - carries `openid`)
@@ -210,12 +229,13 @@ defmodule Attesto.AuthorizationRequest do
   @spec validate(map(), keyword()) :: {:ok, t()} | {:error, error()}
   def validate(params, opts) when is_map(params) and is_list(opts) do
     registered = Keyword.fetch!(opts, :registered_redirect_uris)
+    matching = redirect_uri_matching(opts)
     require_nonce_policy = Keyword.get(opts, :require_nonce, @default_require_nonce)
     require_pkce = Keyword.get(opts, :require_pkce, @default_require_pkce)
 
     with {:ok, params} <- merge_request_object(params, opts),
          {:ok, client_id} <- validate_client_id(params),
-         {:ok, redirect_uri} <- validate_redirect_uri(params, registered) do
+         {:ok, redirect_uri} <- validate_redirect_uri(params, registered, matching) do
       # OIDC Core §3.1.2.1: the nonce requirement applies only to an OpenID
       # Connect Authentication Request, judged on the EFFECTIVE (post-merge)
       # scope. A direct JAR can carry `scope=openid` only inside the signed
@@ -313,7 +333,11 @@ defmodule Attesto.AuthorizationRequest do
   defp redirect_request_object_error(params, error, description, opts) do
     with {:ok, client_id} <- validate_client_id(params),
          {:ok, redirect_uri} <-
-           validate_redirect_uri(params, Keyword.fetch!(opts, :registered_redirect_uris)) do
+           validate_redirect_uri(
+             params,
+             Keyword.fetch!(opts, :registered_redirect_uris),
+             redirect_uri_matching(opts)
+           ) do
       state = string_or_nil(Map.get(params, "state"))
       {:redirect, base} = redirect_error(error, description, redirect_uri, state)
       {:error, {:redirect, Map.merge(base, redirect_error_context(params, client_id))}}
@@ -338,13 +362,25 @@ defmodule Attesto.AuthorizationRequest do
     end
   end
 
+  # The caller's redirect-URI matching policy (RFC 6749 §3.1.2.3, RFC 8252
+  # §7.3). Normalized through `Attesto.RedirectURI.matching!/1` so an
+  # unrecognized value raises rather than silently selecting a policy the host
+  # did not ask for.
+  defp redirect_uri_matching(opts) do
+    opts
+    |> Keyword.get(:redirect_uri_matching, @default_redirect_uri_matching)
+    |> RedirectURI.matching!()
+  end
+
   # RFC 6749 §3.1.2.3 / OIDC Core §3.1.2.1: redirect_uri is REQUIRED for OIDC
-  # and MUST exactly match one of the client's registered URIs. A mismatch is
-  # non-redirectable because the supplied URI is untrusted (OIDC Core §3.1.2.6).
-  defp validate_redirect_uri(params, registered) do
+  # and MUST match one of the client's registered URIs under the caller's
+  # matching policy (exact by default; see `Attesto.RedirectURI`). A mismatch is
+  # non-redirectable because the supplied URI is untrusted (OIDC Core §3.1.2.6):
+  # an unmatched URI is never returned as a redirect target under any policy.
+  defp validate_redirect_uri(params, registered, matching) do
     case Map.get(params, "redirect_uri") do
       uri when is_binary(uri) and uri != "" ->
-        if registered?(uri, registered) do
+        if RedirectURI.registered?(uri, registered, matching) do
           {:ok, uri}
         else
           {:error, {:direct, :redirect_uri_not_registered}}
@@ -356,13 +392,6 @@ defmodule Attesto.AuthorizationRequest do
       _ ->
         {:error, {:direct, :invalid_redirect_uri}}
     end
-  end
-
-  # Exact string comparison (RFC 6749 §3.1.2.3 simple string match). No
-  # normalization, no prefix matching: a registered URI must be reproduced
-  # byte-for-byte, the same discipline AuthorizationCode applies at redemption.
-  defp registered?(uri, registered) when is_list(registered) do
-    Enum.any?(registered, fn candidate -> is_binary(candidate) and candidate == uri end)
   end
 
   # --- Redirectable checks (RFC 6749 §4.1.2.1) ---

@@ -123,7 +123,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
 ```elixir
 def deps do
   [
-    {:attesto, "~> 1.3"}
+    {:attesto, "~> 1.4"}
   ]
 end
 ```
@@ -313,6 +313,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 8628 | Device Authorization Grant (`device_code`/`user_code` polling) | Supported (`Attesto.DeviceCode`) |
 | CIBA Core 1.0 | Client-Initiated Backchannel Authentication (poll/ping; signed requests per FAPI-CIBA) | Supported (`Attesto.CIBA`) |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | Supported (S256) |
+| RFC 8252 §7.3 | OAuth 2.0 for Native Apps — loopback interface redirection (variable port) | Supported, opt-in (`Attesto.RedirectURI`; off by default, redirect matching stays exact) |
 | RFC 8414 | Authorization Server Metadata (discovery) | Supported |
 | RFC 9126 | Pushed Authorization Requests (PAR) — the client pushes the auth request to the AS for a one-time `request_uri`, so request params never ride the browser/URL | Supported (discovery advertisement + request-object primitives; the `request_uri` endpoint/store live in `attesto_phoenix`) |
 | RFC 9728 | Protected Resource Metadata | Supported |
@@ -373,7 +374,7 @@ constraint.
 
 ## Status
 
-A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS certificate-bound tokens, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, and Client ID Metadata Document (CIMD) verification. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.3`.
+A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS certificate-bound tokens, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, and Client ID Metadata Document (CIMD) verification. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.4`.
 
 ## Development
 

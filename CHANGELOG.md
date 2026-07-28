@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-28
+
+### Added
+
+- RFC 8252 §7.3 loopback interface redirection, as an opt-in redirect-URI
+  matching mode. `Attesto.AuthorizationRequest.validate/2` accepts
+  `:redirect_uri_matching`, which is `:exact` (the RFC 6749 §3.1.2.3 simple
+  string comparison) unless a host selects `:exact_allow_loopback_port`. Under
+  the exception a native app's loopback redirect URI matches on any port, so an
+  ephemeral port bound at runtime need not be registered ahead of time, while
+  scheme, host, path, and query still compare exactly. The relaxation is scoped
+  to `http://127.0.0.1/...` and `http://[::1]/...`; RFC 8252 §8.3 makes
+  `http://localhost/...` unacceptable, and `https`, private-use schemes, and
+  every remote host stay exact-match. An unmatched redirect URI is still
+  classified `{:direct, :redirect_uri_not_registered}` and is never used as a
+  redirect target. The new matching logic lives in `Attesto.RedirectURI`.
+
+  The two sides of the comparison differ in one respect: a port on the
+  **request** URI must be decimal `1..65535` or absent, since it names an
+  endpoint a browser is about to be redirected to, while the **registered**
+  URI's port is discarded and so may be anything — including the conventional
+  `:0` placeholder.
+
+  Defaults are unchanged: without the option, redirect matching is
+  byte-identical to previous releases. Enabling the exception is incompatible
+  with profiles that mandate exact redirect-URI matching, so it must be a
+  deliberate deployment decision. Redemption-time `redirect_uri` comparison in
+  `Attesto.AuthorizationCode` is unaffected — the code is bound to the URI the
+  client actually presented, ephemeral port included, and still matches exactly.
+
 ## [1.3.0] - 2026-07-25
 
 ### Changed
