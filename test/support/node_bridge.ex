@@ -49,7 +49,7 @@ defmodule Attesto.Test.NodeBridge do
       {:error, {:already_started, pid}} ->
         cond do
           Process.alive?(pid) -> :ok
-          attempts > 1 -> Process.sleep(25) && ensure_started!(attempts - 1)
+          attempts > 1 -> retry_start!(attempts)
           true -> raise "Node.js pool registered but not alive"
         end
 
@@ -98,5 +98,10 @@ defmodule Attesto.Test.NodeBridge do
           kind, reason -> {:skip, "Node bridge unavailable: #{inspect({kind, reason})}"}
         end
     end
+  end
+
+  defp retry_start!(attempts) do
+    Process.sleep(25)
+    ensure_started!(attempts - 1)
   end
 end
