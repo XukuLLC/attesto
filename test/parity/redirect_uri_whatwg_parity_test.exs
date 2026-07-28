@@ -174,19 +174,21 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
       refute accepted?(uri, :exact)
     end
 
-    test "spellings a browser resolves to loopback are still refused, not accepted" do
-      # Refusing these is the conservative direction: they fall back to exact
-      # comparison, so a client that wants one must register it verbatim.
+    # Deliberately asserts nothing about what the reference parser returns for
+    # these. How a given WHATWG implementation normalises `127.0.0.1.` or
+    # `[0:0:0:0:0:0:0:1]` varies between Node releases, and pinning that would
+    # be testing Node, not Attesto. What must hold on every runtime is that the
+    # matcher refuses them: an alternative spelling never buys port
+    # flexibility, so a client wanting one has to register it verbatim.
+    test "alternative spellings of the loopback address never gain port flexibility" do
       for uri <- [
             "http://0177.0.0.1:51823/cb",
             "http://2130706433:51823/cb",
             "http://127.1:51823/cb",
             "http://127.0.0.1.:51823/cb",
-            "http://[0:0:0:0:0:0:0:1]:51823/cb"
+            "http://[0:0:0:0:0:0:0:1]:51823/cb",
+            "http://[::ffff:127.0.0.1]:51823/cb"
           ] do
-        assert whatwg(uri)["hostname"] in @loopback_hosts,
-               "expected a browser to resolve #{uri} to loopback"
-
         refute accepted?(uri, :exact_allow_loopback_port),
                "#{uri} must not gain port flexibility from an alternative spelling"
       end
