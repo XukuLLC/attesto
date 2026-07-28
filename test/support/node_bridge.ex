@@ -32,11 +32,29 @@ defmodule Attesto.Test.NodeBridge do
   the failure reason on startup failure.
   """
   @spec ensure_started!() :: :ok
-  def ensure_started! do
+  def ensure_started!(attempts \\ 5) do
     case NodeJS.start_link(path: @js_dir, pool_size: 2) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, reason} -> raise "Failed to start Node.js pool: #{inspect(reason)}"
+      {:ok, _pid} ->
+        :ok
+
+      # The pool is linked to whichever process started it. If that was a
+      # transient process (a test, or the task compiling a parity module) the
+      # pool dies with it, and for a short window the registered name still
+      # resolves to a dead pid. Treating that as "already started" is what
+      # produces a later `:gen_server.call` crash with "no process", so wait
+      # for the name to clear and start a fresh pool instead.
+      #
+      # `test/test_helper.exs` starts the pool up front precisely so this path
+      # is not normally reached; it remains as a backstop.
+      {:error, {:already_started, pid}} ->
+        cond do
+          Process.alive?(pid) -> :ok
+          attempts > 1 -> Process.sleep(25) && ensure_started!(attempts - 1)
+          true -> raise "Node.js pool registered but not alive"
+        end
+
+      {:error, reason} ->
+        raise "Failed to start Node.js pool: #{inspect(reason)}"
     end
   end
 
