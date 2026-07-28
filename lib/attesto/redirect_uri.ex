@@ -42,6 +42,16 @@ defmodule Attesto.RedirectURI do
           past what §7.3 asks for, so `http://localhost:PORT/...` never matches
           under it.
 
+          RFC 9700 §2.1 and §4.1.3 phrase the same exception as applying to
+          "`localhost` redirection URIs of native apps", which reads as a wider
+          allowance. Both, however, define it by reference - "as described in
+          Section 7.3 of [RFC8252]" - and §7.3 constructs the URI from the
+          loopback IP literal, not the name. `localhost` there is shorthand for
+          "the loopback interface", so the normative content is §7.3's and this
+          module follows it. A client that has registered a `localhost` URI is
+          unaffected in the ordinary case: it still matches exactly, it just
+          gets no port flexibility.
+
           This scopes the exception, not registration: a client that has
           registered a `localhost` redirect URI still reaches it by exact
           match, since that URI is one the host deliberately registered and
