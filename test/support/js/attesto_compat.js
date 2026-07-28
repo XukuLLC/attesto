@@ -150,3 +150,33 @@ async function signHs256(claims, secretBase64, typ) {
     .sign(secret);
 }
 module.exports.signHs256 = signHs256;
+
+// ── WHATWG URL parsing (RFC 8252 §7.3 redirect-URI parity) ─────────────────
+//
+// `new URL()` is Node's implementation of the WHATWG URL Standard - the same
+// parser browsers use to resolve a `Location` header. That makes it the
+// authority on where a redirect URI ACTUALLY sends a user agent, which is a
+// different question from how Elixir's RFC 3986 `URI.parse/1` decomposes the
+// same string. The two genuinely disagree on some inputs (a backslash in the
+// authority, for one), so the loopback matcher's accept-set has to be checked
+// against this parser, not against its own.
+//
+// Returns the resolved components, or `{ok: false}` for a string WHATWG
+// refuses outright (an out-of-range port, an IPv6 zone id).
+function whatwgUrl(input) {
+  try {
+    const u = new URL(input);
+    return {
+      ok: true,
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port,
+      pathname: u.pathname,
+      search: u.search,
+      hash: u.hash,
+    };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+module.exports.whatwgUrl = whatwgUrl;
