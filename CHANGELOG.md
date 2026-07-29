@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-28
+
+### Security
+
+- Reject a Client ID Metadata Document whose `redirect_uris` contain a URI that
+  RFC 3986 and the WHATWG URL Standard read differently
+  (`{:error, :invalid_redirect_uris}`).
+
+  A CIMD document is fetched from a URL the client itself chose, so its
+  `redirect_uris` are supplied by the client in a way a host-registered set is
+  not. Elixir's `URI` follows RFC 3986 while the browser that receives the
+  `Location` follows WHATWG, and the two disagree about some authorities: in
+  `https://evil.example\@client.example/cb`, RFC 3986 reads `evil.example\` as
+  userinfo and `client.example` as the host, while WHATWG treats the backslash
+  as a path separator and navigates to `evil.example`.
+
+  Any check phrased in terms of a *host* or an *origin* — the CIMD draft's
+  same-origin tightening, a deployment's origin allow-list — is decided with the
+  first parser and enforced by the second, so such a URI could pass the check
+  and still send the authorization response off-origin. Refusing the document
+  keeps the URI out of the registered set those checks ever run against.
+
+  Byte-exact matching (RFC 6749 §3.1.2.3) was never affected: it compares
+  strings, not origins. The RFC 8252 §7.3 loopback exception was never affected
+  either, because it anchors on the whole authority rather than the parsed host
+  — `http://evil.example\@127.0.0.1/cb` was already refused.
+
+### Added
+
+- `Attesto.RedirectURI.unambiguous?/1`, the predicate behind the above: whether
+  every URL parser agrees which origin a URI names. It refuses backslashes,
+  userinfo, and C0 controls/whitespace anywhere in the URI. Exposed so a host
+  applying its own origin-level policy to a redirect URI can gate on the same
+  rule.
+
+  This governs what may be *registered*; it is not a matching mode and does not
+  change what `registered?/3` accepts.
+
+### Changed
+
+- The WHATWG parity suite now pins a second invariant alongside the loopback
+  one: for every URI `unambiguous?/1` admits, the host RFC 3986 reads and the
+  host WHATWG reads are the same string.
+
 ## [1.4.1] - 2026-07-28
 
 ### Documentation

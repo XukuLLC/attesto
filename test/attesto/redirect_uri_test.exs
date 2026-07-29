@@ -280,4 +280,80 @@ defmodule Attesto.RedirectURITest do
       refute RedirectURI.registered?("https://evil.example/cb", ["http://127.0.0.1:0/cb"], :exact_allow_loopback_port)
     end
   end
+
+  describe "unambiguous?/1" do
+    test "admits ordinary redirect URIs" do
+      for uri <- [
+            "https://client.example/cb",
+            "https://client.example:8443/cb?a=1",
+            "http://127.0.0.1:51823/cb",
+            "http://[::1]/cb",
+            "com.example.app:/oauth2redirect",
+            "com.example.app://callback"
+          ] do
+        assert RedirectURI.unambiguous?(uri), "expected #{inspect(uri)} to be admitted"
+      end
+    end
+
+    # The finding this predicate exists for: RFC 3986 reads `evil.example\` as
+    # userinfo and `client.example` as the host, so an origin check phrased in
+    # terms of `URI.parse/1` approves it - while a browser terminates the
+    # authority at the backslash and navigates to `evil.example`.
+    test "refuses a backslash, whichever host each parser ends up reading" do
+      for uri <- [
+            "https://evil.example\\@client.example/cb",
+            "https://client.example\\@evil.example/cb",
+            "https://client.example/cb\\@evil.example",
+            "http://127.0.0.1\\@evil.example/cb"
+          ] do
+        refute RedirectURI.unambiguous?(uri), "expected #{inspect(uri)} to be refused"
+      end
+    end
+
+    # Userinfo has no legitimate place in a redirect URI, and every authority
+    # confusion trick is built from it. Refused as a class rather than only in
+    # the spellings currently known to differ between parsers.
+    test "refuses userinfo even where the parsers agree" do
+      refute RedirectURI.unambiguous?("https://evil.example@client.example/cb")
+      refute RedirectURI.unambiguous?("https://user:pw@client.example/cb")
+      refute RedirectURI.unambiguous?("https://@client.example/cb")
+    end
+
+    test "an `@` in the path is not userinfo and stays admissible" do
+      assert RedirectURI.unambiguous?("https://client.example/@handle/cb")
+      assert RedirectURI.unambiguous?("https://client.example/cb?to=a@b")
+    end
+
+    # WHATWG strips tab/CR/LF before parsing and percent-encodes other control
+    # characters; RFC 3986 does neither, so the two can disagree about where
+    # the authority ends.
+    test "refuses control characters and whitespace" do
+      for uri <- [
+            "https://evil.example\t@client.example/cb",
+            "https://evil.example\n@client.example/cb",
+            "https://evil.example\r@client.example/cb",
+            "https://client.example/c b",
+            "https://client.example/cb\0",
+            "https://client.example/cb\x7f"
+          ] do
+        refute RedirectURI.unambiguous?(uri), "expected #{inspect(uri)} to be refused"
+      end
+    end
+
+    test "refuses anything that is not a parseable binary" do
+      refute RedirectURI.unambiguous?("https://client.example/cb|pipe")
+      refute RedirectURI.unambiguous?(nil)
+      refute RedirectURI.unambiguous?(:uri)
+      refute RedirectURI.unambiguous?(["https://client.example/cb"])
+    end
+
+    # The predicate governs what may be REGISTERED; it is not a matching mode
+    # and must not quietly change what `registered?/3` accepts.
+    test "does not affect matching, which stays byte-exact" do
+      ambiguous = "https://evil.example\\@client.example/cb"
+
+      assert RedirectURI.registered?(ambiguous, [ambiguous], :exact)
+      refute RedirectURI.unambiguous?(ambiguous)
+    end
+  end
 end
