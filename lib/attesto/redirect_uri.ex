@@ -89,6 +89,22 @@ defmodule Attesto.RedirectURI do
   trusted redirect target, and the caller MUST report the failure directly to
   the user agent rather than redirecting to the supplied URI (OIDC Core
   §3.1.2.6) - otherwise the endpoint is an open redirect.
+
+  ## Parser agreement
+
+  Matching is only as sound as the agreement between the parser that *decides*
+  and the parser that *navigates*. Elixir's `URI` follows RFC 3986; the browser
+  that receives the `Location` follows the WHATWG URL Standard, and the two
+  disagree about some authorities. In `https://evil.example\\@client.example/cb`,
+  RFC 3986 reads `evil.example\\` as userinfo and `client.example` as the host,
+  while WHATWG treats the backslash as a path separator and navigates to
+  `evil.example`.
+
+  Byte-exact matching is immune - it compares strings, never origins - and the
+  §7.3 loopback exception is immune because it anchors on the whole authority
+  rather than the parsed host. Any check phrased in terms of a *host* or an
+  *origin* is not, so `unambiguous?/1` exists to keep such a URI out of a
+  registered set in the first place.
   """
 
   @typedoc "The redirect-URI matching mode (see the moduledoc)."
@@ -118,6 +134,12 @@ defmodule Attesto.RedirectURI do
   @min_port 1
   @max_port 65_535
 
+  # The bytes whose treatment differs between RFC 3986 and the WHATWG URL
+  # Standard (see `unambiguous?/1`): C0 controls, space, and the backslash.
+  # Matched against the raw string rather than a parsed component, since the
+  # disagreement is precisely about where the components begin and end.
+  @ambiguous_bytes ~r/[\x00-\x20\x7f\\]/
+
   @doc """
   The supported matching modes. Exposed so a caller can validate host
   configuration against the same list this module enforces.
@@ -140,6 +162,44 @@ defmodule Attesto.RedirectURI do
   def matching!(other) do
     raise ArgumentError,
           "invalid redirect_uri matching mode #{inspect(other)}; expected one of #{inspect(@matching_modes)}"
+  end
+
+  @doc """
+  Whether every URL parser agrees which origin `uri` names (see "Parser
+  agreement" in the moduledoc).
+
+  Answers `false` for a URI carrying anything that makes RFC 3986 and the WHATWG
+  URL Standard read a different authority out of the same bytes:
+
+    * a **backslash** anywhere. WHATWG maps `\\` to `/` in a special scheme, so
+      it can terminate an authority that RFC 3986 reads as continuing.
+    * **userinfo**. `https://a@b/` is unambiguous today, but userinfo is the
+      component every authority-confusion trick is built out of, and a redirect
+      URI has no legitimate use for credentials (RFC 6749 §3.1.2 wants a plain
+      absolute URI). Refusing it removes the whole class rather than the one
+      spelling known to differ.
+    * a **C0 control, space, tab, CR, or LF**. WHATWG strips tab/CR/LF before
+      parsing and percent-encodes the rest; RFC 3986 does neither.
+
+  A URI that does not parse at all is likewise `false` - it is not a target the
+  server can reason about.
+
+  This is a check on what may be *registered*, not a matching mode. It says
+  nothing about whether a URI is a good redirect target, only that the answer
+  will not depend on which parser is asked.
+  """
+  @spec unambiguous?(term()) :: boolean()
+  def unambiguous?(uri) when is_binary(uri) do
+    not Regex.match?(@ambiguous_bytes, uri) and no_userinfo?(uri)
+  end
+
+  def unambiguous?(_uri), do: false
+
+  defp no_userinfo?(uri) do
+    case URI.new(uri) do
+      {:ok, %URI{userinfo: nil}} -> true
+      _ -> false
+    end
   end
 
   @doc """

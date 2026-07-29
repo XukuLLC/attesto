@@ -211,6 +211,39 @@ defmodule Attesto.ClientIdMetadataTest do
       assert {:error, :invalid_redirect_uris} =
                ClientIdMetadata.validate_document(client_id, doc)
     end
+
+    # A CIMD document is fetched from a URL the client chose, so its
+    # `redirect_uris` are attacker-supplied. One whose authority two URL parsers
+    # read differently would let the same-origin tightening approve a host the
+    # browser never navigates to, so it never enters the registered set.
+    test "rejects a redirect_uri whose host depends on which parser reads it" do
+      client_id = "https://app.example/meta"
+
+      for uri <- [
+            "https://evil.example\\@app.example/cb",
+            "https://evil.example@app.example/cb",
+            "https://evil.example\t@app.example/cb",
+            "https://app.example/c b"
+          ] do
+        doc = %{"client_id" => client_id, "redirect_uris" => [uri]}
+
+        assert {:error, :invalid_redirect_uris} =
+                 ClientIdMetadata.validate_document(client_id, doc),
+               "expected #{inspect(uri)} to be rejected"
+      end
+    end
+
+    test "rejects the whole document when only one redirect_uri is ambiguous" do
+      client_id = "https://app.example/meta"
+
+      doc = %{
+        "client_id" => client_id,
+        "redirect_uris" => ["https://app.example/cb", "https://evil.example\\@app.example/cb"]
+      }
+
+      assert {:error, :invalid_redirect_uris} =
+               ClientIdMetadata.validate_document(client_id, doc)
+    end
   end
 
   describe "validate_document/2 normalization (RFC 7591 §2)" do

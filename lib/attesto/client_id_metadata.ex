@@ -268,10 +268,20 @@ defmodule Attesto.ClientIdMetadata do
   # RFC 9700: the AS MUST require registered redirect URIs and exact-match the
   # request's, so a CIMD document MUST carry a non-empty `redirect_uris` array
   # of strings. An absent, empty, or non-string-list value is rejected.
+  #
+  # Each URI must also be one every URL parser reads the same way
+  # (`Attesto.RedirectURI.unambiguous?/1`). A CIMD document is fetched from a
+  # URL the client chose, so its `redirect_uris` are attacker-supplied in a way
+  # a host-registered set is not, and any origin-level policy applied to them
+  # later - the draft's same-origin tightening, a deployment's allow-list - is
+  # decided with an RFC 3986 parser but enforced by a browser using WHATWG
+  # rules. Rejecting the ambiguity here means no such URI is ever in the set
+  # those checks run against, which is the one place the two parsers cannot
+  # already have diverged.
   defp validate_redirect_uris(doc) do
     case Map.get(doc, "redirect_uris") do
       [_ | _] = uris ->
-        if Enum.all?(uris, &is_binary/1) do
+        if Enum.all?(uris, &Attesto.RedirectURI.unambiguous?/1) do
           {:ok, uris}
         else
           {:error, :invalid_redirect_uris}

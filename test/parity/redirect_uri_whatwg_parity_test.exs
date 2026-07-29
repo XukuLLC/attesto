@@ -103,6 +103,9 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
 
   defp whatwg(uri), do: NodeBridge.call!("attesto_compat", :whatwgUrl, [uri])
 
+  defp unbracket(host) when is_binary(host), do: String.trim_leading(host, "[") |> String.trim_trailing("]")
+  defp unbracket(host), do: host
+
   defp accepted?(uri, matching), do: RedirectURI.registered?(uri, @registered, matching)
 
   describe "the accept-set never escapes loopback (RFC 8252 §7.3)" do
@@ -201,6 +204,87 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
         assert whatwg(uri)["ok"] == false
         refute accepted?(uri, :exact_allow_loopback_port)
       end
+    end
+  end
+
+  describe "unambiguous?/1 admits only URIs both parsers read alike" do
+    # The loopback rule is safe because it compares a whole AUTHORITY. A check
+    # phrased in terms of a HOST - the CIMD same-origin tightening, a
+    # deployment's origin allow-list - has no such protection: it asks one
+    # parser where a URI points and a browser answers differently.
+    #
+    #   THE INVARIANT - for every URI `unambiguous?/1` accepts, the host RFC
+    #   3986 reads and the host WHATWG reads are the same string.
+    #
+    # This is what makes it sound to decide an origin question with `URI.parse/1`
+    # once the predicate has passed.
+    @origin_corpus [
+      # Ordinary registrable redirect URIs, both families and both schemes.
+      "https://client.example/cb",
+      "https://client.example:8443/cb",
+      "https://sub.client.example/cb?a=1",
+      "http://127.0.0.1:51823/cb",
+      "http://[::1]/cb",
+      # A private-use scheme (RFC 8252 §7.1) has no authority to disagree over.
+      "com.example.app:/oauth2redirect",
+      # An `@` in the PATH is not userinfo and must stay admissible.
+      "https://client.example/@handle/cb",
+      # The differential itself, and its neighbours.
+      "https://evil.example\\@client.example/cb",
+      "https://evil.example\\\\@client.example/cb",
+      "https://client.example\\@evil.example/cb",
+      "https://evil.example@client.example/cb",
+      "https://client.example@evil.example/cb",
+      "https://evil.example\t@client.example/cb",
+      "https://evil.example\n@client.example/cb",
+      "https://evil.example\r@client.example/cb",
+      "https://client.example/cb\\@evil.example",
+      "https://client.example /cb",
+      "https://client.example /cb"
+    ]
+
+    test "every admitted URI names the same host under both parsers" do
+      offenders =
+        for uri <- @origin_corpus, RedirectURI.unambiguous?(uri) do
+          parsed = whatwg(uri)
+          rfc = URI.parse(uri).host
+
+          cond do
+            parsed["ok"] != true ->
+              {uri, "WHATWG refuses to parse it"}
+
+            # A scheme with no authority (private-use) has no host on either
+            # side; nothing to disagree about.
+            is_nil(rfc) and parsed["hostname"] in [nil, ""] ->
+              nil
+
+            # `URI.parse/1` returns an IPv6 literal unbracketed and `URL.hostname`
+            # returns it bracketed. That is a spelling difference in how the two
+            # report the same address, not a disagreement about which host is
+            # named, so compare with the brackets removed.
+            unbracket(parsed["hostname"]) != unbracket(rfc) ->
+              {uri, "RFC 3986 reads host #{inspect(rfc)}, WHATWG reads #{inspect(parsed["hostname"])}"}
+
+            true ->
+              nil
+          end
+        end
+        |> Enum.reject(&is_nil/1)
+
+      assert offenders == [],
+             "URIs admitted as unambiguous whose host depends on the parser:\n" <>
+               Enum.map_join(offenders, "\n", fn {uri, why} -> "  #{inspect(uri)} - #{why}" end)
+    end
+
+    test "the corpus actually exercises the predicate (guards against a vacuous pass)" do
+      admitted = Enum.filter(@origin_corpus, &RedirectURI.unambiguous?/1)
+      refused = Enum.reject(@origin_corpus, &RedirectURI.unambiguous?/1)
+
+      assert "https://client.example/cb" in admitted
+      assert "com.example.app:/oauth2redirect" in admitted
+      assert "https://client.example/@handle/cb" in admitted, "an `@` in the path is not userinfo"
+      assert "https://evil.example\\@client.example/cb" in refused
+      assert length(refused) >= 8
     end
   end
 end
