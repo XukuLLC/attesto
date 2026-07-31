@@ -4,6 +4,67 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Claim a DPoP proof's `jti` only after the access token has verified.
+  `Attesto.Plug.Authenticate` ran `:replay_check` during proof validation, two
+  steps before `verify_token`. That callback is check-AND-record — the default
+  claims the identifier with `:ets.insert_new/2` in the same step that tests it
+  — so an unauthenticated caller wrote a row on every request. A DPoP proof is
+  signed by a key the caller generated, so anyone can mint a valid one, pair it
+  with any string in the `Authorization` header, and grow an unbounded ETS table
+  for the cost of a signature.
+
+  The guarantee is unchanged: the claim still happens before the request is
+  served, it is still the same atomic check-and-record, and a replayed `jti` on
+  an otherwise-valid request is still refused (RFC 9449 §11.1). The
+  authorization-server path needed no change — `%Request{}` carries the
+  already-authenticated client, so its claim was never reachable
+  unauthenticated.
+
+- `Attesto.SecureCompare.equal?/2` no longer short-circuits on a length
+  mismatch, so its duration cannot separate "wrong length" from "right length,
+  wrong bytes". Both operands are hashed to 32 bytes and those are compared.
+
+  No call site inside this library was leaking: `Attesto.PKCE.verify/3` gates on
+  `Attesto.Thumbprint.valid?/1`, which requires an exact byte size. The function
+  is public and its name is an unconditional promise, so it should hold for a
+  host comparing a variable-length value of its own.
+
+### Added
+
+- `Attesto.Telemetry` — `:telemetry` events for the refusals that mean someone
+  holds a credential they should not:
+
+  | Event | Fires when |
+  |---|---|
+  | `[:attesto, :refresh_token, :reuse_detected]` | a rotated token is presented again; the family has been revoked |
+  | `[:attesto, :dpop, :replay_detected]` | a proof carries an already-recorded `jti` |
+  | `[:attesto, :token, :sender_constraint_mismatch]` | a sender-bound token is presented with the wrong proof of possession |
+
+  Previously these returned an atom and nothing else, so a host that wanted to
+  alert had to wrap every call site. Metadata carries correlation handles
+  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`) and never a
+  token, code, secret, assertion, or hash of one. Ordinary failures — expired,
+  unknown client, wrong scope — are deliberately not events. Event names and
+  metadata keys are public API; see the module docs.
+
+  Adds `:telemetry` as a dependency.
+
+- `Attesto.DPoP.verify_proof/2` now reports the `replay_ttl` it derived, so a
+  caller claiming the `jti` itself uses that verification's own acceptance
+  window rather than re-deriving the formula.
+
+### Documentation
+
+- `Attesto.DPoP.ReplayCache` now names `AttestoPhoenix.Store.EctoReplayCheck` as
+  the shared-store implementation to use on a multi-node deployment. It
+  previously described one in the abstract ("e.g. a Postgres-backed cache"),
+  which read as an instruction to go and build something the family already
+  ships.
+
 ## [1.5.0] - 2026-07-28
 
 ### Security

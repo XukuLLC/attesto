@@ -20,10 +20,17 @@ defmodule Attesto.DPoP.ReplayCache do
   given access token reaches the same node - otherwise a captured proof
   is replayable once per node behind a load balancer. On a multi-node
   deployment you MUST swap the verifier's `:replay_check` callback for a
-  shared-store implementation (e.g. a Postgres-backed cache using
-  `INSERT ... ON CONFLICT DO NOTHING` for an atomic record-and-check, or
-  Redis) and set `:multi_node_acknowledged?: true` to silence the
-  boot-time guard. The verifier's `:replay_check` shape
+  shared-store implementation and set `:multi_node_acknowledged?: true` to
+  silence the boot-time guard.
+
+  **`AttestoPhoenix.Store.EctoReplayCheck` is that implementation** if you
+  run `attesto_phoenix`: one relational table whose unique constraint on
+  `jti` makes the record-and-check atomic across every node, with a
+  matching schema and expiry sweeper. Reach for it before writing your own.
+  Any other shared store (Redis, or another database using
+  `INSERT ... ON CONFLICT DO NOTHING`) works too - the `:replay_check`
+  shape (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any
+  replacement plug in without changes to `Attesto.DPoP`. The verifier's `:replay_check` shape
   (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any such
   replacement plug in without changes to `Attesto.DPoP`. The verifier
   passes its own `:max_age_seconds` as `ttl_seconds`, so a shared store

@@ -187,6 +187,18 @@ defmodule Attesto.RefreshToken do
     else
       _ ->
         :ok = store.revoke_family(record.family_id)
+
+        # The family is now revoked, so the legitimate client's session is
+        # over either way. This event is the only notice anyone gets that it
+        # ended because a token was presented twice rather than because a user
+        # logged out - see `Attesto.Telemetry`.
+        Attesto.Telemetry.refresh_token_reuse_detected(%{
+          family_id: record.family_id,
+          client_id: Map.get(record.data, :client_id),
+          subject: Map.get(record.data, :subject),
+          generation: Map.get(record, :generation)
+        })
+
         {:error, :reuse_detected}
     end
   end

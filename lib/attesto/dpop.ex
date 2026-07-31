@@ -550,6 +550,10 @@ defmodule Attesto.DPoP do
             :ok
 
           {:error, :replay} ->
+            # RFC 9449 §11.1: this proof was captured and replayed, or a
+            # client is reusing identifiers it must not. See
+            # `Attesto.Telemetry`.
+            Attesto.Telemetry.dpop_replay_detected(jti)
             {:error, :replay}
 
           other ->

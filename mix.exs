@@ -55,6 +55,12 @@ defmodule Attesto.MixProject do
   defp deps do
     [
       {:jose, ">= 1.11.12 and < 2.0.0"},
+      # `Attesto.Telemetry` emits security-relevant refusals (refresh-token
+      # reuse, DPoP replay, sender-constraint mismatch) so a host can alert on
+      # them without wrapping every call site. A hard dependency rather than an
+      # optional one: a signal a host has to opt into compiling is a signal
+      # nobody receives, and the package is dependency-free and ~30KB.
+      {:telemetry, "~> 1.0"},
       # Optional: the Attesto.Plug.* integration layer. Hosts that use the
       # plugs already have Plug; the core library does not require it.
       {:plug, "~> 1.16.6 or ~> 1.17.4 or ~> 1.18.5 or ~> 1.19.5 or >= 1.20.3 and < 2.0.0", optional: true},

@@ -737,8 +737,16 @@ defmodule Attesto.Token do
       cross != nil -> {:error, :mtls_cert_unexpected}
       presented == nil -> {:error, :dpop_proof_required}
       presented == bound -> :ok
-      true -> {:error, :dpop_binding_mismatch}
+      true -> sender_constraint_mismatch(:dpop, :dpop_binding_mismatch, claims)
     end
+  end
+
+  # A sender-bound token presented with the wrong proof of possession is the
+  # signature of a token that has left the holder it was issued to, so it is
+  # reported as well as refused (see `Attesto.Telemetry`).
+  defp sender_constraint_mismatch(binding, reason, claims) do
+    Attesto.Telemetry.sender_constraint_mismatch(binding, reason, claims)
+    {:error, reason}
   end
 
   defp check_mtls_pair(claims, opts) do
@@ -750,7 +758,7 @@ defmodule Attesto.Token do
       cross != nil -> {:error, :dpop_proof_unexpected}
       presented == nil -> {:error, :mtls_cert_required}
       presented == bound -> :ok
-      true -> {:error, :mtls_binding_mismatch}
+      true -> sender_constraint_mismatch(:mtls, :mtls_binding_mismatch, claims)
     end
   end
 
