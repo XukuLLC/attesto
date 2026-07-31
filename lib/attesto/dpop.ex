@@ -107,7 +107,8 @@ defmodule Attesto.DPoP do
           htu: String.t(),
           iat: non_neg_integer(),
           jkt: String.t(),
-          jti: String.t()
+          jti: String.t(),
+          replay_ttl: pos_integer()
         }
 
   @type verify_error ::
@@ -205,7 +206,12 @@ defmodule Attesto.DPoP do
          htu: claims["htu"],
          iat: iat,
          jkt: JOSE.JWK.thumbprint(jwk),
-         jti: jti
+         jti: jti,
+         # The window this proof's `jti` must be remembered for, so a caller
+         # that claims the identifier itself - rather than through
+         # `:replay_check` here - uses the same acceptance window this
+         # verification applied instead of deriving it a second time.
+         replay_ttl: replay_ttl(opts)
        }}
     end
   end

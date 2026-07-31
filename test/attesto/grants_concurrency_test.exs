@@ -86,8 +86,24 @@ defmodule Attesto.GrantsConcurrencyTest do
              end)
 
       # Whichever way the race resolved, the family must not be left in a
-      # forked state: a fresh rotation of the original token now fails.
-      refute match?({:ok, _}, RefreshToken.rotate(RefreshStore.ETS, t0))
+      # FORKED state. That is the invariant; "the next rotation fails" is not,
+      # and asserting it made this test load-dependent.
+      #
+      # Within `:rotation_grace_seconds` (10s by default) a matching retry of
+      # an already-consumed parent is documented to return the SAME successor,
+      # so whether this call fails depends on which way the racers resolved: if
+      # a loser tripped reuse detection the family is revoked and the row is
+      # gone (`:invalid_grant`), but if every loser landed on the idempotent
+      # path there is nothing to revoke and the original successor is returned
+      # again. Both are correct. Only a NEW successor would be a fork.
+      case RefreshToken.rotate(RefreshStore.ETS, t0) do
+        {:ok, %{token: token}} ->
+          assert token in successors,
+                 "a post-race rotation minted a successor no racer saw, forking the family"
+
+        {:error, reason} ->
+          assert reason in [:reuse_detected, :invalid_grant]
+      end
     end
   end
 end
