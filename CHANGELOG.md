@@ -28,10 +28,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mismatch, so its duration cannot separate "wrong length" from "right length,
   wrong bytes". Both operands are hashed to 32 bytes and those are compared.
 
-  No call site inside this library was leaking: `Attesto.PKCE.verify/3` gates on
-  `Attesto.Thumbprint.valid?/1`, which requires an exact byte size. The function
-  is public and its name is an unconditional promise, so it should hold for a
-  host comparing a variable-length value of its own.
+  `Attesto.PKCE.verify/3` was never exposed - it gates on
+  `Attesto.Thumbprint.valid?/1`, which requires an exact byte size - but
+  `Attesto.DPoP`'s `ath` comparison takes an arbitrary-length value straight
+  from the presented proof, so it was, and it is the caller this most benefits.
+
+  Note what the change does and does not buy: the comparison no longer reveals
+  HOW the operands differ, but hashing reads every byte, so its duration still
+  depends on their total size.
 
 ### Added
 
@@ -46,8 +50,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Previously these returned an atom and nothing else, so a host that wanted to
   alert had to wrap every call site. Metadata carries correlation handles
-  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`) and never a
-  token, code, secret, assertion, or hash of one. Ordinary failures — expired,
+  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`), none of
+  them derived by Attesto from a token, code, secret, or assertion - though
+  `jti` is chosen by the client and the rest are the host's own identifiers, so
+  a handler should treat metadata as untrusted input. Ordinary failures — expired,
   unknown client, wrong scope — are deliberately not events. Event names and
   metadata keys are public API; see the module docs.
 

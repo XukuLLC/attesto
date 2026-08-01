@@ -219,6 +219,34 @@ defmodule Attesto.TelemetryTest do
       assert metadata.client_id == "oc_abc"
     end
 
+    # The event is documented as evidence a token has left its holder, so it
+    # must not be ringable by someone who merely holds ANY sender-bound token
+    # from this issuer. Presenting one under a second key at a resource whose
+    # audience policy would refuse it anyway must be refused on the audience,
+    # silently - otherwise the alarm is free to ring, and repeatedly, since a
+    # failed verification never claims the proof's `jti`.
+    test "a token this resource would refuse on audience does not ring the alarm", %{config: config} do
+      bound = JOSE.JWK.thumbprint(JOSE.JWK.generate_key({:ec, "P-256"}))
+      other = JOSE.JWK.thumbprint(JOSE.JWK.generate_key({:ec, "P-256"}))
+      elsewhere = "https://elsewhere.example/api"
+
+      {:ok, %{access_token: token}} =
+        Token.mint(config, principal(), dpop_jkt: bound, audience: elsewhere)
+
+      # This resource trusts a different audience, and is presented the token
+      # under the wrong key: both checks would fail.
+      assert {:error, reason} =
+               Token.verify(config, token,
+                 dpop_jkt: other,
+                 trusted_audiences: fn _claims -> ["https://this-resource.example/api"] end
+               )
+
+      assert reason == :invalid_audience,
+             "audience must be decided before the binding check that reports"
+
+      refute_received {:telemetry, [:attesto, :token, :sender_constraint_mismatch], _, _}
+    end
+
     test "an unbound token verified normally emits nothing", %{config: config} do
       {:ok, %{access_token: token}} = Token.mint(config, principal())
 

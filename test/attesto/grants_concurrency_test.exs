@@ -116,19 +116,21 @@ defmodule Attesto.GrantsConcurrencyTest do
     # not obvious:
     #
     #   * It CAN catch a successor that reaches storage without reaching a
-    #     caller. Today that is unreachable - `rotate/3` returns `{:ok, _}`
-    #     unconditionally once `issue/3` has inserted, and the
-    #     `remember_successor` result is deliberately discarded - so this is a
-    #     guard against a future failure point being introduced between the
-    #     insert and the return, not a live defect.
+    #     caller. `rotate/3` returns `{:ok, _}` unconditionally once `issue/3`
+    #     has inserted and the `remember_successor/3` RESULT is discarded, so a
+    #     store that merely returns an error there cannot strand a child - but
+    #     one that RAISES leaves the child persisted while the caller gets an
+    #     exception, and a host writes those stores.
     #
-    #   * It CANNOT catch a non-atomic `consume`. That was worth trying: with
-    #     `{:reuse, _}` rewired to `{:ok, _}` so several racers claim the same
-    #     parent, the run produced ZERO successors, not two - the extra
-    #     claimants revoke the family, and the winner's own insert is then
-    #     refused. A broken claim degenerates into total failure rather than a
-    #     fork, so no assertion about forks can detect it. The atomicity of
-    #     `consume` is the store's contract, tested where the stores are.
+    #   * It does NOT prove `consume/2` is atomic, though it can catch some
+    #     non-atomic implementations. A store whose `consume` only reads and
+    #     reports success produces 25 distinct persisted successors, which the
+    #     fork assertion rejects. A different break does not: rewiring
+    #     `{:reuse, _}` to `{:ok, _}` yields ZERO successors instead of two,
+    #     because the extra claimants revoke the family and the winner's own
+    #     insert is then refused. Passing here means no fork was observed in
+    #     this run, not that the claim is atomic - that is the store's
+    #     contract, tested where the stores are.
     #
     # The vacuity guard below matters for the same reason: without it, "no
     # successors were persisted" would satisfy a fork assertion perfectly.
@@ -164,12 +166,27 @@ defmodule Attesto.GrantsConcurrencyTest do
                  {:error, r} -> r
                end))})"
 
-      # Every outcome must be terminal-and-safe: a successor, or a refusal.
-      # Nothing may report success without appearing in the store.
-      for {:ok, %{token: token}} <- results do
-        assert Attesto.Secret.hash(token) in persisted,
-               "a racer was handed a successor that is not in the store"
+      # Both inclusions, because either alone is satisfiable while the other
+      # fails. Every successor handed out must be in the store (nobody holds a
+      # credential the store does not know), AND every successor in the store
+      # must have been handed out (nothing is stranded there unclaimed, which
+      # is the case a `remember_successor/3` that raises would produce).
+      returned = for({:ok, %{token: token}} <- results, do: Attesto.Secret.hash(token)) |> Enum.uniq()
+
+      for hash <- returned do
+        assert hash in persisted, "a racer was handed a successor that is not in the store"
       end
+
+      for hash <- persisted do
+        assert hash in returned,
+               "a successor is in the store that no racer received; a stranded child is still a usable credential"
+      end
+
+      # Every outcome must be terminal-and-safe: a successor, or one of the
+      # refusals that leaves no successor behind.
+      assert Enum.all?(results, fn r ->
+               match?({:ok, _}, r) or r in [{:error, :reuse_detected}, {:error, :invalid_grant}]
+             end)
     end
   end
 

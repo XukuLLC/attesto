@@ -379,10 +379,16 @@ or a SIEM without wrapping every call site:
 ```
 
 Metadata carries correlation handles — `family_id`, `client_id`,
-`subject`, `jti`, `binding`, `reason` — and never a token, code, secret,
-assertion, or a hash of one, so a handler that writes metadata straight to
-a log cannot thereby write a credential to disk. Event names and metadata
-keys are public API; see `Attesto.Telemetry`.
+`subject`, `jti`, `binding`, `reason`. Attesto never derives them from a
+credential: no token, code, secret, or assertion is put into an event, in
+plaintext or hashed.
+
+That is not the same as the bytes being harmless. `jti` is chosen by the
+client and emitted unchanged, and `client_id` / `subject` / `family_id` are
+the host's own identifiers, so a handler is writing values it did not
+choose — treat metadata as untrusted input wherever it sends it.
+`Attesto.Telemetry` documents this in full; event names and metadata keys
+are public API.
 
 Routine failures are deliberately **not** events. Emitting them would bury
 the three above in traffic that is simply what a healthy authorization

@@ -43,12 +43,28 @@ defmodule Attesto.DPoP.ReplayCache do
   refuses to enter. Failing the supervised start surfaces the
   misconfiguration loudly rather than emitting a log nobody reads.
 
+  ## Retention is per entry, not per cache
+
+  How long a `jti` is remembered is decided by the caller, not by this
+  process: `check_and_record/2` takes the TTL as an argument and stamps it
+  onto the entry. `Attesto.DPoP.verify_proof/2` passes its whole acceptance
+  window, so retention tracks the verifier's freshness policy automatically
+  and a `jti` cannot be forgotten while a proof carrying it would still be
+  accepted.
+
+  There is deliberately no `:ttl_seconds` start option. One would be a
+  cache-wide value that `check_and_record/2` has no way to consult - it is
+  a plain function, not a call into this GenServer - so it could only ever
+  disagree with the TTL the verifier actually supplies.
+
+  `check_and_record/1` exists for a caller with no verifier to take the
+  window from, and falls back to 60 seconds. Prefer
+  the two-arity form: a caller that defers the claim itself (as
+  `Attesto.Plug.Authenticate` does) should pass the `replay_ttl` that
+  `verify_proof/2` returned, so the two agree by construction.
+
   ## Configuration (start options)
 
-    * `:ttl_seconds` (default `60`) - how long each `jti` is remembered.
-      SHOULD match (or modestly exceed) the verifier's `:max_age_seconds`
-      so a proof whose `iat` window has already closed is rejected by
-      freshness OR by replay, never just by eviction race.
     * `:sweep_interval_ms` (default `30_000`) - how often expired entries
       are deleted in bulk. The cache is correct without sweeping (lookups
       re-validate expiry); the sweeper just bounds table size.
@@ -59,7 +75,7 @@ defmodule Attesto.DPoP.ReplayCache do
   ## Wiring
 
       children = [
-        {Attesto.DPoP.ReplayCache, ttl_seconds: 60}
+        Attesto.DPoP.ReplayCache
       ]
 
   then, at the verifier:

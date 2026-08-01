@@ -47,8 +47,9 @@ defmodule Attesto.Telemetry do
 
   Metadata:
 
-    * `:jti` - the replayed identifier. Not a credential: it travels in
-      the proof and is the only handle for correlating repeats.
+    * `:jti` - the replayed identifier, emitted unchanged because it is the
+      only handle for correlating repeats. Chosen by the CLIENT, so see
+      "What metadata contains" below before writing it anywhere.
 
   ### `[:attesto, :token, :sender_constraint_mismatch]`
 
@@ -72,13 +73,13 @@ defmodule Attesto.Telemetry do
 
   ## What metadata contains, and what it does not
 
-  Attesto never *puts* a credential in metadata: no access token, refresh
-  token, authorization code, client secret, DPoP proof, or assertion, in
-  plaintext or hashed. None of the values emitted can be presented to
-  obtain anything.
+  Attesto never *derives* metadata from a credential: it does not put an
+  access token, refresh token, authorization code, client secret, DPoP
+  proof, or assertion into an event, in plaintext or hashed, and none of
+  the values it chooses itself can be presented to obtain anything.
 
-  That is a statement about this library, not about the bytes that end up
-  in your logs, and the difference matters:
+  That is not a promise that the bytes are harmless, because some of them
+  are not Attesto's to choose:
 
     * **`jti` is chosen by the client.** RFC 9449 constrains it only to be
       a unique string; this verifier additionally caps it at 256 bytes. A

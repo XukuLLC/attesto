@@ -1,10 +1,15 @@
 defmodule Attesto.SecureCompare do
   @moduledoc """
-  Constant-time comparison of two binaries.
+  Result-independent comparison of two binaries.
 
   Used wherever an attacker-controlled value is checked against a secret
   or a derived digest (a DPoP `ath`, a PKCE challenge) and a
   short-circuiting `==` would leak information through timing.
+
+  "Result-independent" rather than "constant-time": how long `equal?/2`
+  takes does not depend on HOW the operands differ - whether the length was
+  wrong, or a prefix matched - but it does depend on their total size, since
+  both are hashed. See `equal?/2` for what that does and does not withhold.
   """
 
   @doc """

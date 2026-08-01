@@ -343,8 +343,19 @@ defmodule Attesto.Token do
          {:ok, kind} <- check_principal(config, claims),
          :ok <- check_principal_identity_claims(kind, claims),
          :ok <- check_typ(claims, opts),
-         :ok <- maybe_check_confirmation_binding(claims, opts),
-         :ok <- check_deferred_audience(claims, opts) do
+         # Audience before binding, deliberately. `maybe_check_confirmation_binding/2`
+         # emits `[:attesto, :token, :sender_constraint_mismatch]`, an event
+         # documented as evidence that a token has left its holder. Evaluating
+         # it first meant any sender-bound token from this issuer - not one for
+         # this resource - could be presented here under a second DPoP key to
+         # raise that alarm. Nothing claims the proof's `jti` on a failed
+         # verification either, so the same proof could be replayed for its
+         # whole freshness window, making the alarm arbitrarily cheap to ring.
+         #
+         # Deciding "is this token even for me" first means a token this
+         # resource would refuse anyway never reaches the check that reports.
+         :ok <- check_deferred_audience(claims, opts),
+         :ok <- maybe_check_confirmation_binding(claims, opts) do
       {:ok, claims}
     end
   end
