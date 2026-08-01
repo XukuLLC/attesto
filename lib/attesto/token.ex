@@ -283,19 +283,21 @@ defmodule Attesto.Token do
     5. **Temporal.** `exp` is strictly greater than `now` (no skew
        leeway). If `nbf` is present it MUST be an integer no later than
        `now` (RFC 7519 §4.1.5; a small clock-skew tolerance applies), else
-       `:not_yet_valid`. An `iat` meaningfully in the future is also
        `:not_yet_valid`.
     6. **Required claims** are present and well-typed: `sub`/`jti`
        non-empty strings, `scope` a string, `iat` a non-negative integer,
-       and both the principal-kind claim and `typ` present.
-    7. **Principal.** The principal-kind claim names a configured kind AND
+       and both the principal-kind claim and `typ` present. This runs BEFORE
+       the future-`iat` check below, so a token that is both malformed and
+       future-dated reports `:invalid_claims`.
+    7. **`iat` not meaningfully in the future**, else `:not_yet_valid`.
+    8. **Principal.** The principal-kind claim names a configured kind AND
        `sub` begins with that kind's `sub_prefix`; otherwise
        `:invalid_principal`.
-    8. **Per-kind claims.** The kind's `required_claims` are all present
+    9. **Per-kind claims.** The kind's `required_claims` are all present
        with the right shape; otherwise `:invalid_claims`.
-    9. **`typ`** is a known value AND equals the expected purpose
+   10. **`typ`** is a known value AND equals the expected purpose
        (`:expected_typ`, default `"access"`).
-   10. **Binding.** A DPoP-bound token requires a matching `:dpop_jkt`; an
+   11. **Binding.** A DPoP-bound token requires a matching `:dpop_jkt`; an
        mTLS-bound token a matching `:mtls_cert_thumbprint`; an unbound
        token requires neither. The cross-scheme option MUST be absent.
        See the error list for the precise outcomes.

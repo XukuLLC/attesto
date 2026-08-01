@@ -153,7 +153,9 @@ defmodule Attesto.TelemetryTest do
     # revoked mid-rotation by a token presented exactly once. The library cannot
     # tell the two apart from this branch, so it denies without accusing.
     test "winning the claim and then finding the family revoked denies WITHOUT alleging reuse" do
-      assert {:error, :reuse_detected} = RefreshToken.rotate(FamilyRevokedStore, "presented", client_id: "oc_racer")
+      # `:grant_revoked`, not `:reuse_detected`: the return says what is known
+      # (the family is gone) rather than what is not (why).
+      assert {:error, :grant_revoked} = RefreshToken.rotate(FamilyRevokedStore, "presented", client_id: "oc_racer")
 
       refute_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, _},
                       "a concurrent logout must not page someone about a stolen credential"

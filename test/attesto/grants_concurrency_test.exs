@@ -83,7 +83,8 @@ defmodule Attesto.GrantsConcurrencyTest do
              "at most one distinct successor may be minted; got #{length(successors)}"
 
       assert Enum.all?(results, fn r ->
-               match?({:ok, _}, r) or r == {:error, :reuse_detected} or r == {:error, :invalid_grant}
+               match?({:ok, _}, r) or
+                 r in [{:error, :reuse_detected}, {:error, :grant_revoked}, {:error, :invalid_grant}]
              end)
 
       # Whichever way the race resolved, the family must not be left in a
@@ -103,7 +104,7 @@ defmodule Attesto.GrantsConcurrencyTest do
                  "a post-race rotation minted a successor no racer saw, forking the family"
 
         {:error, reason} ->
-          assert reason in [:reuse_detected, :invalid_grant]
+          assert reason in [:reuse_detected, :grant_revoked, :invalid_grant]
       end
     end
 
@@ -159,7 +160,7 @@ defmodule Attesto.GrantsConcurrencyTest do
       # revoke the family in the window between the winner's `consume` and its
       # `insert`, so the winner's child is refused - which is why this asserts
       # that the claim was REACHED rather than that a child exists.
-      assert Enum.any?(results, &(match?({:ok, _}, &1) or &1 == {:error, :reuse_detected})),
+      assert Enum.any?(results, &(match?({:ok, _}, &1) or &1 in [{:error, :reuse_detected}, {:error, :grant_revoked}])),
              "no racer won the claim or tripped reuse detection, so nothing was ruled out " <>
                "(outcomes: #{inspect(Enum.frequencies_by(results, fn
                  {:ok, _} -> :ok
@@ -185,7 +186,8 @@ defmodule Attesto.GrantsConcurrencyTest do
       # Every outcome must be terminal-and-safe: a successor, or one of the
       # refusals that leaves no successor behind.
       assert Enum.all?(results, fn r ->
-               match?({:ok, _}, r) or r in [{:error, :reuse_detected}, {:error, :invalid_grant}]
+               match?({:ok, _}, r) or
+                 r in [{:error, :reuse_detected}, {:error, :grant_revoked}, {:error, :invalid_grant}]
              end)
     end
   end

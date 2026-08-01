@@ -40,10 +40,13 @@ defmodule Attesto.SecureCompare do
   presented value is an arbitrary-length claim from the proof - which is
   precisely the case that benefits.
 
-  The final byte comparison runs only when the digests already match, so
-  it carries no result-dependent signal: reaching it means the caller
-  supplied either the correct value or a SHA-256 collision. It is there so
-  a collision cannot be reported as equality.
+  The final byte comparison runs only when the digests already match, which
+  IS a result-dependent branch - an equal pair does that extra work and an
+  unequal pair does not. It is deliberate and it leaks nothing useful:
+  reaching it means the caller already supplied the correct value (or a
+  SHA-256 collision), so the timing difference separates "right" from
+  "wrong", which the answer itself already reveals. What is withheld is the
+  distinction among WRONG inputs - the one an attacker probes with.
   """
   @spec equal?(binary(), binary()) :: boolean()
   def equal?(a, b) when is_binary(a) and is_binary(b) do

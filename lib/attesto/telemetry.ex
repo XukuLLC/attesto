@@ -118,7 +118,16 @@ defmodule Attesto.Telemetry do
 
   So treat metadata as untrusted, attacker-influencable input on its way to
   wherever the handler sends it: escape it, bound it, and do not
-  interpolate it into anything that parses.
+  interpolate it into anything that parses. A client that puts its own live
+  secret in `jti` will have that secret written wherever the handler writes.
+
+  ## Handlers run synchronously
+
+  `:telemetry` invokes handlers on the calling process, so a handler that
+  blocks blocks the refusal that produced the event, and there is no timeout.
+  Hand work to a queue, a task, or a `GenServer` and return; do not do I/O
+  inline. A handler that raises or exits is caught and detached by
+  `:telemetry` itself and cannot change the outcome - one that hangs can.
 
   ## Attaching
 
@@ -177,12 +186,17 @@ defmodule Attesto.Telemetry do
   # handler, and this function does not need to protect against one.
   #
   # What a blanket `catch _kind, _reason` DID protect against was the dispatcher
-  # itself failing, and it did so by swallowing the failure whole. With
-  # `:telemetry` stopped, this returned `:ok` having delivered nothing: the
-  # library reported success for an alert nobody received. For events whose
-  # entire purpose is to tell an operator a credential may be stolen, silently
-  # losing one is worse than a loud failure, and it cannot be noticed later
-  # because a missing event leaves no trace.
+  # itself failing, and it did so by swallowing the failure whole.
+  #
+  # Removing it does not make every loss loud, and it is worth being exact:
+  # with `:telemetry` stopped, `execute/3` finds an empty handler list and
+  # returns `:ok`, so that particular loss is still silent. What the removal
+  # buys is that a genuine dispatch failure surfaces instead of being absorbed.
+  #
+  # Delivery is SYNCHRONOUS and best-effort. A handler that blocks blocks the
+  # refusal with it - `:telemetry` offers no timeout - so a handler must hand
+  # work off and return promptly. That is a contract on the host, stated in the
+  # moduledoc, not something this function can enforce.
   defp emit(event, metadata) do
     :telemetry.execute(event, %{system_time: System.system_time()}, metadata)
   end

@@ -62,6 +62,7 @@ defmodule Attesto.RefreshToken do
   @type rotate_error ::
           :invalid_grant
           | :reuse_detected
+          | :grant_revoked
           | :expired
           | :client_required
           | :client_mismatch
@@ -286,8 +287,12 @@ defmodule Attesto.RefreshToken do
         # token presented ONCE. Emitting the reuse event for it would page
         # someone with "a credential has been stolen" over a logout, and an
         # alert that fires on routine behaviour is one people learn to close.
+        #
+        # The RETURN says the same thing: `:grant_revoked`, not
+        # `:reuse_detected`. A caller alerting on the atom would otherwise draw
+        # the conclusion the telemetry deliberately refuses to.
         :ok = store.revoke_family(claimed.family_id)
-        {:error, :reuse_detected}
+        {:error, :grant_revoked}
     end
   end
 

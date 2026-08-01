@@ -19,15 +19,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The guarantee is unchanged: the claim still happens before the request is
   served, it is still the same atomic check-and-record, and a replayed `jti` on
-  an otherwise-valid request is still refused (RFC 9449 §11.1). The
-  authorization-server path needed no change — `%Request{}` carries the
-  already-authenticated client, so its claim was never reachable
-  unauthenticated.
+  an otherwise-valid request is still refused (RFC 9449 §11.1).
+
+  The authorization-server path needed the same fix, in `attesto_phoenix` — an
+  earlier draft of this entry claimed it did not, on the grounds that
+  `%Request{}` carries an authenticated client. That is false for a **public
+  client** (RFC 6749 §2.1), which presents a `client_id` and no credential, so
+  the same unauthenticated write was reachable at the token endpoint. See that
+  package's changelog.
 
 - `Attesto.SecureCompare.equal?/2` no longer short-circuits on a length
-  mismatch. There is no early return keyed on length or equality, so the
-  comparison does not separate "wrong length" from "right length, wrong bytes".
-  Both operands are hashed to 32 bytes and those are compared.
+  mismatch. Both operands are hashed to 32 bytes and those digests are
+  compared, so the comparison no longer separates "wrong length" from "right
+  length, wrong bytes" — the distinction an attacker probes with. A matching
+  pair does one extra byte comparison to rule out a digest collision; that
+  branch separates right from wrong, which the answer already reveals.
 
   `Attesto.PKCE.verify/3` was never exposed - it gates on
   `Attesto.Thumbprint.valid?/1`, which requires an exact byte size - but
