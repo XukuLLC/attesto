@@ -9,6 +9,7 @@ defmodule Attesto.GrantsConcurrencyTest do
 
   alias Attesto.AuthorizationCode
   alias Attesto.CodeStore
+  alias Attesto.GrantsConcurrencyTest.RecordingStore
   alias Attesto.PKCE
   alias Attesto.RefreshStore
   alias Attesto.RefreshToken
@@ -105,5 +106,115 @@ defmodule Attesto.GrantsConcurrencyTest do
           assert reason in [:reuse_detected, :invalid_grant]
       end
     end
+
+    # The test above can only see successors that were RETURNED to a caller. A
+    # child written to storage and then not handed back is invisible to it, and
+    # a child sitting in the store is a usable credential whether or not anyone
+    # received it. This one watches the store instead.
+    #
+    # What it can and cannot catch, stated plainly because the difference is
+    # not obvious:
+    #
+    #   * It CAN catch a successor that reaches storage without reaching a
+    #     caller. Today that is unreachable - `rotate/3` returns `{:ok, _}`
+    #     unconditionally once `issue/3` has inserted, and the
+    #     `remember_successor` result is deliberately discarded - so this is a
+    #     guard against a future failure point being introduced between the
+    #     insert and the return, not a live defect.
+    #
+    #   * It CANNOT catch a non-atomic `consume`. That was worth trying: with
+    #     `{:reuse, _}` rewired to `{:ok, _}` so several racers claim the same
+    #     parent, the run produced ZERO successors, not two - the extra
+    #     claimants revoke the family, and the winner's own insert is then
+    #     refused. A broken claim degenerates into total failure rather than a
+    #     fork, so no assertion about forks can detect it. The atomicity of
+    #     `consume` is the store's contract, tested where the stores are.
+    #
+    # The vacuity guard below matters for the same reason: without it, "no
+    # successors were persisted" would satisfy a fork assertion perfectly.
+    test "no second successor is persisted, even one no caller received" do
+      RecordingStore.reset()
+
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RecordingStore, %{subject: "usr_42", scope: ["documents.read"]})
+
+      results = race(fn -> RefreshToken.rotate(RecordingStore, t0) end)
+
+      # Generation 0 is the parent from `issue/3`; anything above it is a
+      # successor that actually landed in storage.
+      persisted =
+        RecordingStore.persisted()
+        |> Enum.filter(&(&1.generation >= 1))
+        |> Enum.map(& &1.token_hash)
+        |> Enum.uniq()
+
+      assert length(persisted) <= 1,
+             "the race persisted #{length(persisted)} distinct successors; one parent may father at most one child"
+
+      # Guard against a vacuous pass: an empty store satisfies "at most one
+      # successor" perfectly, so require evidence the race reached the claim at
+      # all. Zero persisted successors is itself legitimate - a loser can
+      # revoke the family in the window between the winner's `consume` and its
+      # `insert`, so the winner's child is refused - which is why this asserts
+      # that the claim was REACHED rather than that a child exists.
+      assert Enum.any?(results, &(match?({:ok, _}, &1) or &1 == {:error, :reuse_detected})),
+             "no racer won the claim or tripped reuse detection, so nothing was ruled out " <>
+               "(outcomes: #{inspect(Enum.frequencies_by(results, fn
+                 {:ok, _} -> :ok
+                 {:error, r} -> r
+               end))})"
+
+      # Every outcome must be terminal-and-safe: a successor, or a refusal.
+      # Nothing may report success without appearing in the store.
+      for {:ok, %{token: token}} <- results do
+        assert Attesto.Secret.hash(token) in persisted,
+               "a racer was handed a successor that is not in the store"
+      end
+    end
+  end
+
+  # Wraps the ETS reference store and records every successor insert that
+  # actually landed, so a test can assert over what STORAGE holds rather than
+  # only over what callers were handed back. Records after the delegate
+  # returns `:ok`, so an insert the store refused (`:family_revoked`) is not
+  # counted as persisted.
+  defmodule RecordingStore do
+    @moduledoc false
+    @behaviour Attesto.RefreshStore
+
+    @table :grants_concurrency_insert_log
+
+    def reset do
+      if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+      :ets.new(@table, [:duplicate_bag, :public, :named_table])
+      :ok
+    end
+
+    def persisted, do: Enum.map(:ets.tab2list(@table), fn {:persisted, entry} -> entry end)
+
+    @impl true
+    def insert(entry) do
+      case RefreshStore.ETS.insert(entry) do
+        :ok ->
+          :ets.insert(@table, {:persisted, entry})
+          :ok
+
+        other ->
+          other
+      end
+    end
+
+    @impl true
+    def get(token_hash), do: RefreshStore.ETS.get(token_hash)
+
+    @impl true
+    def consume(token_hash, opts), do: RefreshStore.ETS.consume(token_hash, opts)
+
+    @impl true
+    def remember_successor(token_hash, successor, opts),
+      do: RefreshStore.ETS.remember_successor(token_hash, successor, opts)
+
+    @impl true
+    def revoke_family(family_id), do: RefreshStore.ETS.revoke_family(family_id)
   end
 end
