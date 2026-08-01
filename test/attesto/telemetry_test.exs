@@ -81,6 +81,79 @@ defmodule Attesto.TelemetryTest do
       refute_received {:telemetry, _event, _measurements, _metadata}
     end
 
+    # Three paths conclude "presented twice": the initial read finds an
+    # already-consumed token, the atomic `consume` reports `{:reuse, _}`
+    # against a concurrent rotation, or our own claim wins and then finds the
+    # family revoked underneath it. The first is a lone late retry; the other
+    # two are a live race - the shape an attacker racing the legitimate client
+    # actually produces, and the two that were silent.
+    #
+    # A real race cannot test this: whether any racer reaches the concurrent
+    # branch is timing-dependent, and an emission from the initial-read path
+    # looks identical from outside. These stores force each branch instead.
+    defmodule ReuseOnConsumeStore do
+      @moduledoc false
+      @behaviour Attesto.RefreshStore
+
+      @entry %{
+        token_hash: "hash",
+        family_id: "fam_concurrent",
+        generation: 0,
+        data: %{subject: "usr_concurrent", client_id: "oc_racer", scope: [], resource: [], claims: %{}, dpop_jkt: nil},
+        expires_at: 4_102_444_800,
+        consumed: false,
+        consumed_at: nil,
+        successor: nil
+      }
+
+      def entry, do: @entry
+
+      @impl true
+      def get(_hash), do: {:ok, @entry}
+      @impl true
+      def consume(_hash, _opts), do: {:reuse, @entry}
+      @impl true
+      def revoke_family(_family_id), do: :ok
+      @impl true
+      def insert(_entry), do: :ok
+      @impl true
+      def remember_successor(_hash, _successor, _opts), do: :ok
+    end
+
+    defmodule FamilyRevokedStore do
+      @moduledoc false
+      @behaviour Attesto.RefreshStore
+
+      @entry ReuseOnConsumeStore.entry()
+
+      @impl true
+      def get(_hash), do: {:ok, @entry}
+      @impl true
+      def consume(_hash, _opts), do: {:ok, @entry}
+      @impl true
+      def revoke_family(_family_id), do: :ok
+      @impl true
+      def insert(_entry), do: {:error, :family_revoked}
+      @impl true
+      def remember_successor(_hash, _successor, _opts), do: :ok
+    end
+
+    test "a concurrent claim losing to `consume` emits" do
+      assert {:error, :reuse_detected} = RefreshToken.rotate(ReuseOnConsumeStore, "presented", client_id: "oc_racer")
+
+      assert_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, metadata}
+      assert metadata.family_id == "fam_concurrent"
+      assert metadata.subject == "usr_concurrent"
+      assert metadata.client_id == "oc_racer"
+    end
+
+    test "winning the claim and then finding the family revoked emits" do
+      assert {:error, :reuse_detected} = RefreshToken.rotate(FamilyRevokedStore, "presented", client_id: "oc_racer")
+
+      assert_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, metadata}
+      assert metadata.family_id == "fam_concurrent"
+    end
+
     test "metadata carries no credential material" do
       {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_79"})
       {:ok, %{token: successor}} = RefreshToken.rotate(RefreshStore.ETS, t0)

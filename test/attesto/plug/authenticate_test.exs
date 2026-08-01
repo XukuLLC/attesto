@@ -522,6 +522,53 @@ defmodule Attesto.Plug.AuthenticateTest do
 
     # The property that must not regress: deferring WHEN the claim happens
     # does not weaken WHETHER a replay is refused.
+    # The plug no longer routes through `DPoP.check_replay/2` (it defers the
+    # claim), so the core's emission point is never reached on this path. The
+    # advertised event has to come from the plug or it does not come at all.
+    test "a replay refused by the plug still emits the advertised event", %{config: config} do
+      handler = "plug-replay-telemetry"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:attesto, :dpop, :replay_detected],
+        fn _e, _m, meta, _c -> send(test_pid, {:replay_event, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(token))
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :replay} end))
+
+      assert conn.status == 401
+      assert_received {:replay_event, meta}
+      assert is_binary(meta.jti)
+    end
+
+    # A replay store that is down must not be reported as a bad client.
+    test "an unexpected :replay_check return raises rather than becoming a 401", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(token))
+
+      opts = Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :unavailable} end)
+
+      assert_raise ArgumentError, ~r/must return :ok or \{:error, :replay\}/, fn ->
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(opts)
+      end
+    end
+
     test "a replayed jti on an otherwise-valid request is still refused", %{config: config} do
       jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       jkt = JOSE.JWK.thumbprint(jwk)

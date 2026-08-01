@@ -185,22 +185,36 @@ defmodule Attesto.RefreshToken do
          context: successor.context
        }}
     else
-      _ ->
-        :ok = store.revoke_family(record.family_id)
-
-        # The family is now revoked, so the legitimate client's session is
-        # over either way. This event is the only notice anyone gets that it
-        # ended because a token was presented twice rather than because a user
-        # logged out - see `Attesto.Telemetry`.
-        Attesto.Telemetry.refresh_token_reuse_detected(%{
-          family_id: record.family_id,
-          client_id: Map.get(record.data, :client_id),
-          subject: Map.get(record.data, :subject),
-          generation: Map.get(record, :generation)
-        })
-
-        {:error, :reuse_detected}
+      _ -> revoke_and_report_reuse(store, record)
     end
+  end
+
+  # EVERY path that concludes "this token was presented twice" goes through
+  # here, so revoking the family and reporting it cannot drift apart.
+  #
+  # There are three such paths and they are not interchangeable in how they
+  # were reached: the initial read finds an already-consumed token, the atomic
+  # `consume` reports `{:reuse, _}` against a concurrent rotation, or our own
+  # claim succeeds and then finds the family revoked underneath it. The first
+  # is a lone late retry; the other two are a live race, which is the shape an
+  # attacker racing the legitimate client actually produces. Instrumenting only
+  # the first would have left the concurrent cases - the ones that matter most -
+  # silent.
+  defp revoke_and_report_reuse(store, record) do
+    :ok = store.revoke_family(record.family_id)
+
+    # The family is now revoked, so the legitimate client's session is over
+    # either way. This event is the only notice anyone gets that it ended
+    # because a token was presented twice rather than because a user logged
+    # out - see `Attesto.Telemetry`.
+    Attesto.Telemetry.refresh_token_reuse_detected(%{
+      family_id: record.family_id,
+      client_id: record |> Map.get(:data, %{}) |> Map.get(:client_id),
+      subject: record |> Map.get(:data, %{}) |> Map.get(:subject),
+      generation: Map.get(record, :generation)
+    })
+
+    {:error, :reuse_detected}
   end
 
   # OAuth 2.0 Security BCP §4.13.2: the rotation-grace idempotent retry is safe
@@ -264,8 +278,7 @@ defmodule Attesto.RefreshToken do
         # We won the atomic claim, but a concurrent reuse revoked the family
         # before our successor landed: a concurrent double-use. Ensure the
         # family is revoked and report it as reuse, not a fresh token.
-        :ok = store.revoke_family(claimed.family_id)
-        {:error, :reuse_detected}
+        revoke_and_report_reuse(store, claimed)
     end
   end
 
@@ -336,8 +349,7 @@ defmodule Attesto.RefreshToken do
         {:ok, claimed}
 
       {:reuse, claimed} ->
-        :ok = store.revoke_family(claimed.family_id)
-        {:error, :reuse_detected}
+        revoke_and_report_reuse(store, claimed)
 
       :error ->
         {:error, :invalid_grant}

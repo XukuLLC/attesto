@@ -30,11 +30,11 @@ defmodule Attesto.DPoP.ReplayCache do
   Any other shared store (Redis, or another database using
   `INSERT ... ON CONFLICT DO NOTHING`) works too - the `:replay_check`
   shape (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any
-  replacement plug in without changes to `Attesto.DPoP`. The verifier's `:replay_check` shape
-  (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any such
   replacement plug in without changes to `Attesto.DPoP`. The verifier
-  passes its own `:max_age_seconds` as `ttl_seconds`, so a shared store
-  can size each `jti`'s retention to the proof's freshness window.
+  passes its whole acceptance window as `ttl_seconds` - `:max_age_seconds`
+  plus the future-skew allowance it also tolerates, not `:max_age_seconds`
+  alone - so a shared store sized by that value cannot forget a `jti`
+  while a proof carrying it would still be accepted.
 
   The boot-time guard **raises** on startup if `Node.list/0` is non-empty
   and `:multi_node_acknowledged?` is not set - a clustered BEAM with a

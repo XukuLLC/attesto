@@ -356,9 +356,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     # `claim_dpop_jti/3` once the access token has verified. Nothing about the
     # guarantee changes: the claim still happens before the request is served,
     # it is still the same atomic check-and-record, and a replayed `jti` on an
-    # otherwise-valid request is still refused (RFC 9449 §11.1). What changes
-    # is that a request which was never going to be served no longer leaves a
-    # trace behind.
+    # otherwise-valid request is still refused (RFC 9449 §11.1).
+    #
+    # What changes is the population that can write: a caller must now present
+    # a token this server issued before its proof costs the store anything.
+    # The claim is deliberately NOT deferred past that point - a request that
+    # authenticates and is then refused a step-up challenge (RFC 9470) has
+    # still had its proof claimed, because by then the proof HAS been used
+    # against a valid token and must not be replayable.
     defp verify_dpop_proof(conn, proof, token, opts) do
       if replay_protected?(opts) do
         verify_opts =
@@ -382,10 +387,29 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp claim_dpop_jti(jti, ttl_seconds, opts) when is_binary(jti) do
       case Keyword.get(opts, :replay_check) do
         fun when is_function(fun, 2) ->
+          # The accepted results mirror `Attesto.DPoP.check_replay/2` exactly.
+          # Accepting any `{:error, _}` here would turn a replay-store outage
+          # (`{:error, :unavailable}` from a host's shared store, say) into a
+          # 401 `invalid_dpop_proof`, blaming the client for a server fault and
+          # hiding the outage. An unsupported return is a host integration bug
+          # and is raised, not translated.
           case fun.(jti, ttl_seconds) do
-            :ok -> :ok
-            {:error, reason} -> {:dpop_error, reason}
-            other -> {:dpop_error, other}
+            :ok ->
+              :ok
+
+            {:error, :replay} ->
+              # RFC 9449 §11.1. Emitted here rather than in
+              # `Attesto.DPoP.check_replay/2`, because this plug deliberately
+              # does not hand `:replay_check` to `verify_proof/2` - the claim
+              # is deferred until the token has verified - so the core's
+              # emission point is never reached on this path.
+              Attesto.Telemetry.dpop_replay_detected(jti)
+              {:dpop_error, :replay}
+
+            other ->
+              raise ArgumentError,
+                    "Attesto.Plug.Authenticate :replay_check must return :ok or {:error, :replay}; " <>
+                      "got #{inspect(other)}"
           end
 
         _ ->

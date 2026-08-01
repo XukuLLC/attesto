@@ -178,6 +178,14 @@ defmodule Attesto.DPoP do
       `cnf.jkt`.
     * `{:error, reason}` otherwise. See the module typespecs for the full
       error set.
+
+  The success map carries `jkt` (the RFC 7638 thumbprint of the proof key),
+  `jti`, `iat`, `htm`, `htu`, `ath` (or `nil`), and `replay_ttl` - the
+  acceptance window this verification derived, for a caller that claims the
+  `jti` itself rather than through `:replay_check` (as
+  `Attesto.Plug.Authenticate` does, to avoid claiming for a request whose
+  token has not yet verified). Keys may be added in a minor release, so
+  match the ones you need rather than the whole map.
   """
   @spec verify_proof(String.t(), verify_opts()) ::
           {:ok, verified_proof()} | {:error, verify_error()}

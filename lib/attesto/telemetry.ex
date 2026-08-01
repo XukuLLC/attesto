@@ -52,11 +52,15 @@ defmodule Attesto.Telemetry do
 
   ### `[:attesto, :token, :sender_constraint_mismatch]`
 
-  A token bound to a sender was presented with the wrong proof of
-  possession, or with none: a DPoP-bound token under a mismatched key
-  (RFC 9449 §7.1), or an mTLS-bound token with a mismatched certificate
-  (RFC 8705 §3). The most likely explanation is a token that has left the
-  holder it was issued to.
+  A token bound to a sender was presented with the WRONG proof of
+  possession: a DPoP-bound token under a mismatched key (RFC 9449 §7.1),
+  or an mTLS-bound token with a mismatched certificate (RFC 8705 §3). The
+  most likely explanation is a token that has left the holder it was
+  issued to.
+
+  A *missing* proof (`:dpop_proof_required`, `:mtls_cert_required`) does
+  not emit. A client that has not implemented DPoP yet produces those
+  constantly, and they say nothing about where the token is.
 
   Metadata:
 
@@ -66,14 +70,30 @@ defmodule Attesto.Telemetry do
     * `:client_id` - the `client_id` claim of the presented token, when it
       carries one.
 
-  ## What metadata never contains
+  ## What metadata contains, and what it does not
 
-  No access token, refresh token, authorization code, client secret, DPoP
-  proof, or assertion - in plaintext or hashed. A handler writing metadata
-  straight to a log must not thereby write a credential to disk. The
-  identifiers above (`family_id`, `jti`, `client_id`, `subject`) are
-  correlation handles, not secrets, and none of them can be presented to
+  Attesto never *puts* a credential in metadata: no access token, refresh
+  token, authorization code, client secret, DPoP proof, or assertion, in
+  plaintext or hashed. None of the values emitted can be presented to
   obtain anything.
+
+  That is a statement about this library, not about the bytes that end up
+  in your logs, and the difference matters:
+
+    * **`jti` is chosen by the client.** RFC 9449 constrains it only to be
+      a unique string; this verifier additionally caps it at 256 bytes. A
+      client may put anything there, including something that looks like -
+      or is - one of its own credentials, and it is emitted unchanged so
+      repeats can be correlated. A handler that writes metadata to a log
+      is writing a remote party's chosen bytes to that log.
+    * **`client_id`, `subject`, and `family_id` come from the host.** They
+      are whatever the host's own identifiers are. `subject` in particular
+      is usually personal data and falls under whatever retention policy
+      covers your logs.
+
+  So treat metadata as untrusted, attacker-influencable input on its way to
+  wherever the handler sends it: escape it, bound it, and do not
+  interpolate it into anything that parses.
 
   ## Attaching
 
