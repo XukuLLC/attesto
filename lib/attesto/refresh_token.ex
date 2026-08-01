@@ -275,10 +275,19 @@ defmodule Attesto.RefreshToken do
          }}
 
       {:error, :family_revoked} ->
-        # We won the atomic claim, but a concurrent reuse revoked the family
-        # before our successor landed: a concurrent double-use. Ensure the
-        # family is revoked and report it as reuse, not a fresh token.
-        revoke_and_report_reuse(store, claimed)
+        # We won the atomic claim, but the family was revoked before our
+        # successor landed. DENY on that - no successor is minted and the
+        # family stays revoked - but do NOT report it as reuse, because this
+        # branch does not know that it was.
+        #
+        # `store.revoke_family/1` is the same operation `Attesto.Revocation`
+        # performs for an ordinary RFC 7009 request or a logout, so a family
+        # can be revoked here by a user signing out mid-rotation. That is a
+        # token presented ONCE. Emitting the reuse event for it would page
+        # someone with "a credential has been stolen" over a logout, and an
+        # alert that fires on routine behaviour is one people learn to close.
+        :ok = store.revoke_family(claimed.family_id)
+        {:error, :reuse_detected}
     end
   end
 

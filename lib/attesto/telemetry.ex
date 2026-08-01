@@ -4,14 +4,33 @@ defmodule Attesto.Telemetry do
 
   These events exist for one reason: some refusals are not routine. A
   refresh token presented twice, or a DPoP proof whose `jti` has already
-  been seen, is evidence that someone holds a credential they should not.
-  A return value tells the calling function; it does not tell whoever is
-  on call. Attaching a handler to these events is how that signal reaches
-  a pager, a SIEM, or an audit log without a host wrapping every call site.
+  been seen, is the shape a stolen credential makes. A return value tells
+  the calling function; it does not tell whoever is on call. Attaching a
+  handler is how that signal reaches a pager, a SIEM, or an audit log
+  without a host wrapping every call site.
 
   Ordinary failures are deliberately NOT events. An expired token, an
   unknown client, a wrong scope - these happen constantly in healthy
   traffic, and emitting them would bury the three below in noise.
+
+  ## These are indicators, not verdicts
+
+  None of them proves theft, and two are cheap for a client to produce
+  deliberately:
+
+    * A client can present its own sender-bound token under a second key as
+      often as it likes. Verification fails before the proof's `jti` is
+      claimed, so the same proof works repeatedly - one token and one proof
+      can ring `sender_constraint_mismatch` indefinitely.
+    * A mid-rotation key or certificate rotation, or a client with a stale
+      cached key, produces the same mismatch for entirely benign reasons.
+
+  So treat them as inputs to a decision rather than the decision:
+  rate-limit and deduplicate by `client_id` before alerting, correlate
+  across events and requests, and page on a pattern rather than on a single
+  occurrence. `refresh_token.reuse_detected` is the one worth escalating
+  fastest, because reaching it has already revoked the family - the damage
+  it reports is done either way.
 
   ## Events
 
@@ -55,9 +74,13 @@ defmodule Attesto.Telemetry do
 
   A token bound to a sender was presented with the WRONG proof of
   possession: a DPoP-bound token under a mismatched key (RFC 9449 §7.1),
-  or an mTLS-bound token with a mismatched certificate (RFC 8705 §3). The
-  most likely explanation is a token that has left the holder it was
-  issued to.
+  or an mTLS-bound token with a mismatched certificate (RFC 8705 §3).
+
+  This is the weakest of the three. A token separated from its holder
+  produces it - but so does a key rotation, a stale cached key, and a
+  client that simply chooses to send the wrong one, repeatedly and for
+  free. Correlate before concluding anything; see "indicators, not
+  verdicts" above.
 
   A *missing* proof (`:dpop_proof_required`, `:mtls_cert_required`) does
   not emit. A client that has not implemented DPoP yet produces those
@@ -73,13 +96,14 @@ defmodule Attesto.Telemetry do
 
   ## What metadata contains, and what it does not
 
-  Attesto never *derives* metadata from a credential: it does not put an
-  access token, refresh token, authorization code, client secret, DPoP
-  proof, or assertion into an event, in plaintext or hashed, and none of
-  the values it chooses itself can be presented to obtain anything.
+  Attesto never copies a credential, or a digest of one, into an event: no
+  access token, refresh token, authorization code, client secret, assertion,
+  or DPoP proof appears in metadata, and nothing emitted can be presented to
+  obtain anything.
 
-  That is not a promise that the bytes are harmless, because some of them
-  are not Attesto's to choose:
+  It does emit selected FIELDS taken from credentials - `jti` is read out of
+  the DPoP proof, `client_id` out of the presented token's claims - and
+  those fields carry whatever their author put in them:
 
     * **`jti` is chosen by the client.** RFC 9449 constrains it only to be
       a unique string; this verifier additionally caps it at 256 bytes. A
@@ -146,13 +170,20 @@ defmodule Attesto.Telemetry do
     })
   end
 
-  # A handler that raises must not take the request down with it: these are
-  # refusals, and the refusal itself is the security-relevant outcome.
-  # `:telemetry.execute/3` already detaches a failing handler rather than
-  # propagating, so this only guards the emit call itself.
+  # No catch here, deliberately.
+  #
+  # A handler that raises is already handled: `:telemetry.execute/3` catches it,
+  # detaches the handler, and logs - so the refusal is never taken down by a bad
+  # handler, and this function does not need to protect against one.
+  #
+  # What a blanket `catch _kind, _reason` DID protect against was the dispatcher
+  # itself failing, and it did so by swallowing the failure whole. With
+  # `:telemetry` stopped, this returned `:ok` having delivered nothing: the
+  # library reported success for an alert nobody received. For events whose
+  # entire purpose is to tell an operator a credential may be stolen, silently
+  # losing one is worse than a loud failure, and it cannot be noticed later
+  # because a missing event leaves no trace.
   defp emit(event, metadata) do
     :telemetry.execute(event, %{system_time: System.system_time()}, metadata)
-  catch
-    _kind, _reason -> :ok
   end
 end

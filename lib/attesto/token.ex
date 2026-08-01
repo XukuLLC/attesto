@@ -278,7 +278,8 @@ defmodule Attesto.Token do
        audience. When a `:trusted_audiences` list is supplied, a scalar
        audience must be in that explicit set and every member of an array
        audience must be trusted. A resolver-backed audience decision is
-       deferred until every other token check succeeds.
+       deferred until every other check EXCEPT the binding (step 10) has
+       succeeded - see that step for why it goes last.
     5. **Temporal.** `exp` is strictly greater than `now` (no skew
        leeway). If `nbf` is present it MUST be an integer no later than
        `now` (RFC 7519 §4.1.5; a small clock-skew tolerance applies), else
@@ -299,6 +300,14 @@ defmodule Attesto.Token do
        token requires neither. The cross-scheme option MUST be absent.
        See the error list for the precise outcomes.
 
+       This runs LAST, after a resolver-backed audience decision, because a
+       binding mismatch emits
+       `[:attesto, :token, :sender_constraint_mismatch]`. Checking it earlier
+       let any sender-bound token from this issuer - not one this resource
+       would accept - raise that event by being presented under another key.
+       A token failing both therefore reports `:invalid_audience`, not the
+       binding error.
+
   ## Options
 
     * `:now` - clock override.
@@ -308,8 +317,11 @@ defmodule Attesto.Token do
       This is intended for authorization-server operations such as RFC 7662
       introspection that recognize multiple RFC 8707 resource audiences. The
       resolver receives claims only after signature, exact issuer, temporal,
-      required-claim, principal, purpose, and confirmation checks succeed; the
-      `aud` claim is syntactically valid but has not yet been authorized. Use
+      required-claim, principal, purpose, and confirmation-SHAPE checks
+      succeed; the `aud` claim is syntactically valid but has not yet been
+      authorized, and the sender BINDING has not yet been checked, so a
+      resolver may see a token whose proof of possession later proves wrong.
+      Use
       those claims only to select audience policy. Do not derive trust from
       `aud` itself or perform irreversible work in the resolver. A resolver
       failure or malformed return fails closed. This option never disables

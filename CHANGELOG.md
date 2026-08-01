@@ -25,8 +25,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unauthenticated.
 
 - `Attesto.SecureCompare.equal?/2` no longer short-circuits on a length
-  mismatch, so its duration cannot separate "wrong length" from "right length,
-  wrong bytes". Both operands are hashed to 32 bytes and those are compared.
+  mismatch. There is no early return keyed on length or equality, so the
+  comparison does not separate "wrong length" from "right length, wrong bytes".
+  Both operands are hashed to 32 bytes and those are compared.
 
   `Attesto.PKCE.verify/3` was never exposed - it gates on
   `Attesto.Thumbprint.valid?/1`, which requires an exact byte size - but
@@ -50,10 +51,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Previously these returned an atom and nothing else, so a host that wanted to
   alert had to wrap every call site. Metadata carries correlation handles
-  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`), none of
-  them derived by Attesto from a token, code, secret, or assertion - though
-  `jti` is chosen by the client and the rest are the host's own identifiers, so
-  a handler should treat metadata as untrusted input. Ordinary failures — expired,
+  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`). No
+  credential or digest of one is ever copied into an event, but some handles are
+  read out of credentials - `jti` from the proof, `client_id` from the token -
+  and `jti` is the client's to choose, so a handler should treat metadata as
+  untrusted input. The events are indicators to correlate, not proof of theft. Ordinary failures — expired,
   unknown client, wrong scope — are deliberately not events. Event names and
   metadata keys are public API; see the module docs.
 

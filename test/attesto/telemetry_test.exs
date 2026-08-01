@@ -147,11 +147,16 @@ defmodule Attesto.TelemetryTest do
       assert metadata.client_id == "oc_racer"
     end
 
-    test "winning the claim and then finding the family revoked emits" do
+    # This double reproduces the RETURN value of a revoked family but not its
+    # cause, and the cause is the whole question: `revoke_family/1` is also what
+    # an ordinary RFC 7009 revocation or a logout calls, so a family can be
+    # revoked mid-rotation by a token presented exactly once. The library cannot
+    # tell the two apart from this branch, so it denies without accusing.
+    test "winning the claim and then finding the family revoked denies WITHOUT alleging reuse" do
       assert {:error, :reuse_detected} = RefreshToken.rotate(FamilyRevokedStore, "presented", client_id: "oc_racer")
 
-      assert_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, metadata}
-      assert metadata.family_id == "fam_concurrent"
+      refute_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, _},
+                      "a concurrent logout must not page someone about a stolen credential"
     end
 
     test "metadata carries no credential material" do
@@ -267,8 +272,11 @@ defmodule Attesto.TelemetryTest do
     end
   end
 
-  # A handler that raises is detached by :telemetry itself; what must not
-  # happen is the refusal turning into a crash for the caller.
+  # `:telemetry.execute/3` catches a raising handler, detaches it, and logs, so
+  # the refusal is never taken down by a bad handler. Attesto adds no catch of
+  # its own: one would also swallow a dispatcher failure, and silently losing an
+  # event whose purpose is to say a credential may be stolen is worse than
+  # failing loudly - a missing event leaves nothing to notice later.
   describe "a failing handler does not change the outcome" do
     test "reuse detection still returns :reuse_detected" do
       :telemetry.attach(
