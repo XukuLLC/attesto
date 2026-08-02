@@ -517,6 +517,34 @@ defmodule Attesto.RequestObjectTest do
                )
     end
 
+    test "accepted_typ treats a bare subtype and its application/ form as equal" do
+      # RFC 7515 §4.1.9: the `application/` prefix may be omitted for a bare
+      # subtype, so `application/oauth-authz-req+jwt` == `oauth-authz-req+jwt`.
+      key = ec_key()
+      jwt = request_object(key, %{}, %{"typ" => "application/oauth-authz-req+jwt"})
+
+      assert {:ok, _} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [accepted_typ: ["oauth-authz-req+jwt"]]
+               )
+    end
+
+    test "accepted_typ does NOT collapse a multi-slash value onto its application/-stripped form" do
+      # The prefix convention is only for a bare subtype (no further `/`).
+      # `application/text/example` must NOT be treated as `text/example`.
+      key = ec_key()
+      jwt = request_object(key, %{}, %{"typ" => "application/text/example"})
+
+      assert {:error, :invalid_typ} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [accepted_typ: ["text/example"]]
+               )
+    end
+
     test "accepted_typ rejects an absent typ unless nil is a member" do
       key = ec_key()
       jwt = request_object_without_typ(key)

@@ -69,14 +69,16 @@ defmodule Attesto.DPoP do
   that will fail binding) burn the `jti` first, so the legitimate request
   carrying that same proof is then rejected as a replay: a targeted denial
   of service. The token endpoint has the same obligation - record the
-  `jti` only once the grant has validated.
+  identity only once the grant has validated.
 
   So the correct shape is: call `verify_proof/2` **without** `:replay_check`,
   verify the access token and compare its `cnf.jkt` to the returned `jkt`,
-  and only then record the returned `jti` for `replay_ttl` seconds.
+  and only then record the returned **`replay_key`** for `replay_ttl` seconds.
+  Record `replay_key`, not the raw `jti`: it namespaces the identifier by the
+  proof key (see the success map), so one key's proof cannot evict another's.
   `Attesto.Plug.Authenticate` does exactly this.
 
-  The `:replay_check` opt records the `jti` inline, during verification,
+  The `:replay_check` opt records the identity inline, during verification,
   before any of that. It exists for flows with no subsequent binding step
   and for test scaffolding; a protected-resource or token pipeline should
   prefer the defer-then-record shape above.
@@ -236,15 +238,14 @@ defmodule Attesto.DPoP do
          iat: iat,
          jkt: jkt,
          jti: jti,
-         # The replay identity to record: the `jti` NAMESPACED by the proof key
-         # thumbprint. RFC 9449 §4.2 scopes a proof to its key, and `jti`
-         # uniqueness is only guaranteed per key - two clients (or an attacker's
-         # own key) may legitimately mint the same `jti`. Keying replay on `jti`
-         # alone would let one key's proof evict another's, both a cross-client
-         # false replay and a targeted DoS. A caller that defers the claim MUST
-         # record `replay_key`, not the raw `jti` (which is retained for
-         # telemetry). `jkt` is fixed-length base64url with no `:`, so the
-         # prefix is unambiguous.
+         # The replay identity to record: a fixed-length digest of the `jti`
+         # NAMESPACED by the proof key thumbprint. RFC 9449 §4.2 scopes a proof
+         # to its key, and `jti` uniqueness is only guaranteed per key - two
+         # clients (or an attacker's own key) may legitimately mint the same
+         # `jti`. Keying replay on `jti` alone would let one key's proof evict
+         # another's, both a cross-client false replay and a targeted DoS. A
+         # caller that defers the claim MUST record `replay_key`, not the raw
+         # `jti` (which is retained for telemetry).
          replay_key: replay_key,
          # The window this identity must be remembered for, so a caller that
          # claims it itself - rather than through `:replay_check` here - uses the
@@ -259,7 +260,14 @@ defmodule Attesto.DPoP do
 
   # Namespace the replay identity by the proof-key thumbprint (RFC 9449 §4.2):
   # `jti` is unique only within a key, so the cache must not collide across keys.
-  defp replay_key(jkt, jti), do: jkt <> ":" <> jti
+  # Hash the (jkt, jti) pair to a FIXED-LENGTH (43-char base64url) identifier so
+  # the recorded key is bounded regardless of `jti` length - a raw `jti` may be
+  # up to `@max_jti_length` bytes, which a caller's store column need not size
+  # for. `jkt` is fixed-length base64url with no `:`, so `jkt <> ":" <> jti` is
+  # an injective encoding of the pair before hashing.
+  defp replay_key(jkt, jti) do
+    :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false)
+  end
 
   @doc """
   RFC 7638 SHA-256 JWK thumbprint, base64url-encoded without padding.

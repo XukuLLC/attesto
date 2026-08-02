@@ -444,15 +444,23 @@ defmodule Attesto.RequestObject do
 
   defp typ_accepted?(_typ, _accepted), do: false
 
-  # RFC 7515 §4.1.9 / RFC 7519 §5.1: `typ` is a media type whose `application/`
-  # prefix MAY be omitted, and recipients treat e.g. `JWT` and `application/JWT`
-  # as the same type (case-insensitively). Normalize both sides so an accepted
-  # `JWT` also accepts `application/jwt`, and a rejected `oauth-authz-req+jwt`
-  # also rejects its `application/`-prefixed spelling.
+  # RFC 7515 §4.1.9 / RFC 7519 §5.1: `typ` is a media type, and per convention
+  # the `application/` prefix MAY be omitted when producing/comparing it - so
+  # `JWT` and `application/JWT` are the same type (case-insensitively). That
+  # convention applies only to a bare subtype: dropping the prefix is valid when
+  # what remains has no further `/` (e.g. `application/jwt` -> `jwt`), but NOT
+  # for a value that still contains a slash (`application/text/example` is a
+  # different, malformed type, not `text/example`). Normalize both sides that
+  # way so an accepted `JWT` also accepts `application/jwt`, and a rejected
+  # `oauth-authz-req+jwt` also rejects its `application/`-prefixed spelling,
+  # without collapsing unrelated multi-slash values together.
   defp normalize_typ(typ) do
     case String.downcase(typ) do
-      "application/" <> rest -> rest
-      down -> down
+      "application/" <> rest = full ->
+        if String.contains?(rest, "/"), do: full, else: rest
+
+      down ->
+        down
     end
   end
 

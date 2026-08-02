@@ -755,9 +755,9 @@ defmodule Attesto.DPoPTest do
     test "calls :replay_check exactly once on the happy path with the namespaced replay key and a ttl" do
       jti = "jti-#{System.unique_integer([:positive])}"
       {proof, jkt} = Factory.dpop_proof(jti: jti)
-      # The replay identity is the jti NAMESPACED by the proof key (jkt:jti), so
-      # one key's proof cannot evict another's from the cache.
-      replay_key = jkt <> ":" <> jti
+      # The replay identity is a fixed-length digest of the jti NAMESPACED by the
+      # proof key, so one key's proof cannot evict another's from the cache.
+      replay_key = :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false)
       parent = self()
 
       replay_check = fn seen, ttl ->
@@ -805,6 +805,7 @@ defmodule Attesto.DPoPTest do
       {proof_b, jkt_b} = Factory.dpop_proof(jti: jti)
       assert jkt_a != jkt_b
 
+      digest = fn jkt -> :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false) end
       seen = fn key, _ttl -> send(self(), {:key, key}) && :ok end
 
       assert {:ok, %{replay_key: key_a}} =
@@ -813,9 +814,12 @@ defmodule Attesto.DPoPTest do
       assert {:ok, %{replay_key: key_b}} =
                DPoP.verify_proof(proof_b, base_opts(replay_check: seen))
 
-      assert key_a == jkt_a <> ":" <> jti
-      assert key_b == jkt_b <> ":" <> jti
+      # Fixed-length (43-char base64url) digests, distinct per key, so no
+      # cross-key collision in the replay store.
+      assert key_a == digest.(jkt_a)
+      assert key_b == digest.(jkt_b)
       assert key_a != key_b
+      assert byte_size(key_a) == 43
     end
 
     test ":replay_check is NOT consulted when an earlier check would fail" do

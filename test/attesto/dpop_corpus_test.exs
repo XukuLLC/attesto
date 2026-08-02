@@ -407,11 +407,11 @@ defmodule Attesto.DPoPCorpusTest do
     test ":replay fires only after every other gate passes (clean proof reaches it)" do
       # This is the case the sibling suites under-cover: a fully valid proof
       # that fails ONLY at the replay gate, with the check observing the
-      # namespaced replay key (jkt:jti) and the acceptance-window ttl plus 1s
-      # retention margin (default max_age 60 + skew 60 + 1 = 121).
+      # namespaced replay key (a digest of jkt:jti) and the acceptance-window
+      # ttl plus 1s retention margin (default max_age 60 + skew 60 + 1 = 121).
       jti = "corpus-replay-#{System.unique_integer([:positive])}"
       {proof, jkt} = Factory.dpop_proof(jti: jti, iat: @now)
-      replay_key = jkt <> ":" <> jti
+      replay_key = :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false)
       parent = self()
 
       replay_check = fn seen, ttl ->
