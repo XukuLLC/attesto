@@ -84,14 +84,12 @@ defmodule Attesto.DPoP do
   prefer the defer-then-record shape above.
   """
 
+  alias Attesto.Key
   alias Attesto.SecureCompare
-  alias Attesto.SigningAlg
   alias Attesto.Thumbprint
 
   # RFC 9449 §4.2: asymmetric algorithms only.
   @allowed_algs ~w(ES256 ES384 ES512 RS256 RS384 RS512 PS256 PS384 PS512 EdDSA Ed25519 Ed448)
-  @rsa_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
-  @minimum_rsa_modulus_bits 2048
   @proof_typ "dpop+jwt"
   @default_max_age_seconds 60
   # Match the verifier-wide clock skew used for JWT assertions and ID/access
@@ -221,8 +219,6 @@ defmodule Attesto.DPoP do
          :ok <- check_alg(header),
          :ok <- check_crit(header),
          {:ok, jwk} <- extract_jwk(header),
-         :ok <- check_key_strength(header["alg"], jwk),
-         :ok <- check_edwards_alg_curve(header["alg"], jwk),
          {:ok, claims} <- verify_signature(proof, header["alg"], jwk),
          :ok <- check_htm(claims, opts),
          :ok <- check_htu(claims, opts),
@@ -230,7 +226,7 @@ defmodule Attesto.DPoP do
          {:ok, jti} <- check_jti(claims),
          {:ok, ath} <- check_ath(claims, opts),
          :ok <- check_nonce(claims, opts),
-         jkt = JOSE.JWK.thumbprint(jwk),
+         jkt = compute_jkt(jwk),
          replay_key = replay_key(jkt, jti),
          :ok <- check_replay(replay_key, jti, opts) do
       {:ok,
@@ -278,12 +274,9 @@ defmodule Attesto.DPoP do
   proof's protected header).
   """
   @spec compute_jkt(JOSE.JWK.t() | map()) :: String.t()
-  def compute_jkt(%JOSE.JWK{} = jwk), do: JOSE.JWK.thumbprint(jwk)
-
-  def compute_jkt(map) when is_map(map) do
-    map
-    |> JOSE.JWK.from_map()
-    |> JOSE.JWK.thumbprint()
+  def compute_jkt(jwk) when is_map(jwk) do
+    {:ok, jkt} = Thumbprint.of_jwk(jwk)
+    jkt
   end
 
   @doc """
@@ -388,57 +381,13 @@ defmodule Attesto.DPoP do
     # (RFC 7517 §4.2/§4.3 `use` / `key_ops`) marks it as not for signature
     # verification, and any key whose declared `alg` contradicts the JWS
     # header `alg`.
-    cond do
-      has_private_jwk_member?(jwk) -> {:error, :invalid_jwk}
-      not usable_for_signing?(jwk) -> {:error, :invalid_jwk}
-      not alg_consistent?(jwk, header) -> {:error, :invalid_jwk}
-      true -> from_public_map(jwk)
+    case Key.verification_jwk(jwk, alg: header["alg"]) do
+      {:ok, public_jwk} -> {:ok, public_jwk}
+      {:error, _reason} -> {:error, :invalid_jwk}
     end
   end
 
   defp extract_jwk(_header), do: {:error, :missing_jwk}
-
-  # RFC 7517 §4.4: if the JWK declares `alg`, it constrains the algorithm
-  # the key may be used with, so a JWK `alg` that disagrees with the JWS
-  # header `alg` is contradictory and rejected. An absent JWK `alg` imposes
-  # no constraint.
-  defp alg_consistent?(jwk, header) do
-    case Map.get(jwk, "alg") do
-      nil -> true
-      alg -> alg == Map.get(header, "alg")
-    end
-  end
-
-  defp from_public_map(jwk) do
-    {:ok, JOSE.JWK.from_map(jwk)}
-  rescue
-    _ -> {:error, :invalid_jwk}
-  catch
-    _, _ -> {:error, :invalid_jwk}
-  end
-
-  defp check_edwards_alg_curve(alg, jwk) when alg in ["EdDSA", "Ed25519", "Ed448"] do
-    SigningAlg.validate_for_key!(alg, jwk)
-    :ok
-  rescue
-    _ -> {:error, :invalid_jwk}
-  end
-
-  defp check_edwards_alg_curve(_alg, _jwk), do: :ok
-
-  defp check_key_strength(alg, jwk) when alg in @rsa_algs do
-    case JOSE.JWK.to_public_map(jwk) do
-      {_metadata, %{"kty" => "RSA"}} ->
-        if SigningAlg.rsa_modulus_at_least?(jwk, @minimum_rsa_modulus_bits),
-          do: :ok,
-          else: {:error, :invalid_jwk}
-
-      _other ->
-        :ok
-    end
-  end
-
-  defp check_key_strength(_alg, _jwk), do: :ok
 
   defp jose_jws_algs do
     case Keyword.get(JOSE.JWA.supports(), :jws) do
@@ -447,35 +396,6 @@ defmodule Attesto.DPoP do
     end
   rescue
     _ -> []
-  end
-
-  # Private-key components per RFC 7518 §6.2.2 / §6.3.2. Any of these in a
-  # DPoP header is a protocol violation.
-  @private_jwk_members ~w(d p q dp dq qi oth k)
-  defp has_private_jwk_member?(jwk) do
-    Enum.any?(@private_jwk_members, &Map.has_key?(jwk, &1))
-  end
-
-  # RFC 7517 §4.2/§4.3: if the key declares `use`, it must be "sig"; if it
-  # declares `key_ops`, the list must allow "verify". A key explicitly
-  # marked encryption-only must not be honoured to verify a proof
-  # signature, even though the signature math might otherwise pass.
-  defp usable_for_signing?(jwk) do
-    use_ok? =
-      case Map.get(jwk, "use") do
-        nil -> true
-        "sig" -> true
-        _ -> false
-      end
-
-    ops_ok? =
-      case Map.get(jwk, "key_ops") do
-        nil -> true
-        ops when is_list(ops) -> "verify" in ops
-        _ -> false
-      end
-
-    use_ok? and ops_ok?
   end
 
   # ----- internal: signature verification -----

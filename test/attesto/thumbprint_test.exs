@@ -41,6 +41,32 @@ defmodule Attesto.ThumbprintTest do
     end
   end
 
+  describe "of_jwk/1" do
+    test "accepts a JOSE.JWK and its equivalent public map" do
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {_, public_map} = JOSE.JWK.to_public_map(key)
+
+      assert {:ok, from_jwk} = Thumbprint.of_jwk(key)
+      assert {:ok, from_map} = Thumbprint.of_jwk(public_map)
+      assert from_jwk == from_map
+      assert Thumbprint.valid?(from_jwk)
+    end
+
+    test "uses only the required public members" do
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {_, private_map} = JOSE.JWK.to_map(key)
+      {_, public_map} = JOSE.JWK.to_public_map(key)
+
+      assert Thumbprint.of_jwk(private_map) == Thumbprint.of_jwk(public_map)
+    end
+
+    test "returns an error for a malformed JWK" do
+      assert {:error, :malformed_jwk} = Thumbprint.of_jwk(%{})
+      assert {:error, :malformed_jwk} = Thumbprint.of_jwk(%{"kty" => "RSA"})
+      assert {:error, :malformed_jwk} = Thumbprint.of_jwk("not-a-jwk")
+    end
+  end
+
   describe "valid?/1" do
     test "true for the output of of/1" do
       for input <- Enum.map(0..200, &Integer.to_string/1) do

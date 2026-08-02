@@ -15,6 +15,20 @@ defmodule Attesto.Key do
   to assign or track.
   """
 
+  alias Attesto.Thumbprint
+
+  @private_jwk_members ~w(d p q dp dq qi oth k)
+  @rsa_verification_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
+  @default_minimum_rsa_bits 2048
+
+  @type verification_jwk_error ::
+          :private_material
+          | :invalid_use
+          | :alg_mismatch
+          | :incompatible_key
+          | :weak_key
+          | :malformed_jwk
+
   @doc """
   Derive the public key, in conventional SPKI
   (`-----BEGIN PUBLIC KEY-----`) PEM form, from a private RSA key PEM.
@@ -42,9 +56,43 @@ defmodule Attesto.Key do
   """
   @spec kid(String.t()) :: String.t()
   def kid(pem) when is_binary(pem) do
-    pem
-    |> jwk()
-    |> JOSE.JWK.thumbprint()
+    {:ok, kid} = pem |> jwk() |> Thumbprint.of_jwk()
+    kid
+  end
+
+  @doc """
+  Validate and parse an untrusted JWK for signature verification.
+
+  The raw map is checked before parsing so private members and contradictory
+  RFC 7517 metadata cannot be normalized away by the JOSE library. By default,
+  private material is rejected and RSA verification keys must be at least 2048
+  bits.
+
+  `:alg` is required and is compared with a JWK's optional `alg` member.
+  `:require_public?` defaults to `true`, and `:minimum_rsa_bits` defaults to
+  #{@default_minimum_rsa_bits}.
+
+  To retain DPoP's error semantics, explicit Edwards identifiers are checked
+  against the key curve here, while other key-type/algorithm mismatches remain
+  the signature verifier's responsibility.
+  """
+  @spec verification_jwk(map(), keyword()) ::
+          {:ok, JOSE.JWK.t()} | {:error, verification_jwk_error()}
+  def verification_jwk(jwk_map, opts) when is_map(jwk_map) and is_list(opts) do
+    alg = Keyword.fetch!(opts, :alg)
+    require_public? = Keyword.get(opts, :require_public?, true)
+    minimum_rsa_bits = Keyword.get(opts, :minimum_rsa_bits, @default_minimum_rsa_bits)
+
+    validate_verification_options!(require_public?, minimum_rsa_bits)
+
+    with :ok <- reject_private_members(jwk_map, require_public?),
+         :ok <- validate_jwk_usage(jwk_map),
+         :ok <- validate_jwk_alg(jwk_map, alg),
+         {:ok, jwk} <- from_verification_map(jwk_map),
+         :ok <- validate_rsa_strength(alg, jwk, minimum_rsa_bits),
+         :ok <- validate_edwards_curve(alg, jwk) do
+      {:ok, jwk}
+    end
   end
 
   @doc """
@@ -78,6 +126,77 @@ defmodule Attesto.Key do
   defp ensure_supported!(%JOSE.JWK{} = jwk) do
     Attesto.SigningAlg.infer(jwk)
     jwk
+  end
+
+  defp reject_private_members(_jwk_map, false), do: :ok
+
+  defp reject_private_members(jwk_map, true) do
+    if Enum.any?(@private_jwk_members, &Map.has_key?(jwk_map, &1)),
+      do: {:error, :private_material},
+      else: :ok
+  end
+
+  defp validate_jwk_usage(jwk_map) do
+    use_ok? = Map.get(jwk_map, "use") in [nil, "sig"]
+
+    key_ops_ok? =
+      case Map.get(jwk_map, "key_ops") do
+        nil -> true
+        key_ops when is_list(key_ops) -> "verify" in key_ops
+        _other -> false
+      end
+
+    if use_ok? and key_ops_ok?, do: :ok, else: {:error, :invalid_use}
+  end
+
+  defp validate_jwk_alg(jwk_map, alg) do
+    case Map.get(jwk_map, "alg") do
+      nil -> :ok
+      ^alg -> :ok
+      _other -> {:error, :alg_mismatch}
+    end
+  end
+
+  defp from_verification_map(jwk_map) do
+    case JOSE.JWK.from_map(jwk_map) do
+      %JOSE.JWK{} = jwk -> {:ok, jwk}
+      _other -> {:error, :malformed_jwk}
+    end
+  rescue
+    _ -> {:error, :malformed_jwk}
+  catch
+    _, _ -> {:error, :malformed_jwk}
+  end
+
+  defp validate_rsa_strength(alg, jwk, minimum_rsa_bits) when alg in @rsa_verification_algs do
+    case JOSE.JWK.to_public_map(jwk) do
+      {_metadata, %{"kty" => "RSA"}} ->
+        if Attesto.SigningAlg.rsa_modulus_at_least?(jwk, minimum_rsa_bits),
+          do: :ok,
+          else: {:error, :weak_key}
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp validate_rsa_strength(_alg, _jwk, _minimum_rsa_bits), do: :ok
+
+  defp validate_edwards_curve(alg, jwk) when alg in ["EdDSA", "Ed25519", "Ed448"] do
+    Attesto.SigningAlg.validate_for_key!(alg, jwk)
+    :ok
+  rescue
+    _ -> {:error, :incompatible_key}
+  end
+
+  defp validate_edwards_curve(_alg, _jwk), do: :ok
+
+  defp validate_verification_options!(require_public?, minimum_rsa_bits)
+       when is_boolean(require_public?) and is_integer(minimum_rsa_bits) and minimum_rsa_bits > 0, do: :ok
+
+  defp validate_verification_options!(_require_public?, _minimum_rsa_bits) do
+    raise ArgumentError,
+          ":require_public? must be a boolean and :minimum_rsa_bits must be a positive integer"
   end
 
   # `JOSE.JWK.from_pem/1` returns `[]` for an empty/no-entry PEM and, for a

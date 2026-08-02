@@ -44,6 +44,10 @@ defmodule Attesto.ConformanceVectorsTest do
   @rfc7638_thumbprint "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
 
   describe "RFC 7638 Section 3.1 JWK thumbprint" do
+    test "of_jwk/1 of the RFC 7638 example JWK equals the published thumbprint" do
+      assert {:ok, @rfc7638_thumbprint} = Thumbprint.of_jwk(@rfc7638_jwk)
+    end
+
     test "compute_jkt/1 of the RFC 7638 example JWK equals the published thumbprint" do
       assert DPoP.compute_jkt(@rfc7638_jwk) == @rfc7638_thumbprint
     end

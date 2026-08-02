@@ -69,6 +69,32 @@ defmodule Attesto.Thumbprint do
     |> Base.url_encode64(padding: false)
   end
 
+  @doc """
+  Compute an RFC 7638 SHA-256 thumbprint for a JWK.
+
+  Accepts either a `%JOSE.JWK{}` or a plain JWK map. JOSE selects the
+  key-type-specific public members, serializes them canonically, and hashes
+  that representation. Private and optional metadata therefore do not affect
+  the result.
+
+  Returns `{:error, :malformed_jwk}` when the input cannot be parsed or
+  canonicalized as a JWK.
+  """
+  @spec of_jwk(JOSE.JWK.t() | map()) :: {:ok, String.t()} | {:error, :malformed_jwk}
+  def of_jwk(%JOSE.JWK{} = jwk), do: jwk_thumbprint(jwk)
+
+  def of_jwk(jwk_map) when is_map(jwk_map) do
+    jwk_map
+    |> JOSE.JWK.from_map()
+    |> jwk_thumbprint()
+  rescue
+    _ -> {:error, :malformed_jwk}
+  catch
+    _, _ -> {:error, :malformed_jwk}
+  end
+
+  def of_jwk(_jwk), do: {:error, :malformed_jwk}
+
   defp canonical?(value) do
     case Base.url_decode64(value, padding: false) do
       {:ok, decoded} when byte_size(decoded) == @digest_bytes ->
@@ -77,5 +103,16 @@ defmodule Attesto.Thumbprint do
       _ ->
         false
     end
+  end
+
+  defp jwk_thumbprint(jwk) do
+    case JOSE.JWK.thumbprint(jwk) do
+      thumbprint when is_binary(thumbprint) -> {:ok, thumbprint}
+      _other -> {:error, :malformed_jwk}
+    end
+  rescue
+    _ -> {:error, :malformed_jwk}
+  catch
+    _, _ -> {:error, :malformed_jwk}
   end
 end

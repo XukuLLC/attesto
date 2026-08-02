@@ -13,7 +13,7 @@ defmodule Attesto.SigningAlg do
   a JOSE backend with Curve448 and SHAKE256 support.
   """
 
-  alias Attesto.Key
+  alias Attesto.{Key, Thumbprint}
 
   @type alg :: String.t()
 
@@ -73,7 +73,7 @@ defmodule Attesto.SigningAlg do
   @spec for_key(module(), String.t(), keyword()) :: alg()
   def for_key(keystore, pem, opts \\ []) when is_atom(keystore) and is_binary(pem) do
     jwk = Key.jwk(pem)
-    kid = JOSE.JWK.thumbprint(jwk)
+    {:ok, kid} = Thumbprint.of_jwk(jwk)
 
     key_algs(keystore)
     |> Map.get(kid)
