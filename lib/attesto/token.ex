@@ -768,11 +768,9 @@ defmodule Attesto.Token do
   defp check_configured_audience(config, %{"aud" => aud}) do
     expected = config.audience
 
-    cond do
-      aud == expected -> :ok
-      is_list(aud) and Enum.all?(aud, &is_binary/1) and expected in aud -> :ok
-      true -> {:error, :invalid_audience}
-    end
+    if Claims.audience_matches?(aud, expected, :array),
+      do: :ok,
+      else: {:error, :invalid_audience}
   end
 
   defp check_configured_audience(_config, _claims), do: {:error, :invalid_audience}
@@ -793,13 +791,7 @@ defmodule Attesto.Token do
     _kind, _reason -> :invalid
   end
 
-  defp trusted_audience?(aud, trusted) when is_binary(aud), do: aud in trusted
-
-  defp trusted_audience?(audiences, trusted) when is_list(audiences) do
-    audiences != [] and Enum.all?(audiences, &(is_binary(&1) and &1 in trusted))
-  end
-
-  defp trusted_audience?(_audience, _trusted), do: false
+  defp trusted_audience?(aud, trusted), do: Claims.audience_matches?(aud, trusted, :all_array_members)
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
     if NumericDate.not_expired?(exp, NumericDate.now(opts), leeway: 0),

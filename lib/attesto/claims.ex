@@ -9,6 +9,7 @@ defmodule Attesto.Claims do
 
   @type atom_policy :: :reject | :convert
   @type normalize_error :: {:invalid_key, term()} | :invalid_atom_policy
+  @type audience_mode :: :scalar_only | :array | :single_element | :all_array_members
 
   @doc """
   Normalize the keys in `map` to JSON member-name binaries.
@@ -47,6 +48,55 @@ defmodule Attesto.Claims do
     end
   end
 
+  @doc """
+  Compare an audience claim with an expected audience under an explicit
+  protocol mode.
+
+  The caller must select the mode because audience forms are protocol policy,
+  not a single shared rule:
+
+    * `:scalar_only` accepts only a binary claim.
+    * `:array` accepts a binary claim or a non-empty all-binary array with
+      intersection semantics.
+    * `:single_element` accepts a scalar or exactly `[expected]`.
+    * `:all_array_members` requires every member of an array to be expected.
+
+  This is a value-level predicate; callers retain responsibility for error
+  mapping and any surrounding claim validation.
+  """
+  @spec audience_matches?(term(), term(), audience_mode()) :: boolean()
+  def audience_matches?(aud, expected, :scalar_only) when is_binary(aud) and (is_binary(expected) or is_list(expected)),
+    do: aud == expected or (is_list(expected) and aud in expected)
+
+  def audience_matches?(aud, expected, :single_element) when is_binary(expected),
+    do: aud == expected or aud == [expected]
+
+  def audience_matches?(aud, expected, :array) when is_binary(expected), do: audience_matches_array?(aud, [expected])
+
+  def audience_matches?(aud, expected, :array) when is_list(expected), do: audience_matches_array?(aud, expected)
+
+  def audience_matches?(aud, expected, :all_array_members) when is_list(expected),
+    do: audience_matches_all_array_members?(aud, expected)
+
+  def audience_matches?(_aud, _expected, _mode), do: false
+
+  @doc """
+  Match a JOSE `typ` value against an explicit accepted set using the
+  RFC 7515 `application/` bare-subtype convention.
+
+  The normalization option is intentionally required. Callers with exact or
+  otherwise protocol-specific type rules must keep those rules local.
+  """
+  @spec typ_matches?(term(), [String.t() | nil], keyword()) :: boolean()
+  def typ_matches?(typ, accepted, opts) when is_list(accepted) and is_list(opts) do
+    case Keyword.get(opts, :normalization) do
+      :application_subtype -> typ_matches_application_subtype?(typ, accepted)
+      _ -> false
+    end
+  end
+
+  def typ_matches?(_typ, _accepted, _opts), do: false
+
   defp normalize_key(key, _policy) when is_binary(key), do: {:ok, key}
   defp normalize_key(key, :convert) when is_atom(key), do: {:ok, Atom.to_string(key)}
   defp normalize_key(key, _policy), do: {:error, {:invalid_key, key}}
@@ -66,5 +116,43 @@ defmodule Attesto.Claims do
     if Enum.any?(Map.keys(map), &(&1 in reserved)),
       do: {:error, :reserved_claim_conflict},
       else: :ok
+  end
+
+  defp audience_matches_array?(aud, expected) when is_binary(aud), do: aud in expected
+
+  defp audience_matches_array?([_ | _] = aud, expected) do
+    Enum.all?(aud, &is_binary/1) and Enum.any?(aud, &(&1 in expected))
+  end
+
+  defp audience_matches_array?(_aud, _expected), do: false
+
+  defp audience_matches_all_array_members?(aud, expected) when is_binary(aud), do: aud in expected
+
+  defp audience_matches_all_array_members?([_ | _] = aud, expected) do
+    Enum.all?(aud, &(is_binary(&1) and &1 in expected))
+  end
+
+  defp audience_matches_all_array_members?(_aud, _expected), do: false
+
+  defp typ_matches_application_subtype?(nil, accepted), do: Enum.member?(accepted, nil)
+
+  defp typ_matches_application_subtype?(typ, accepted) when is_binary(typ) do
+    normalized = normalize_application_subtype(typ)
+
+    Enum.any?(accepted, fn candidate ->
+      is_binary(candidate) and normalize_application_subtype(candidate) == normalized
+    end)
+  end
+
+  defp typ_matches_application_subtype?(_typ, _accepted), do: false
+
+  defp normalize_application_subtype(typ) do
+    case String.downcase(typ) do
+      "application/" <> rest = full ->
+        if String.contains?(rest, "/"), do: full, else: rest
+
+      down ->
+        down
+    end
   end
 end

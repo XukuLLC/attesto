@@ -45,7 +45,7 @@ defmodule Attesto.IdentityAssertion do
       lifetime `exp - iat` does not exceed `:max_lifetime_seconds` when set.
   """
 
-  alias Attesto.JWS
+  alias Attesto.{Claims, JWS}
   alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
@@ -246,7 +246,9 @@ defmodule Attesto.IdentityAssertion do
   defp check_audience(_claims, nil), do: {:error, :invalid_audience}
 
   defp check_audience(%{"aud" => aud}, expected) when is_binary(expected) do
-    if aud == expected or aud == [expected], do: :ok, else: {:error, :invalid_audience}
+    if Claims.audience_matches?(aud, expected, :single_element),
+      do: :ok,
+      else: {:error, :invalid_audience}
   end
 
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}

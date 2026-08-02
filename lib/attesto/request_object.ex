@@ -8,7 +8,7 @@ defmodule Attesto.RequestObject do
   second unsigned parameter encoding.
   """
 
-  alias Attesto.JWS
+  alias Attesto.{Claims, JWS}
   alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
@@ -194,29 +194,13 @@ defmodule Attesto.RequestObject do
 
   defp check_audience(_claims, nil), do: {:error, :invalid_audience}
 
-  defp check_audience(%{"aud" => aud}, expected) when is_list(expected) do
-    if valid_aud_claim?(aud) and aud_intersects?(aud, expected),
+  defp check_audience(%{"aud" => aud}, expected) do
+    if Claims.audience_matches?(aud, expected, :array),
       do: :ok,
       else: {:error, :invalid_audience}
   end
 
-  defp check_audience(%{"aud" => aud}, expected) when is_binary(expected),
-    do: check_audience(%{"aud" => aud}, [expected])
-
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
-
-  # RFC 7519 §4.1.3: `aud` is a StringOrURI or an array of StringOrURI. A list
-  # carrying any non-string member is a malformed audience claim - reject it
-  # rather than accepting on a single matching member (matches the hardened
-  # Token/IDToken/JARM audience handling).
-  defp valid_aud_claim?(aud) when is_binary(aud), do: true
-  defp valid_aud_claim?([_ | _] = aud), do: Enum.all?(aud, &is_binary/1)
-  defp valid_aud_claim?(_aud), do: false
-
-  # Only ever called after `valid_aud_claim?/1` confirms `aud` is a binary or a
-  # non-empty list of binaries, so those two clauses are exhaustive here.
-  defp aud_intersects?(aud, expected) when is_binary(aud), do: aud in expected
-  defp aud_intersects?(aud, expected) when is_list(aud), do: Enum.any?(aud, &(&1 in expected))
 
   defp check_expiry(claims, opts) do
     case NumericDate.fetch(claims, "exp", required: false, non_negative: true) do
@@ -458,38 +442,9 @@ defmodule Attesto.RequestObject do
   defp check_typ(_header, nil), do: :ok
 
   defp check_typ(header, accepted) when is_list(accepted) do
-    if typ_accepted?(Map.get(header, "typ"), accepted),
+    if Claims.typ_matches?(Map.get(header, "typ"), accepted, normalization: :application_subtype),
       do: :ok,
       else: {:error, :invalid_typ}
-  end
-
-  defp typ_accepted?(nil, accepted), do: Enum.member?(accepted, nil)
-
-  defp typ_accepted?(typ, accepted) when is_binary(typ) do
-    norm = normalize_typ(typ)
-    Enum.any?(accepted, fn a -> is_binary(a) and normalize_typ(a) == norm end)
-  end
-
-  defp typ_accepted?(_typ, _accepted), do: false
-
-  # RFC 7515 §4.1.9 / RFC 7519 §5.1: `typ` is a media type, and per convention
-  # the `application/` prefix MAY be omitted when producing/comparing it - so
-  # `JWT` and `application/JWT` are the same type (case-insensitively). That
-  # convention applies only to a bare subtype: dropping the prefix is valid when
-  # what remains has no further `/` (e.g. `application/jwt` -> `jwt`), but NOT
-  # for a value that still contains a slash (`application/text/example` is a
-  # different, malformed type, not `text/example`). Normalize both sides that
-  # way so an accepted `JWT` also accepts `application/jwt`, and a rejected
-  # `oauth-authz-req+jwt` also rejects its `application/`-prefixed spelling,
-  # without collapsing unrelated multi-slash values together.
-  defp normalize_typ(typ) do
-    case String.downcase(typ) do
-      "application/" <> rest = full ->
-        if String.contains?(rest, "/"), do: full, else: rest
-
-      down ->
-        down
-    end
   end
 
   defp peek_header(jwt) do

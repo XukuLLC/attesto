@@ -17,7 +17,7 @@ defmodule Attesto.ClientAssertion do
   presented JWT header names it.
   """
 
-  alias Attesto.JWS
+  alias Attesto.{Claims, JWS}
   alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
@@ -123,12 +123,10 @@ defmodule Attesto.ClientAssertion do
   # FAPI 2 requires a single-valued string `aud`. An array audience is
   # rejected even when it contains an accepted value, and the string must
   # match one of the expected audiences exactly.
-  defp check_audience(%{"aud" => aud}, expected) when is_binary(aud) and is_list(expected) do
-    if aud in expected, do: :ok, else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(%{"aud" => aud}, expected) when is_binary(aud) and is_binary(expected) do
-    if aud == expected, do: :ok, else: {:error, :invalid_audience}
+  defp check_audience(%{"aud" => aud}, expected) do
+    if Claims.audience_matches?(aud, expected, :scalar_only),
+      do: :ok,
+      else: {:error, :invalid_audience}
   end
 
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}

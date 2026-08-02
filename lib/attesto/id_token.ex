@@ -449,11 +449,9 @@ defmodule Attesto.IDToken do
   # may be a single string or an array of strings (a mixed array carrying a
   # non-string is malformed and rejected, not silently tolerated).
   defp check_audience(%{"aud" => aud}, client_id) do
-    cond do
-      aud == client_id -> :ok
-      is_list(aud) and Enum.all?(aud, &is_binary/1) and client_id in aud -> :ok
-      true -> {:error, :invalid_audience}
-    end
+    if Claims.audience_matches?(aud, client_id, :array),
+      do: :ok,
+      else: {:error, :invalid_audience}
   end
 
   defp check_audience(_claims, _client_id), do: {:error, :invalid_audience}
