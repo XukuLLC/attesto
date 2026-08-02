@@ -8,6 +8,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- DPoP replay identities are now namespaced by the proof key. `jti` uniqueness
+  is only guaranteed per key (RFC 9449 §4.2), so recording the raw `jti` let two
+  keys sharing a `jti` collide in the replay store — a cross-client false replay
+  and a targeted DoS in which an authenticated attacker pre-burns a victim's
+  `jti` under the attacker's own key. `Attesto.DPoP.verify_proof/2` now returns
+  `replay_key`, a fixed-length digest of `jkt:jti`, and every replay path (the
+  plug, the token endpoint, PAR, device authorization) records THAT.
+
+  **Upgrade note:** the recorded identity's format changed (raw `jti` →
+  digest). During a rolling upgrade, old and new nodes write different formats
+  to a shared replay store, so a single proof could be accepted once on each
+  side within its acceptance window (`max_age + skew`, default ~120s). Drain old
+  nodes and wait out one proof lifetime, or briefly stop the world, to close
+  that window. A fresh deployment is unaffected.
+
+- A batch of fail-closed / correctness fixes found by a full-surface adversarial
+  sweep and two rounds of external review:
+  - `Attesto.DPoP` replay TTL now retains the `jti` one second past the
+    inclusive freshness boundary, closing a sub-second edge-of-life replay gap.
+  - `Attesto.IdentityAssertion` rejects a present non-integer `nbf` instead of
+    treating it as absent (`:invalid_claims`).
+  - `Attesto.RequestObject` parameter coercion is total: a request-object claim
+    that is a list with a non-string member is dropped rather than raising.
+  - CIBA signed authentication requests reject an authorization-endpoint
+    request object (`typ: oauth-authz-req+jwt`); `typ` comparison follows
+    RFC 7515 §4.1.9 for the `application/` prefix.
+  - `Attesto.JARM` reserved claims (`iss`/`aud`/`iat`/`exp`) can no longer be
+    shadowed by a caller's atom- or charlist-keyed duplicate.
+  - `Attesto.SessionState` rejects an OP browser-state secret under 32 bytes and
+    a `session_state` salt containing a space or `.`, and serializes the browser
+    origin closer to the WHATWG form (lowercase scheme/host, bracketed IPv6).
+
+### Changed
+
+- The `:replay_check` callback and `verify_proof/2`'s `replay_key` carry an
+  OPAQUE replay identity (a digest), not the raw `jti`; do not parse it. The
+  `[:attesto, :dpop, :replay_detected]` telemetry still carries the raw client
+  `jti` for correlation.
+
 - `Attesto.Scope.grants_all?/3` is now linear in the requested-scope count.
   It previously rescanned the granted set and re-split resource wildcards for
   every (required, granted) pair, so a large caller-supplied `scope` value - on

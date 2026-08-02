@@ -176,15 +176,18 @@ defmodule Attesto.DPoP do
       A constant #{@future_skew_seconds}-second window into the future is
       also accepted to tolerate modest client-side clock skew.
     * `:replay_check` - a two-arity function called with the proof's
-      `jti` and the TTL (seconds) the store must remember it for, AFTER
-      every other proof check has passed. Returns `:ok` if the `jti` has
-      not been seen, or `{:error, :replay}` if it has. This records the
-      `jti` **inline**, before the caller has verified the access token
-      and its `cnf.jkt` binding - so a protected-resource or token
-      pipeline should NOT use it; omit it, verify the token, then record
-      the returned `jti`/`replay_ttl` (see the "Replay protection" section
-      and `Attesto.Plug.Authenticate`). Use it only for a flow with no
-      later binding step, or in test scaffolding.
+      **replay identity** and the TTL (seconds) the store must remember it
+      for, AFTER every other proof check has passed. Returns `:ok` if the
+      identity has not been seen, or `{:error, :replay}` if it has. The
+      identity is an OPAQUE string (the `replay_key` in the success map: a
+      fixed-length digest namespacing the `jti` by the proof key - do NOT
+      assume it is the raw `jti` or parse it). This records it **inline**,
+      before the caller has verified the access token and its `cnf.jkt`
+      binding - so a protected-resource or token pipeline should NOT use it;
+      omit it, verify the token, then record the returned
+      `replay_key`/`replay_ttl` (see the "Replay protection" section and
+      `Attesto.Plug.Authenticate`). Use it only for a flow with no later
+      binding step, or in test scaffolding.
     * `:nonce_check` - a one-arity function called with the proof's
       `nonce` claim (which may be `nil`). Returns `:ok` or
       `{:error, :use_dpop_nonce}` (RFC 9449 §8), the latter telling the
@@ -229,7 +232,7 @@ defmodule Attesto.DPoP do
          :ok <- check_nonce(claims, opts),
          jkt = JOSE.JWK.thumbprint(jwk),
          replay_key = replay_key(jkt, jti),
-         :ok <- check_replay(replay_key, opts) do
+         :ok <- check_replay(replay_key, jti, opts) do
       {:ok,
        %{
          ath: ath,
@@ -590,13 +593,15 @@ defmodule Attesto.DPoP do
     end
   end
 
-  defp check_replay(jti, opts) do
+  defp check_replay(replay_key, jti, opts) do
     case Keyword.get(opts, :replay_check) do
       nil ->
         :ok
 
       fun when is_function(fun, 2) ->
-        case fun.(jti, replay_ttl(opts)) do
+        # The store records the namespaced, opaque `replay_key`; telemetry emits
+        # the raw client `jti` so a repeat can be correlated with the proof.
+        case fun.(replay_key, replay_ttl(opts)) do
           :ok ->
             :ok
 

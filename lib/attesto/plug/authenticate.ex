@@ -134,10 +134,10 @@ if Code.ensure_loaded?(Plug.Conn) do
       # `verify_dpop_proof/4`. Claiming earlier would let an unauthenticated
       # request write to the replay store.
       with {:ok, scheme, token} <- authorization(conn, opts),
-           {:ok, dpop_jkt, dpop_replay_key, replay_ttl} <- verify_dpop(conn, scheme, token, opts),
+           {:ok, dpop_jkt, dpop_replay_key, dpop_jti, replay_ttl} <- verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumb} <- cert_thumbprint(conn, opts),
            {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb, opts),
-           :ok <- claim_dpop_jti(dpop_replay_key, replay_ttl, opts) do
+           :ok <- claim_dpop_jti(dpop_replay_key, dpop_jti, replay_ttl, opts) do
         conn = assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
 
         # RFC 9470 §3: after the token is verified, enforce any route step-up
@@ -330,7 +330,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp verify_dpop(conn, :bearer, _token, _opts) do
       case get_req_header(conn, "dpop") do
         [_ | _] -> {:dpop_error, :dpop_scheme_required}
-        _ -> {:ok, nil, nil, nil}
+        _ -> {:ok, nil, nil, nil, nil}
       end
     end
 
@@ -371,23 +371,28 @@ if Code.ensure_loaded?(Plug.Conn) do
           |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
 
         case DPoP.verify_proof(proof, verify_opts) do
-          # Claim the namespaced `replay_key` (jkt:jti), not the raw `jti` - see
+          # Record the namespaced, opaque `replay_key`, not the raw `jti` - see
           # `Attesto.DPoP`'s replay-identity note. `jkt` still flows out for the
-          # token `cnf.jkt` comparison.
-          {:ok, %{jkt: jkt, replay_key: replay_key, replay_ttl: ttl}} -> {:ok, jkt, replay_key, ttl}
-          {:error, reason} -> {:dpop_error, reason}
+          # token `cnf.jkt` comparison; the raw `jti` flows out for replay
+          # telemetry only (correlation with the client's proof).
+          {:ok, %{jkt: jkt, replay_key: replay_key, jti: jti, replay_ttl: ttl}} ->
+            {:ok, jkt, replay_key, jti, ttl}
+
+          {:error, reason} ->
+            {:dpop_error, reason}
         end
       else
         {:dpop_error, :replay_check_unconfigured}
       end
     end
 
-    # Claim the proof's replay identity (the namespaced `jkt:jti`), now that the
-    # token behind it is known to be valid. A Bearer/mTLS request carries no
+    # Claim the proof's replay identity (the opaque, namespaced `replay_key`),
+    # now that the token behind it is known to be valid. The raw `jti` rides
+    # alongside for replay telemetry only. A Bearer/mTLS request carries no
     # proof and so has nothing to claim.
-    defp claim_dpop_jti(nil, _ttl, _opts), do: :ok
+    defp claim_dpop_jti(nil, _jti, _ttl, _opts), do: :ok
 
-    defp claim_dpop_jti(replay_key, ttl_seconds, opts) when is_binary(replay_key) do
+    defp claim_dpop_jti(replay_key, jti, ttl_seconds, opts) when is_binary(replay_key) do
       case Keyword.get(opts, :replay_check) do
         fun when is_function(fun, 2) ->
           # The accepted results mirror `Attesto.DPoP.check_replay/2` exactly.
@@ -405,8 +410,10 @@ if Code.ensure_loaded?(Plug.Conn) do
               # `Attesto.DPoP.check_replay/2`, because this plug deliberately
               # does not hand `:replay_check` to `verify_proof/2` - the claim
               # is deferred until the token has verified - so the core's
-              # emission point is never reached on this path.
-              Attesto.Telemetry.dpop_replay_detected(replay_key)
+              # emission point is never reached on this path. Telemetry gets the
+              # raw `jti` (correlation with the client's proof), the store the
+              # opaque `replay_key`.
+              Attesto.Telemetry.dpop_replay_detected(jti)
               {:dpop_error, :replay}
 
             other ->
