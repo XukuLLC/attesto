@@ -466,7 +466,7 @@ defmodule Attesto.Token do
     # Each scope must be a valid RFC 6749 scope-token: a scope containing
     # whitespace would, once space-joined into the `scope` claim, be
     # indistinguishable from several grants to any resource server.
-    if Enum.all?(scopes, &Scope.valid_token?/1),
+    if Scope.valid_list?(scopes),
       do: {:ok, Enum.uniq(scopes)},
       else: {:error, :invalid_scopes}
   end

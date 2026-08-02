@@ -424,7 +424,7 @@ defmodule Attesto.AuthorizationCode do
   # other value is rejected as `:invalid_code_challenge`.
   defp valid_optional_challenge?(nil), do: true
   defp valid_optional_challenge?(challenge), do: PKCE.valid_challenge?(challenge)
-  defp valid_scope?(scope), do: is_list(scope) and Enum.all?(scope, &Scope.valid_token?/1)
+  defp valid_scope?(scope), do: Scope.valid_list?(scope)
   # The bound resource indicators are validated as RFC 8707 §2.1 absolute-URI
   # indicators at the authorization-server framing layer; here they are
   # shape-checked as a list of non-empty strings before being stored.

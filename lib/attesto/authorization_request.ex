@@ -534,9 +534,9 @@ defmodule Attesto.AuthorizationRequest do
         {:ok, []}
 
       value when is_binary(value) ->
-        tokens = String.split(value, " ", trim: true)
+        tokens = Scope.parse(value)
 
-        if Enum.all?(tokens, &Scope.valid_token?/1) do
+        if Scope.valid_list?(tokens) do
           {:ok, tokens}
         else
           {:error,
@@ -734,7 +734,7 @@ defmodule Attesto.AuthorizationRequest do
   end
 
   # OIDC Core §3.1.2.1 defines prompt and acr_values as space-delimited lists.
-  defp parse_space_list(value) when is_binary(value), do: String.split(value, " ", trim: true)
+  defp parse_space_list(value) when is_binary(value), do: Scope.parse(value)
   defp parse_space_list(_), do: []
 
   defp present?(value) when is_binary(value) and value != "", do: true

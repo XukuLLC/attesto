@@ -72,7 +72,7 @@ if Code.ensure_loaded?(Plug.Conn) do
         }) do
       case conn.assigns[claims_key] do
         %{"scope" => scope} = claims when is_binary(scope) ->
-          granted = String.split(scope, ~r/\s+/, trim: true)
+          granted = Scope.parse(scope, whitespace: :ascii_whitespace)
 
           if Scope.grants_all?(catalog, granted, required),
             do: conn,

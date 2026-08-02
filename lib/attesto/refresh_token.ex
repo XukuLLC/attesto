@@ -463,7 +463,7 @@ defmodule Attesto.RefreshToken do
   # ----- helpers -----
 
   defp non_empty_binary?(v), do: is_binary(v) and v != ""
-  defp valid_scope?(scope), do: is_list(scope) and Enum.all?(scope, &Scope.valid_token?/1)
+  defp valid_scope?(scope), do: Scope.valid_list?(scope)
   defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &non_empty_binary?/1)
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)

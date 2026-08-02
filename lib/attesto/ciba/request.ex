@@ -336,11 +336,11 @@ defmodule Attesto.CIBA.Request do
   # ----- scope (§7.1: REQUIRED, MUST contain openid) -----
 
   defp validate_scope(%{"scope" => scope}) when is_binary(scope) do
-    scopes = String.split(scope, " ", trim: true)
+    scopes = Scope.parse(scope, allow_empty?: false)
 
     cond do
-      scopes == [] -> {:error, :invalid_request}
-      not Enum.all?(scopes, &Scope.valid_token?/1) -> {:error, :invalid_scope}
+      scopes == :empty -> {:error, :invalid_request}
+      not Scope.valid_list?(scopes) -> {:error, :invalid_scope}
       "openid" not in scopes -> {:error, :invalid_scope}
       true -> {:ok, scopes}
     end
@@ -466,7 +466,7 @@ defmodule Attesto.CIBA.Request do
   defp validate_acr_values(params) do
     case Map.get(params, "acr_values") do
       nil -> {:ok, []}
-      values when is_binary(values) -> {:ok, String.split(values, " ", trim: true)}
+      values when is_binary(values) -> {:ok, Scope.parse(values)}
       _other -> {:error, :invalid_request}
     end
   end

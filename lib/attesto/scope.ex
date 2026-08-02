@@ -106,6 +106,52 @@ defmodule Attesto.Scope do
   def valid_token?(_), do: false
 
   @doc """
+  Returns `true` iff `term` is a list of syntactically-valid RFC 6749
+  scope-tokens. Empty lists are valid by default; pass `allow_empty?: false`
+  when the surrounding protocol requires at least one token.
+
+  The list is deliberately validated without trimming or coercing its
+  members. Call `parse/2` first when validating a space-delimited wire value.
+  """
+  @spec valid_list?(term(), keyword()) :: boolean()
+  def valid_list?(term, opts \\ []) do
+    allow_empty? = Keyword.get(opts, :allow_empty?, true)
+
+    is_list(term) and (allow_empty? or term != []) and Enum.all?(term, &valid_token?/1)
+  end
+
+  @doc """
+  Split a space-delimited scope value into tokens, dropping empty tokens at
+  the edges and between repeated separators.
+
+  The default `:ascii_space` mode preserves the RFC scope behavior used by
+  the authorization and CIBA request paths: only the literal ASCII space is
+  a separator, so tabs and newlines remain inside a token for the subsequent
+  `valid_list?/2` check. `:ascii_whitespace` is available for the resource
+  server plug, whose existing behavior split on the regular-expression
+  `\\s+`.
+
+  An empty value returns `[]` by default. Pass `allow_empty?: false` to return
+  `:empty` instead. The input is intentionally restricted to binaries so
+  callers retain control over how an absent or non-string parameter is
+  handled.
+  """
+  @spec parse(binary(), keyword()) :: [String.t()] | :empty
+  def parse(value, opts \\ []) when is_binary(value) do
+    tokens = split_space_list(value, Keyword.get(opts, :whitespace, :ascii_space))
+
+    if tokens == [] and not Keyword.get(opts, :allow_empty?, true), do: :empty, else: tokens
+  end
+
+  defp split_space_list(value, :ascii_space), do: String.split(value, " ", trim: true)
+  defp split_space_list(value, :ascii_whitespace), do: String.split(value, ~r/\s+/, trim: true)
+
+  defp split_space_list(_value, whitespace) do
+    raise ArgumentError,
+          "unsupported scope whitespace mode: #{inspect(whitespace)}"
+  end
+
+  @doc """
   Returns `true` iff `scope` is a concrete catalog entry (no wildcards).
   """
   @spec known?(t(), term()) :: boolean()

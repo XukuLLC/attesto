@@ -25,6 +25,50 @@ defmodule Attesto.ScopeTest do
     %{catalog: Scope.new_catalog(@scopes)}
   end
 
+  describe "valid_list?/2" do
+    test "accepts a list of scope tokens" do
+      assert Scope.valid_list?(["documents.read", "objects.read"])
+    end
+
+    test "accepts an empty list by default and can require a token" do
+      assert Scope.valid_list?([])
+      refute Scope.valid_list?([], allow_empty?: false)
+    end
+
+    test "rejects a non-list or a list containing an invalid token" do
+      refute Scope.valid_list?("documents.read")
+      refute Scope.valid_list?(["documents.read", "read write"])
+    end
+  end
+
+  describe "parse/2" do
+    test "splits a normal space-delimited list" do
+      assert Scope.parse("documents.read objects.read") == ["documents.read", "objects.read"]
+    end
+
+    test "drops empty tokens caused by extra, leading, and trailing spaces" do
+      assert Scope.parse("  documents.read   objects.read  ") == ["documents.read", "objects.read"]
+    end
+
+    test "can split the broader ASCII whitespace mode used by the scope plug" do
+      assert Scope.parse("\t documents.read\nobjects.read \r\n", whitespace: :ascii_whitespace) == [
+               "documents.read",
+               "objects.read"
+             ]
+
+      assert Scope.parse("documents.read\tobjects.read") == ["documents.read\tobjects.read"]
+    end
+
+    test "returns an empty list for an empty string by default" do
+      assert Scope.parse("") == []
+      assert Scope.parse("", allow_empty?: false) == :empty
+    end
+
+    test "keeps a single token as a one-element list" do
+      assert Scope.parse("documents.read") == ["documents.read"]
+    end
+  end
+
   describe "entries/1" do
     test "returns the concrete catalog entries, sorted", %{catalog: catalog} do
       assert Scope.entries(catalog) == Enum.sort(@scopes)
