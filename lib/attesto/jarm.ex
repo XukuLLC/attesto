@@ -62,6 +62,7 @@ defmodule Attesto.JARM do
     claims =
       params
       |> drop_nil()
+      |> stringify_keys()
       |> Map.merge(%{
         "iss" => config.issuer,
         "aud" => client_id,
@@ -80,6 +81,22 @@ defmodule Attesto.JARM do
     params
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
+  end
+
+  # The reserved claims (`iss`, `aud`, `iat`, `exp`) are set by the merge below,
+  # and a string key there overwrites a caller's string key of the same name -
+  # the server value wins. An *atom* key (`:iss`) is a distinct map key, so it
+  # would survive the merge and serialize to the same JSON member name as the
+  # server's `"iss"`, producing a duplicate member whose value a lenient JSON
+  # parser might prefer. Collapse every atom key onto its string form first so
+  # the merge is authoritative and the JWT can never carry a duplicate claim.
+  # (`params`'s contract is string keys; this hardens the public core against a
+  # caller that mixes in atoms rather than trusting the contract.)
+  defp stringify_keys(params) do
+    Map.new(params, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
   end
 
   # `:lifetime` may only shorten the default - a larger value (or a

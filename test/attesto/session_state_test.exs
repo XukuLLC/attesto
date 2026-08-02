@@ -36,6 +36,23 @@ defmodule Attesto.SessionStateTest do
       b = SessionState.compute("c", "https://rp.example", "s")
       refute a == b
     end
+
+    test "rejects a caller-supplied salt with a space or a dot" do
+      # A space would violate §2 (no space in session_state); a "." would fight
+      # the `hash "." salt` delimiter the OP iframe splits on. Either makes a
+      # value that could never compare equal in the browser.
+      assert_raise ArgumentError, fn ->
+        SessionState.compute("c", "https://rp.example", "s", "has space")
+      end
+
+      assert_raise ArgumentError, fn ->
+        SessionState.compute("c", "https://rp.example", "s", "has.dot")
+      end
+
+      assert_raise ArgumentError, fn ->
+        SessionState.compute("c", "https://rp.example", "s", "")
+      end
+    end
   end
 
   describe "origin/1" do
@@ -126,6 +143,25 @@ defmodule Attesto.SessionStateTest do
 
       # Splice user-2's login tag onto user-1's value: the MAC no longer covers it.
       refute SessionState.browser_state_valid?(@secret, "#{random}.#{other_tag}.#{mac}", "user-2\n2\n")
+    end
+
+    test "a too-short OP secret is rejected loudly rather than producing forgeable state" do
+      # HMAC-SHA256 accepts any key length, so an empty/short secret yields a MAC
+      # an attacker can recompute. The secret is OP config, so surface the
+      # misconfiguration instead of minting/verifying with it.
+      short = :crypto.strong_rand_bytes(31)
+
+      assert_raise ArgumentError, fn -> SessionState.mint_browser_state(short, @binding) end
+      assert_raise ArgumentError, fn -> SessionState.mint_browser_state("", @binding) end
+
+      # A valid value must not be verifiable under a too-short secret either.
+      value = SessionState.mint_browser_state(@secret, @binding)
+      assert_raise ArgumentError, fn -> SessionState.browser_state_valid?(short, value, @binding) end
+
+      # Exactly 32 bytes is accepted (the boundary).
+      secret32 = :crypto.strong_rand_bytes(32)
+      v = SessionState.mint_browser_state(secret32, @binding)
+      assert SessionState.browser_state_valid?(secret32, v, @binding)
     end
   end
 end

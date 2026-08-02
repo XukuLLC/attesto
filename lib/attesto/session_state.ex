@@ -72,8 +72,22 @@ defmodule Attesto.SessionState do
   @spec compute(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def compute(client_id, origin, op_browser_state, salt \\ generate_salt())
       when is_binary(client_id) and is_binary(origin) and is_binary(op_browser_state) and is_binary(salt) do
+    validate_salt!(salt)
     digest = :crypto.hash(:sha256, "#{client_id} #{origin} #{op_browser_state} #{salt}")
     Base.encode16(digest, case: :lower) <> "." <> salt
+  end
+
+  # `generate_salt/0` always yields a safe base64url salt; this guards a
+  # caller-supplied one. A space would put a space in the `session_state`
+  # (§2 forbids it) and a `.` would fight the `hash "." salt` delimiter the OP
+  # iframe splits on, so a value computed over such a salt could never compare
+  # equal in the browser. Fail loudly at the source rather than emit it.
+  defp validate_salt!(salt) do
+    if salt == "" or String.contains?(salt, [" ", "."]) do
+      raise ArgumentError,
+            "session_state salt must be a non-empty string with no space or \".\" " <>
+              "(use generate_salt/0); got: #{inspect(salt)}"
+    end
   end
 
   @doc """
@@ -128,6 +142,7 @@ defmodule Attesto.SessionState do
   """
   @spec mint_browser_state(binary(), binary()) :: String.t()
   def mint_browser_state(secret, login_binding) when is_binary(secret) and is_binary(login_binding) do
+    validate_secret!(secret)
     payload = generate_browser_state() <> "." <> login_tag(secret, login_binding)
     payload <> "." <> mac(secret, payload)
   end
@@ -155,10 +170,17 @@ defmodule Attesto.SessionState do
   @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
   def browser_state_valid?(secret, value, login_binding)
       when is_binary(secret) and is_binary(value) and is_binary(login_binding) do
+    validate_secret!(secret)
+
     case String.split(value, ".", parts: 3) do
       [random, login_tag, mac] ->
-        SecureCompare.equal?(mac, mac(secret, random <> "." <> login_tag)) and
-          SecureCompare.equal?(login_tag, login_tag(secret, login_binding))
+        # Compute both comparisons before combining, so the result does not
+        # depend on which one failed first. (The `mac` check already gates on a
+        # secret-keyed value an attacker cannot forge, so this is hygiene, not a
+        # load-bearing defence - but the boolean should still be work-uniform.)
+        mac_ok = SecureCompare.equal?(mac, mac(secret, random <> "." <> login_tag))
+        tag_ok = SecureCompare.equal?(login_tag, login_tag(secret, login_binding))
+        mac_ok and tag_ok
 
       _ ->
         false
@@ -176,6 +198,22 @@ defmodule Attesto.SessionState do
 
   defp hmac(secret, data) do
     :hmac |> :crypto.mac(:sha256, secret, data) |> Base.url_encode64(padding: false)
+  end
+
+  # HMAC-SHA256 accepts any key length, so an empty or short OP secret produces
+  # a MAC an attacker can recompute (`:crypto.mac(:hmac, :sha256, "", data)` is
+  # deterministic and needs no secret) - the browser state would no longer be
+  # OP-owned. RFC 2104 §3 recommends a key at least as long as the hash output
+  # (32 bytes for SHA-256). The secret is OP configuration, not attacker input,
+  # so a too-short one is a misconfiguration to surface loudly, not tolerate.
+  @min_secret_bytes 32
+  defp validate_secret!(secret) do
+    if byte_size(secret) < @min_secret_bytes do
+      raise ArgumentError,
+            "OP browser-state secret must be at least #{@min_secret_bytes} bytes " <>
+              "(RFC 2104: an HMAC-SHA256 key shorter than the 32-byte output is weak); " <>
+              "got #{byte_size(secret)} bytes"
+    end
   end
 
   # A default port is omitted from a browser origin; any other port is kept.
