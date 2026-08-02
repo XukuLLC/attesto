@@ -517,6 +517,34 @@ defmodule Attesto.RequestObjectTest do
                )
     end
 
+    test "accepted_typ treats a bare subtype and its application/ form as equal" do
+      # RFC 7515 §4.1.9: the `application/` prefix may be omitted for a bare
+      # subtype, so `application/oauth-authz-req+jwt` == `oauth-authz-req+jwt`.
+      key = ec_key()
+      jwt = request_object(key, %{}, %{"typ" => "application/oauth-authz-req+jwt"})
+
+      assert {:ok, _} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [accepted_typ: ["oauth-authz-req+jwt"]]
+               )
+    end
+
+    test "accepted_typ does NOT collapse a multi-slash value onto its application/-stripped form" do
+      # The prefix convention is only for a bare subtype (no further `/`).
+      # `application/text/example` must NOT be treated as `text/example`.
+      key = ec_key()
+      jwt = request_object(key, %{}, %{"typ" => "application/text/example"})
+
+      assert {:error, :invalid_typ} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [accepted_typ: ["text/example"]]
+               )
+    end
+
     test "accepted_typ rejects an absent typ unless nil is a member" do
       key = ec_key()
       jwt = request_object_without_typ(key)
@@ -559,6 +587,32 @@ defmodule Attesto.RequestObjectTest do
       jwt = request_object(key, %{"aud" => []})
 
       assert {:error, :invalid_audience} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+  end
+
+  describe "parameter coercion is total (never raises)" do
+    test "an extension claim that is an array with a non-string member is dropped, not raised on" do
+      # Under the default JAR path (no `:string_valued_claims` constraint) an
+      # arbitrary passthrough claim reaches `claims_to_params/1`. A list member
+      # that is not a binary must make the whole claim drop out - never reach
+      # `Enum.join/2`, which raises `Protocol.UndefinedError` on a non-string.
+      # A registered client with a valid signing key could otherwise crash the
+      # auth-request process at will.
+      key = ec_key()
+      jwt = request_object(key, %{"ext_list" => ["ok", %{"nested" => 1}]})
+
+      assert {:ok, params} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+
+      refute Map.has_key?(params, "ext_list")
+    end
+
+    test "an all-string extension array is still joined into a space-delimited param" do
+      key = ec_key()
+      jwt = request_object(key, %{"ext_list" => ["a", "b"]})
+
+      assert {:ok, %{"ext_list" => "a b"}} =
                RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
     end
   end

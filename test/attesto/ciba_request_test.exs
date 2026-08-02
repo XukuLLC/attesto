@@ -281,6 +281,39 @@ defmodule Attesto.CIBA.RequestTest do
                Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
     end
 
+    test "cross-context typing: a request typed as an authorization-endpoint JAR is rejected" do
+      # RFC 9101 §10.8 explicit typing. A CIBA signed request and an authorize
+      # JAR share `aud` (this issuer) and `iss` (the client), so a JAR carrying
+      # `typ: oauth-authz-req+jwt` otherwise satisfies every CIBA claim check.
+      # CIBA §7.1.1 defines no typ, so it must not be honoured as a backchannel
+      # authentication request.
+      key = ec_key()
+      jwt = signed_request(key, %{}, %{"typ" => "oauth-authz-req+jwt"})
+
+      assert {:error, :invalid_request} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+
+    test "the generic JWT media type is accepted with or without the application/ prefix" do
+      # RFC 7515 §4.1.9: `JWT` and `application/jwt` are the same media type.
+      key = ec_key()
+
+      for typ <- ["JWT", "application/jwt", "application/JWT"] do
+        jwt = signed_request(key, %{}, %{"typ" => typ})
+
+        assert {:ok, %Request{}} =
+                 Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+      end
+    end
+
+    test "cross-context typing is rejected in its application/-prefixed spelling too" do
+      key = ec_key()
+      jwt = signed_request(key, %{}, %{"typ" => "application/oauth-authz-req+jwt"})
+
+      assert {:error, :invalid_request} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+
     test "alg confusion: an RS256-signed request is rejected by the FAPI default allowlist" do
       key = JOSE.JWK.generate_key({:rsa, 2048})
       jwt = signed_request(key, %{}, %{"alg" => "RS256", "kid" => JOSE.JWK.thumbprint(key)})

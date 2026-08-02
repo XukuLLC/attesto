@@ -30,6 +30,15 @@ defmodule Attesto.JARMTest do
     jwt |> JOSE.JWS.peek_protected() |> JSON.decode!()
   end
 
+  # The raw signed payload, before JSON decoding - so a test can assert on the
+  # wire bytes (e.g. that a claim name appears exactly once).
+  defp raw_payload(jwt) do
+    [_header, payload, _sig] = String.split(jwt, ".")
+    Base.url_decode64!(payload, padding: false)
+  end
+
+  defp occurrences(haystack, needle), do: length(String.split(haystack, needle)) - 1
+
   test "signs a success response with iss/aud/exp/iat and the response params", %{config: config} do
     now = 1_700_000_000
 
@@ -51,6 +60,51 @@ defmodule Attesto.JARMTest do
     # The authorization-response parameters ride as top-level claims.
     assert claims["code"] == "abc"
     assert claims["state"] == "xyz"
+  end
+
+  test "reserved claims stay server-authoritative when a caller mixes in atom keys", %{
+    config: config
+  } do
+    now = 1_700_000_000
+
+    {:ok, jwt} =
+      JARM.response_jwt(
+        config,
+        "client-123",
+        # An atom-keyed reserved claim is a distinct map key from the server's
+        # string "iss"; without key normalization both would serialize to the
+        # same JSON member and a lenient client parser could read the caller's.
+        %{:iss => "https://evil.example", :aud => "attacker", :exp => 1, "code" => "abc"},
+        now: now
+      )
+
+    claims = verify(config, jwt)
+
+    # The server's values win, and the caller's atom-keyed shadows are gone.
+    assert claims["iss"] == config.issuer
+    assert claims["aud"] == "client-123"
+    assert claims["exp"] == now + 600
+    assert claims["code"] == "abc"
+
+    # Each reserved claim appears exactly once on the wire - no duplicate JSON
+    # member for a lenient parser to disagree with the verifier over.
+    payload = raw_payload(jwt)
+    assert occurrences(payload, ~s("iss")) == 1
+    assert occurrences(payload, ~s("aud")) == 1
+    assert occurrences(payload, ~s("exp")) == 1
+  end
+
+  test "a non-string, non-atom key that would forge a duplicate claim is rejected", %{
+    config: config
+  } do
+    # A charlist key JSON-encodes to the same member name as a string key, so it
+    # could shadow a reserved claim as a duplicate member. The contract is
+    # string keys; a violation must raise, not silently emit a duplicate.
+    for forged <- [%{~c"iss" => "https://evil.example"}, %{~c"aud" => "attacker"}] do
+      assert_raise ArgumentError, fn ->
+        JARM.response_jwt(config, "client-123", forged)
+      end
+    end
   end
 
   test "signs an error response (no code), addressed to the client", %{config: config} do

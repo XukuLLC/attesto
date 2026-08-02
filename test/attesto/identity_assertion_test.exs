@@ -211,6 +211,17 @@ defmodule Attesto.IdentityAssertionTest do
                IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
     end
 
+    test "rejects a present non-integer nbf rather than treating it as absent" do
+      # A malformed `nbf` (string, not a NumericDate) must fail closed. If it
+      # fell through to the not-present clause, a garbage `nbf` would bypass the
+      # not-yet-valid check entirely.
+      key = rsa_key()
+      jwt = assertion(key, "RS256", %{"nbf" => "soon"})
+
+      assert {:error, :invalid_claims} =
+               IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+    end
+
     test "rejects an assertion exceeding max_lifetime_seconds" do
       key = rsa_key()
       now = System.system_time(:second)

@@ -752,9 +752,12 @@ defmodule Attesto.DPoPTest do
   # -----------------------------------------------------------------
 
   describe "verify_proof/2 replay protection (:replay_check)" do
-    test "calls :replay_check exactly once on the happy path with the proof's jti and a ttl" do
+    test "calls :replay_check exactly once on the happy path with the namespaced replay key and a ttl" do
       jti = "jti-#{System.unique_integer([:positive])}"
-      {proof, _jkt} = Factory.dpop_proof(jti: jti)
+      {proof, jkt} = Factory.dpop_proof(jti: jti)
+      # The replay identity is a fixed-length digest of the jti NAMESPACED by the
+      # proof key, so one key's proof cannot evict another's from the cache.
+      replay_key = :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false)
       parent = self()
 
       replay_check = fn seen, ttl ->
@@ -762,12 +765,13 @@ defmodule Attesto.DPoPTest do
         :ok
       end
 
-      assert {:ok, %{jti: ^jti}} =
+      assert {:ok, %{jti: ^jti, replay_key: ^replay_key}} =
                DPoP.verify_proof(proof, base_opts(replay_check: replay_check))
 
-      # The verifier passes the acceptance window (default max_age 60 +
-      # future skew 60) as the TTL the cache must remember the jti for.
-      assert_received {:replay_check_called, ^jti, 120}
+      # The verifier passes the acceptance window + 1s of retention margin
+      # (default max_age 60 +
+      # future skew 60) as the TTL the cache must remember the key for.
+      assert_received {:replay_check_called, ^replay_key, 121}
       # Exactly once.
       refute_received {:replay_check_called, _, _}
     end
@@ -780,7 +784,7 @@ defmodule Attesto.DPoPTest do
       assert {:ok, _} =
                DPoP.verify_proof(proof, base_opts(max_age_seconds: 300, replay_check: replay_check))
 
-      assert_received {:ttl, 360}
+      assert_received {:ttl, 361}
     end
 
     test "rejects the request when :replay_check returns {:error, :replay}" do
@@ -789,6 +793,33 @@ defmodule Attesto.DPoPTest do
 
       assert {:error, :replay} =
                DPoP.verify_proof(proof, base_opts(replay_check: replay_check))
+    end
+
+    test "two different keys reusing the same jti get distinct replay keys (no cross-key collision)" do
+      # jti uniqueness is only guaranteed per key (RFC 9449 §4.2). Two proofs
+      # that share a jti but are signed by different keys must present DIFFERENT
+      # replay identities, so recording one cannot falsely evict the other - and
+      # so an attacker cannot pre-burn a victim's jti under the attacker's key.
+      jti = "shared-#{System.unique_integer([:positive])}"
+      {proof_a, jkt_a} = Factory.dpop_proof(jti: jti)
+      {proof_b, jkt_b} = Factory.dpop_proof(jti: jti)
+      assert jkt_a != jkt_b
+
+      digest = fn jkt -> :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false) end
+      seen = fn key, _ttl -> send(self(), {:key, key}) && :ok end
+
+      assert {:ok, %{replay_key: key_a}} =
+               DPoP.verify_proof(proof_a, base_opts(replay_check: seen))
+
+      assert {:ok, %{replay_key: key_b}} =
+               DPoP.verify_proof(proof_b, base_opts(replay_check: seen))
+
+      # Fixed-length (43-char base64url) digests, distinct per key, so no
+      # cross-key collision in the replay store.
+      assert key_a == digest.(jkt_a)
+      assert key_b == digest.(jkt_b)
+      assert key_a != key_b
+      assert byte_size(key_a) == 43
     end
 
     test ":replay_check is NOT consulted when an earlier check would fail" do

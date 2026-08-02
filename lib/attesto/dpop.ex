@@ -52,19 +52,36 @@ defmodule Attesto.DPoP do
     1. The proof's `jti` is length-capped (see `@max_jti_length`) so an
       attacker cannot exhaust the cache by submitting proofs with
       megabyte-sized `jti` values.
-    2. If the caller supplies the `:replay_check` opt, the verifier
-      invokes it with the proof's `jti` AND the TTL the cache must remember
-      it for (the acceptance window: `max_age_seconds` + future skew),
-      AFTER every other check has passed (so an attacker cannot fill the
-      cache with proofs that would have failed anyway). Deriving the TTL
-      from the verifier's age policy keeps the cache from forgetting a
-      `jti` while the proof is still acceptable. The callback returns `:ok`
-      or `{:error, :replay}`. `Attesto.DPoP.ReplayCache` provides a default
-      ETS-backed implementation (`check_and_record/2`).
+    2. The proof's replay identity is recorded once, and rejected if already
+      seen, for the acceptance window plus a one-second integer-boundary margin
+      (`max_age_seconds` + future skew + 1 — see `replay_ttl/1`). The success
+      map returns `replay_key`/`replay_ttl` so the caller can record it;
+      deriving the TTL from the verifier's age policy keeps the cache from
+      forgetting the identity while the proof is still acceptable.
+      `Attesto.DPoP.ReplayCache` provides a default ETS-backed store.
 
-  Protected-resource pipelines MUST pass `:replay_check`. Leaving it out
-  is acceptable only in test scaffolding and at the token endpoint on
-  first use of a proof (the endpoint records the `jti` itself).
+  ### Claim the `jti` only after the whole request has authenticated
+
+  A protected-resource pipeline MUST reject a replayed proof, but it MUST
+  record the `jti` **after** the access token and its `cnf.jkt` binding
+  verify - not during proof verification. Recording it earlier lets a
+  captured-but-otherwise-valid proof (presented with no token, or a token
+  that will fail binding) burn the `jti` first, so the legitimate request
+  carrying that same proof is then rejected as a replay: a targeted denial
+  of service. The token endpoint has the same obligation - record the
+  identity only once the grant has validated.
+
+  So the correct shape is: call `verify_proof/2` **without** `:replay_check`,
+  verify the access token and compare its `cnf.jkt` to the returned `jkt`,
+  and only then record the returned **`replay_key`** for `replay_ttl` seconds.
+  Record `replay_key`, not the raw `jti`: it namespaces the identifier by the
+  proof key (see the success map), so one key's proof cannot evict another's.
+  `Attesto.Plug.Authenticate` does exactly this.
+
+  The `:replay_check` opt records the identity inline, during verification,
+  before any of that. It exists for flows with no subsequent binding step
+  and for test scaffolding; a protected-resource or token pipeline should
+  prefer the defer-then-record shape above.
   """
 
   alias Attesto.SecureCompare
@@ -108,6 +125,7 @@ defmodule Attesto.DPoP do
           iat: non_neg_integer(),
           jkt: String.t(),
           jti: String.t(),
+          replay_key: String.t(),
           replay_ttl: pos_integer()
         }
 
@@ -158,12 +176,18 @@ defmodule Attesto.DPoP do
       A constant #{@future_skew_seconds}-second window into the future is
       also accepted to tolerate modest client-side clock skew.
     * `:replay_check` - a two-arity function called with the proof's
-      `jti` and the TTL (seconds) the store must remember it for, AFTER
-      every other check has passed. Returns `:ok` if the `jti` has not
-      been seen, or `{:error, :replay}` if it has. Required by
-      protected-resource pipelines; pass
-      `&Attesto.DPoP.ReplayCache.check_and_record/2`. Omit only in test
-      scaffolding.
+      **replay identity** and the TTL (seconds) the store must remember it
+      for, AFTER every other proof check has passed. Returns `:ok` if the
+      identity has not been seen, or `{:error, :replay}` if it has. The
+      identity is an OPAQUE string (the `replay_key` in the success map: a
+      fixed-length digest namespacing the `jti` by the proof key - do NOT
+      assume it is the raw `jti` or parse it). This records it **inline**,
+      before the caller has verified the access token and its `cnf.jkt`
+      binding - so a protected-resource or token pipeline should NOT use it;
+      omit it, verify the token, then record the returned
+      `replay_key`/`replay_ttl` (see the "Replay protection" section and
+      `Attesto.Plug.Authenticate`). Use it only for a flow with no later
+      binding step, or in test scaffolding.
     * `:nonce_check` - a one-arity function called with the proof's
       `nonce` claim (which may be `nil`). Returns `:ok` or
       `{:error, :use_dpop_nonce}` (RFC 9449 §8), the latter telling the
@@ -206,25 +230,47 @@ defmodule Attesto.DPoP do
          {:ok, jti} <- check_jti(claims),
          {:ok, ath} <- check_ath(claims, opts),
          :ok <- check_nonce(claims, opts),
-         :ok <- check_replay(jti, opts) do
+         jkt = JOSE.JWK.thumbprint(jwk),
+         replay_key = replay_key(jkt, jti),
+         :ok <- check_replay(replay_key, jti, opts) do
       {:ok,
        %{
          ath: ath,
          htm: claims["htm"],
          htu: claims["htu"],
          iat: iat,
-         jkt: JOSE.JWK.thumbprint(jwk),
+         jkt: jkt,
          jti: jti,
-         # The window this proof's `jti` must be remembered for, so a caller
-         # that claims the identifier itself - rather than through
-         # `:replay_check` here - uses the same acceptance window this
-         # verification applied instead of deriving it a second time.
+         # The replay identity to record: a fixed-length digest of the `jti`
+         # NAMESPACED by the proof key thumbprint. RFC 9449 §4.2 scopes a proof
+         # to its key, and `jti` uniqueness is only guaranteed per key - two
+         # clients (or an attacker's own key) may legitimately mint the same
+         # `jti`. Keying replay on `jti` alone would let one key's proof evict
+         # another's, both a cross-client false replay and a targeted DoS. A
+         # caller that defers the claim MUST record `replay_key`, not the raw
+         # `jti` (which is retained for telemetry).
+         replay_key: replay_key,
+         # The window this identity must be remembered for, so a caller that
+         # claims it itself - rather than through `:replay_check` here - uses the
+         # same acceptance window this verification applied instead of deriving
+         # it a second time.
          replay_ttl: replay_ttl(opts)
        }}
     end
   end
 
   def verify_proof(_proof, _opts), do: {:error, :invalid_proof}
+
+  # Namespace the replay identity by the proof-key thumbprint (RFC 9449 §4.2):
+  # `jti` is unique only within a key, so the cache must not collide across keys.
+  # Hash the (jkt, jti) pair to a FIXED-LENGTH (43-char base64url) identifier so
+  # the recorded key is bounded regardless of `jti` length - a raw `jti` may be
+  # up to `@max_jti_length` bytes, which a caller's store column need not size
+  # for. `jkt` is fixed-length base64url with no `:`, so `jkt <> ":" <> jti` is
+  # an injective encoding of the pair before hashing.
+  defp replay_key(jkt, jti) do
+    :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false)
+  end
 
   @doc """
   RFC 7638 SHA-256 JWK thumbprint, base64url-encoded without padding.
@@ -547,13 +593,15 @@ defmodule Attesto.DPoP do
     end
   end
 
-  defp check_replay(jti, opts) do
+  defp check_replay(replay_key, jti, opts) do
     case Keyword.get(opts, :replay_check) do
       nil ->
         :ok
 
       fun when is_function(fun, 2) ->
-        case fun.(jti, replay_ttl(opts)) do
+        # The store records the namespaced, opaque `replay_key`; telemetry emits
+        # the raw client `jti` so a repeat can be correlated with the proof.
+        case fun.(replay_key, replay_ttl(opts)) do
           :ok ->
             :ok
 
@@ -584,7 +632,15 @@ defmodule Attesto.DPoP do
   # so the cache TTL is derived from the verifier's own age policy rather
   # than a fixed default that could diverge from it.
   defp replay_ttl(opts) do
-    Keyword.get(opts, :max_age_seconds, @default_max_age_seconds) + @future_skew_seconds
+    # `+ 1` closes an off-by-one at the edge of the proof's life. The freshness
+    # checks are inclusive on integer seconds (`iat > now + skew` and
+    # `iat < now - max_age` both reject only strictly), so a proof minted at the
+    # furthest-future accepted `iat` stays acceptable through real-time
+    # `max_age + skew` whole seconds. A TTL of exactly `max_age + skew` evicts
+    # the `jti` a fraction before that boundary, leaving a sub-second window in
+    # which the same proof is still fresh but no longer remembered - a replay.
+    # One extra second of retention removes it.
+    Keyword.get(opts, :max_age_seconds, @default_max_age_seconds) + @future_skew_seconds + 1
   end
 
   defp check_ath(claims, opts) do

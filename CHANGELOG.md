@@ -4,6 +4,60 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- DPoP replay identities are now namespaced by the proof key. `jti` uniqueness
+  is only guaranteed per key (RFC 9449 §4.2), so recording the raw `jti` let two
+  keys sharing a `jti` collide in the replay store — a cross-client false replay
+  and a targeted DoS in which an authenticated attacker pre-burns a victim's
+  `jti` under the attacker's own key. `Attesto.DPoP.verify_proof/2` now returns
+  `replay_key`, a fixed-length digest of `jkt:jti`, and every replay path (the
+  plug, the token endpoint, PAR, device authorization) records THAT.
+
+  **Upgrade note:** the recorded identity's format changed (raw `jti` →
+  digest). During a rolling upgrade, old and new nodes write different formats
+  to a shared replay store, so a single proof could be accepted once on each
+  side within its acceptance window (`max_age + skew`, default ~120s). Drain old
+  nodes and wait out one proof lifetime, or briefly stop the world, to close
+  that window. A fresh deployment is unaffected.
+
+- A batch of fail-closed / correctness fixes found by a full-surface adversarial
+  sweep and two rounds of external review:
+  - `Attesto.DPoP` replay TTL now retains the `jti` one second past the
+    inclusive freshness boundary, closing a sub-second edge-of-life replay gap.
+  - `Attesto.IdentityAssertion` rejects a present non-integer `nbf` instead of
+    treating it as absent (`:invalid_claims`).
+  - `Attesto.RequestObject` parameter coercion is total: a request-object claim
+    that is a list with a non-string member is dropped rather than raising.
+  - CIBA signed authentication requests reject an authorization-endpoint
+    request object (`typ: oauth-authz-req+jwt`); `typ` comparison follows
+    RFC 7515 §4.1.9 for the `application/` prefix.
+  - `Attesto.JARM` reserved claims (`iss`/`aud`/`iat`/`exp`) can no longer be
+    shadowed by a caller's atom- or charlist-keyed duplicate.
+  - `Attesto.SessionState` rejects an OP browser-state secret under 32 bytes and
+    a `session_state` salt containing a space or `.`, and serializes the browser
+    origin closer to the WHATWG form (lowercase scheme/host, bracketed IPv6).
+
+### Changed
+
+- The `:replay_check` callback and `verify_proof/2`'s `replay_key` carry an
+  OPAQUE replay identity (a digest), not the raw `jti`; do not parse it. The
+  `[:attesto, :dpop, :replay_detected]` telemetry still carries the raw client
+  `jti` for correlation.
+
+- `Attesto.Scope.grants_all?/3` is now linear in the requested-scope count.
+  It previously rescanned the granted set and re-split resource wildcards for
+  every (required, granted) pair, so a large caller-supplied `scope` value - on
+  which RFC 6749 §3.3 places no bound - was a denial-of-service lever: 500,000
+  scope tokens took ~20 seconds. Classifying the granted set once and testing
+  each required scope against that index in O(1) drops the same input to ~40ms.
+  For every proper-list input (the typespec's contract) the result is identical
+  to the naive form, pinned by a generated property test; an improper list now
+  raises rather than short-circuiting, a louder failure on a value the contract
+  already forbids. Surfaced by mining the class behind Keycloak CVE-2026-4634.
+
 ## [1.6.0] - 2026-08-01
 
 ### Security

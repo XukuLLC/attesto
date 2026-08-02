@@ -380,11 +380,26 @@ defmodule Attesto.RequestObject do
     claims
     |> Map.drop(~w(iss sub aud exp nbf iat jti))
     |> Enum.reduce(%{}, fn
-      {key, value}, acc when is_binary(value) -> Map.put(acc, key, value)
-      {key, value}, acc when is_boolean(value) or is_integer(value) -> Map.put(acc, key, to_string(value))
-      {key, value}, acc when is_list(value) -> Map.put(acc, key, Enum.join(value, " "))
-      {key, value}, acc when is_map(value) -> Map.put(acc, key, JSON.encode!(value))
-      {_key, _value}, acc -> acc
+      {key, value}, acc when is_binary(value) ->
+        Map.put(acc, key, value)
+
+      {key, value}, acc when is_boolean(value) or is_integer(value) ->
+        Map.put(acc, key, to_string(value))
+
+      # A list is space-joined ONLY when every element is a string (an array
+      # `resource`/`scope` in a signed request object). A list carrying a
+      # non-string element (`"scope": [{"x": 1}]`) is dropped, not joined:
+      # `Enum.join/2` raises `Protocol.UndefinedError` on a map/list element, and
+      # this reduce runs on a signature-VALID request object, so an unguarded
+      # join let a registered client crash the authorization-request process.
+      {key, value}, acc when is_list(value) ->
+        if Enum.all?(value, &is_binary/1), do: Map.put(acc, key, Enum.join(value, " ")), else: acc
+
+      {key, value}, acc when is_map(value) ->
+        Map.put(acc, key, JSON.encode!(value))
+
+      {_key, _value}, acc ->
+        acc
     end)
   end
 
@@ -423,11 +438,31 @@ defmodule Attesto.RequestObject do
   defp typ_accepted?(nil, accepted), do: Enum.member?(accepted, nil)
 
   defp typ_accepted?(typ, accepted) when is_binary(typ) do
-    down = String.downcase(typ)
-    Enum.any?(accepted, fn a -> is_binary(a) and String.downcase(a) == down end)
+    norm = normalize_typ(typ)
+    Enum.any?(accepted, fn a -> is_binary(a) and normalize_typ(a) == norm end)
   end
 
   defp typ_accepted?(_typ, _accepted), do: false
+
+  # RFC 7515 §4.1.9 / RFC 7519 §5.1: `typ` is a media type, and per convention
+  # the `application/` prefix MAY be omitted when producing/comparing it - so
+  # `JWT` and `application/JWT` are the same type (case-insensitively). That
+  # convention applies only to a bare subtype: dropping the prefix is valid when
+  # what remains has no further `/` (e.g. `application/jwt` -> `jwt`), but NOT
+  # for a value that still contains a slash (`application/text/example` is a
+  # different, malformed type, not `text/example`). Normalize both sides that
+  # way so an accepted `JWT` also accepts `application/jwt`, and a rejected
+  # `oauth-authz-req+jwt` also rejects its `application/`-prefixed spelling,
+  # without collapsing unrelated multi-slash values together.
+  defp normalize_typ(typ) do
+    case String.downcase(typ) do
+      "application/" <> rest = full ->
+        if String.contains?(rest, "/"), do: full, else: rest
+
+      down ->
+        down
+    end
+  end
 
   defp check_compact_form(jwt) do
     case String.split(jwt, ".") do

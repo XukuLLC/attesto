@@ -21,8 +21,12 @@ defmodule Attesto.RefreshToken do
   A refresh token can be bound to a DPoP key (its issuing context carries
   a `:dpop_jkt`). Rotation then requires the caller to present the
   matching `:dpop_jkt` (the thumbprint of the key in the token-request's
-  DPoP proof); an unbound token must be rotated without one. The binding
-  matrix mirrors `Attesto.Token` and `Attesto.AuthorizationCode`.
+  DPoP proof); an unbound token must be rotated without one - presenting a
+  proof for an unbound token is `:dpop_proof_unexpected`. That fail-closed
+  matrix mirrors `Attesto.Token`. It does NOT match
+  `Attesto.AuthorizationCode`, which permits an unbound code to be redeemed
+  alongside a token-request proof (the proof there binds the new access
+  token, not the code); rotation is deliberately the stricter of the two.
   """
 
   alias Attesto.Scope

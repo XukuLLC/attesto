@@ -68,10 +68,14 @@ defmodule Attesto.AuthorizationCode do
   If `issue/3` is given a `:dpop_jkt`, the code is bound to that DPoP key
   (RFC 9449 §10): redemption MUST present the same `:dpop_jkt` (the
   thumbprint of the key in the token-request's DPoP proof) or it is
-  rejected. A code minted without a binding MAY still be redeemed with a
-  token-request DPoP proof; in that case this module treats the proof as a
-  token-endpoint sender constraint for the access token the host is about to
-  mint, not as a pre-existing authorization-code binding.
+  rejected. A code minted without a binding MAY still be redeemed while a
+  token-request DPoP proof is present - this module does not reject that
+  (unlike `Attesto.RefreshToken`, which is stricter). But it does NOT act on
+  that proof: the returned grant's `dpop_jkt` stays `nil`, and binding the
+  new access token to the token-request proof is the token endpoint's job
+  (via `Attesto.Token`'s `:dpop_jkt` mint opt), not this module's. A host
+  that decides the new token's binding from `grant.dpop_jkt` alone would
+  therefore miss a token-endpoint proof; read the presented proof directly.
   """
 
   alias Attesto.AuthorizationCode.Grant

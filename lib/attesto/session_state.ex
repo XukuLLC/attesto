@@ -68,18 +68,59 @@ defmodule Attesto.SessionState do
   `origin` must be a browser-form origin (`scheme://host[:port]`, default port
   omitted) — derive it from the response's `redirect_uri` with `origin/1`.
   `salt` defaults to a fresh `generate_salt/0`.
+
+  Raises `ArgumentError` if an explicit `salt` is empty or contains a space
+  (§2 forbids a space in `session_state`) or a `.` (the `hash "." salt`
+  delimiter). `generate_salt/0` always satisfies this.
   """
   @spec compute(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def compute(client_id, origin, op_browser_state, salt \\ generate_salt())
       when is_binary(client_id) and is_binary(origin) and is_binary(op_browser_state) and is_binary(salt) do
+    validate_salt!(salt)
     digest = :crypto.hash(:sha256, "#{client_id} #{origin} #{op_browser_state} #{salt}")
     Base.encode16(digest, case: :lower) <> "." <> salt
+  end
+
+  # `generate_salt/0` always yields a safe base64url salt; this guards a
+  # caller-supplied one. A space would put a space in the `session_state`
+  # (§2 forbids it) and a `.` would fight the `hash "." salt` delimiter the OP
+  # iframe splits on, so a value computed over such a salt could never compare
+  # equal in the browser. Fail loudly at the source rather than emit it.
+  defp validate_salt!(salt) do
+    if salt == "" or String.contains?(salt, [" ", "."]) do
+      raise ArgumentError,
+            "session_state salt must be a non-empty string with no space or \".\" " <>
+              "(use generate_salt/0); got: #{inspect(salt)}"
+    end
   end
 
   @doc """
   The browser-form origin of `uri` (RFC 6454): `scheme://host`, with the port
   appended only when it is not the scheme's default — exactly the string the
   browser reports as `MessageEvent.origin` for a page loaded from `uri`.
+
+  The value must equal the browser's WHATWG `MessageEvent.origin`, or the iframe
+  recomputation compares unequal and the OP answers a permanent, false
+  `changed` (a fail-safe error - it over-reports change, never under-reports).
+  `URI.parse/1` (RFC 3986) diverges from the browser; this closes the two
+  divergences a registered `redirect_uri` realistically hits:
+
+    * **case** — the browser lowercases the scheme and host; `URI.parse/1`
+      preserves them (`https://RP.Example`), so both are lowercased here.
+    * **IPv6** — the browser serializes an IPv6 host in brackets
+      (`https://[::1]`); `URI.parse/1` strips them (`host: "::1"`), so a literal
+      host (one containing `:`) is re-bracketed here.
+
+  This is NOT a full WHATWG serializer. The input is expected to be an
+  already-validated, canonical HTTP(S) `redirect_uri`; noncanonical forms are
+  left as-is and would still diverge (each yielding only the fail-safe false
+  `changed`, never a security bypass):
+
+    * a non-canonical IPv6 spelling (`[0:0:0:0:0:0:0:1]` vs the browser's
+      compressed `[::1]`) or a non-dotted-decimal IPv4 (`0177.0.0.1`);
+    * a raw non-ASCII host — full IDNA Unicode→punycode mapping is out of scope
+      (a registered redirect_uri is already ASCII/punycode);
+    * a non-HTTP(S) scheme, whose browser origin is the opaque `null`.
 
   Returns `{:ok, origin}` or `{:error, :invalid_uri}` for a URI with no
   scheme/host (a `session_state` computed over a malformed origin could never
@@ -90,11 +131,20 @@ defmodule Attesto.SessionState do
     case URI.parse(uri) do
       %URI{scheme: scheme, host: host} = parsed
       when is_binary(scheme) and scheme != "" and is_binary(host) and host != "" ->
+        scheme = String.downcase(scheme)
+        host = host |> String.downcase() |> bracket_ipv6()
         {:ok, "#{scheme}://#{host}#{origin_port(scheme, parsed.port)}"}
 
       _ ->
         {:error, :invalid_uri}
     end
+  end
+
+  # An IPv6 literal (the only host form containing `:`) must be wrapped in
+  # brackets to match the browser's WHATWG origin; a DNS host never contains a
+  # colon, so this is unambiguous.
+  defp bracket_ipv6(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 
   @doc "A fresh random salt for `compute/4` (unpadded URL-safe Base64, no spaces or dots)."
@@ -125,9 +175,14 @@ defmodule Attesto.SessionState do
   space or `.`-ambiguity in its parts (each part is base64url-no-pad), so it is
   a valid `op_browser_state` for `compute/4` and splits back cleanly in
   `browser_state_valid?/3`.
+
+  Raises `ArgumentError` if `secret` is shorter than 32 bytes — an enforced
+  key-length floor (RFC 2104 §3) for the HMAC that makes the value OP-owned.
+  `browser_state_valid?/3` enforces the same floor.
   """
   @spec mint_browser_state(binary(), binary()) :: String.t()
   def mint_browser_state(secret, login_binding) when is_binary(secret) and is_binary(login_binding) do
+    validate_secret!(secret)
     payload = generate_browser_state() <> "." <> login_tag(secret, login_binding)
     payload <> "." <> mac(secret, payload)
   end
@@ -151,14 +206,24 @@ defmodule Attesto.SessionState do
   wrong bytes, take the same path. The segments come from an attacker-supplied
   string and are not length-validated first, so the time taken still varies
   with how much was submitted; see that module for the distinction.
+
+  Raises `ArgumentError` if `secret` is shorter than the 32-byte floor
+  `mint_browser_state/2` enforces (RFC 2104 §3).
   """
   @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
   def browser_state_valid?(secret, value, login_binding)
       when is_binary(secret) and is_binary(value) and is_binary(login_binding) do
+    validate_secret!(secret)
+
     case String.split(value, ".", parts: 3) do
       [random, login_tag, mac] ->
-        SecureCompare.equal?(mac, mac(secret, random <> "." <> login_tag)) and
-          SecureCompare.equal?(login_tag, login_tag(secret, login_binding))
+        # Compute both comparisons before combining, so the result does not
+        # depend on which one failed first. (The `mac` check already gates on a
+        # secret-keyed value an attacker cannot forge, so this is hygiene, not a
+        # load-bearing defence - but the boolean should still be work-uniform.)
+        mac_ok = SecureCompare.equal?(mac, mac(secret, random <> "." <> login_tag))
+        tag_ok = SecureCompare.equal?(login_tag, login_tag(secret, login_binding))
+        mac_ok and tag_ok
 
       _ ->
         false
@@ -176,6 +241,24 @@ defmodule Attesto.SessionState do
 
   defp hmac(secret, data) do
     :hmac |> :crypto.mac(:sha256, secret, data) |> Base.url_encode64(padding: false)
+  end
+
+  # HMAC-SHA256 accepts any key length, but the OP browser state is only
+  # OP-owned while the key is a real secret. An EMPTY key is the degenerate
+  # case - `:crypto.mac(:hmac, :sha256, "", data)` is deterministic and needs no
+  # secret, so anyone can forge a MAC. A short-but-random key is not itself
+  # recomputable, but RFC 2104 §3 still recommends a key at least as long as the
+  # hash output (32 bytes for SHA-256) for full strength. Enforce that as a
+  # key-length policy: the secret is OP configuration, not attacker input, so a
+  # key below the floor is a misconfiguration to surface loudly, not tolerate.
+  @min_secret_bytes 32
+  defp validate_secret!(secret) do
+    if byte_size(secret) < @min_secret_bytes do
+      raise ArgumentError,
+            "OP browser-state secret must be at least #{@min_secret_bytes} bytes " <>
+              "(RFC 2104: an HMAC-SHA256 key shorter than the 32-byte output is weak); " <>
+              "got #{byte_size(secret)} bytes"
+    end
   end
 
   # A default port is omitted from a browser origin; any other port is kept.

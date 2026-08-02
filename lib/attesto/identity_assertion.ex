@@ -72,6 +72,7 @@ defmodule Attesto.IdentityAssertion do
           | :invalid_issuer
           | :invalid_audience
           | :missing_claim
+          | :invalid_claims
           | :client_mismatch
           | :expired
           | :not_yet_valid
@@ -299,6 +300,11 @@ defmodule Attesto.IdentityAssertion do
   defp check_nbf(%{"nbf" => nbf}, opts) when is_integer(nbf) do
     if nbf <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
   end
+
+  # A PRESENT `nbf` that is not an integer NumericDate is malformed, and must be
+  # rejected rather than treated as absent - otherwise a garbage `nbf` bypasses
+  # the not-yet-valid check entirely. Mirrors `Attesto.Token.check_not_before/2`.
+  defp check_nbf(%{"nbf" => _}, _opts), do: {:error, :invalid_claims}
 
   defp check_nbf(_claims, _opts), do: :ok
 

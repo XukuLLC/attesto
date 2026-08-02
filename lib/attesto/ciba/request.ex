@@ -287,6 +287,17 @@ defmodule Attesto.CIBA.Request do
         require_client_id_claim: false,
         # §7.1.1: `aud` MUST contain the OP's Issuer Identifier.
         audience: issuer,
+        # Explicit typing (RFC 9101 §10.8): a CIBA signed authentication request
+        # and an authorization-endpoint JAR both require `aud` = this issuer and
+        # `iss` = the client, so `aud` cannot tell them apart. CIBA §7.1.1
+        # defines no `typ`, so accept an absent header or the generic `JWT`
+        # media type (RFC 7519 §5.1; the value JOSE-family signers emit by
+        # default) and reject a request bearing the authorization endpoint's
+        # `oauth-authz-req+jwt` - that explicit type must not be honoured as a
+        # backchannel request. Defence-in-depth: the client is separately
+        # authenticated before we get here, so a cross-context request object
+        # already cannot arrive without the client's own credentials.
+        accepted_typ: [nil, "JWT"],
         accepted_algs: algs,
         enforce_fapi_alg_policy:
           Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs)),
