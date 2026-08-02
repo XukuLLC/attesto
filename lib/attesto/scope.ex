@@ -171,7 +171,19 @@ defmodule Attesto.Scope do
   def grants_all?(%__MODULE__{}, _granted, []), do: raise_empty_required!("[]")
 
   def grants_all?(%__MODULE__{} = catalog, granted, required) when is_list(required) do
-    Enum.all?(required, &grants?(catalog, granted, &1))
+    # Classify the granted set ONCE, then test each required scope against that
+    # index in O(1). The naive form - `Enum.all?(required, &grants?(.., granted,
+    # &1))` - rescans `granted` and re-`String.split`s a resource wildcard for
+    # every (required, granted) pair, which is O(|required| x |granted|) with a
+    # per-pair allocation. Since `required` is the caller-supplied requested
+    # scope at a token endpoint, that made a large `scope` parameter a
+    # denial-of-service lever (RFC 6749 §3.3 places no bound on the value). This
+    # form is O(|granted| + |required|) and allocates once per side, so the same
+    # 500k-token input that took ~20s is now flat. The result is identical to
+    # the naive form (verified by property test): the index encodes exactly the
+    # three ways `covers?/3` can hold.
+    index = index_granted(catalog, granted)
+    Enum.all?(required, &granted_by_index?(catalog, index, &1))
   end
 
   @doc """
@@ -187,6 +199,40 @@ defmodule Attesto.Scope do
     do: Enum.reject(requested, &customer_grant_form?(catalog, &1))
 
   # ----- internal -----
+
+  # Classify each granted scope once into the three shapes `covers?/3`
+  # distinguishes: the full wildcard, a resource-level wildcard (`<r>.*` whose
+  # resource is catalogued), or an exact scope. Non-binary entries are dropped,
+  # matching `covers?/3`'s `false` fallthrough.
+  defp index_granted(catalog, granted) do
+    List.wrap(granted)
+    |> Enum.reduce(%{full?: false, resources: MapSet.new(), exact: MapSet.new()}, fn
+      scope, acc when is_binary(scope) ->
+        if scope == @full_wildcard do
+          %{acc | full?: true}
+        else
+          case parse_resource_wildcard(catalog, scope) do
+            {:ok, resource} -> %{acc | resources: MapSet.put(acc.resources, resource)}
+            :error -> %{acc | exact: MapSet.put(acc.exact, scope)}
+          end
+        end
+
+      _scope, acc ->
+        acc
+    end)
+  end
+
+  # The index equivalent of `known?(required) and Enum.any?(granted, &covers?/3)`.
+  # `known?` is factored to the front because every `covers?/3` branch requires
+  # it; the disjunction then mirrors the three branches exactly.
+  defp granted_by_index?(catalog, index, required) when is_binary(required) do
+    known?(catalog, required) and
+      (index.full? or
+         MapSet.member?(index.exact, required) or
+         MapSet.member?(index.resources, scope_resource(required)))
+  end
+
+  defp granted_by_index?(_catalog, _index, _required), do: false
 
   defp covers?(catalog, @full_wildcard, required), do: known?(catalog, required)
 

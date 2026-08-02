@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- `Attesto.Scope.grants_all?/3` is now linear in the requested-scope count.
+  It previously rescanned the granted set and re-split resource wildcards for
+  every (required, granted) pair, so a large caller-supplied `scope` value - on
+  which RFC 6749 §3.3 places no bound - was a denial-of-service lever: 500,000
+  scope tokens took ~20 seconds. Classifying the granted set once and testing
+  each required scope against that index in O(1) drops the same input to ~40ms,
+  with an identical result (pinned by a property test against the naive form).
+  Surfaced by mining the class behind Keycloak CVE-2026-4634 against this code.
+
 ## [1.6.0] - 2026-08-01
 
 ### Security
