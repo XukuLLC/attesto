@@ -85,17 +85,26 @@ defmodule Attesto.JARM do
 
   # The reserved claims (`iss`, `aud`, `iat`, `exp`) are set by the merge below,
   # and a string key there overwrites a caller's string key of the same name -
-  # the server value wins. An *atom* key (`:iss`) is a distinct map key, so it
-  # would survive the merge and serialize to the same JSON member name as the
-  # server's `"iss"`, producing a duplicate member whose value a lenient JSON
-  # parser might prefer. Collapse every atom key onto its string form first so
-  # the merge is authoritative and the JWT can never carry a duplicate claim.
-  # (`params`'s contract is string keys; this hardens the public core against a
-  # caller that mixes in atoms rather than trusting the contract.)
+  # the server value wins. A key of any OTHER type that still serializes to the
+  # same JSON member name (an atom `:iss`, a charlist `~c"iss"`) is a distinct
+  # map key, so it would survive the merge and produce a DUPLICATE JSON member
+  # whose value a lenient parser might prefer. Guarantee the invariant "every
+  # key is a binary" here: convert atoms, pass binaries, and reject anything
+  # else - so the merge is authoritative and the JWT can never carry a duplicate
+  # claim. (`params`'s contract is string keys; this hardens the public core
+  # against a caller that violates it rather than trusting the contract.)
   defp stringify_keys(params) do
     Map.new(params, fn
-      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
-      {key, value} -> {key, value}
+      {key, value} when is_binary(key) ->
+        {key, value}
+
+      {key, value} when is_atom(key) ->
+        {Atom.to_string(key), value}
+
+      {key, _value} ->
+        raise ArgumentError,
+              "JARM response params must have string keys (atoms are converted); " <>
+                "a #{inspect(key)} key could forge a duplicate reserved claim"
     end)
   end
 

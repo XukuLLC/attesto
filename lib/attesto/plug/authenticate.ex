@@ -130,14 +130,14 @@ if Code.ensure_loaded?(Plug.Conn) do
       config = resolve_config(opts)
 
       # The DPoP proof is verified before the token (its `jkt` is an input to
-      # token verification), but its `jti` is claimed only after - see
+      # token verification), but its replay identity is claimed only after - see
       # `verify_dpop_proof/4`. Claiming earlier would let an unauthenticated
       # request write to the replay store.
       with {:ok, scheme, token} <- authorization(conn, opts),
-           {:ok, dpop_jkt, dpop_jti, replay_ttl} <- verify_dpop(conn, scheme, token, opts),
+           {:ok, dpop_jkt, dpop_replay_key, replay_ttl} <- verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumb} <- cert_thumbprint(conn, opts),
            {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb, opts),
-           :ok <- claim_dpop_jti(dpop_jti, replay_ttl, opts) do
+           :ok <- claim_dpop_jti(dpop_replay_key, replay_ttl, opts) do
         conn = assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
 
         # RFC 9470 §3: after the token is verified, enforce any route step-up
@@ -371,7 +371,10 @@ if Code.ensure_loaded?(Plug.Conn) do
           |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
 
         case DPoP.verify_proof(proof, verify_opts) do
-          {:ok, %{jkt: jkt, jti: jti, replay_ttl: ttl}} -> {:ok, jkt, jti, ttl}
+          # Claim the namespaced `replay_key` (jkt:jti), not the raw `jti` - see
+          # `Attesto.DPoP`'s replay-identity note. `jkt` still flows out for the
+          # token `cnf.jkt` comparison.
+          {:ok, %{jkt: jkt, replay_key: replay_key, replay_ttl: ttl}} -> {:ok, jkt, replay_key, ttl}
           {:error, reason} -> {:dpop_error, reason}
         end
       else
@@ -379,12 +382,12 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
-    # Claim the proof identifier, now that the token behind it is known to be
-    # valid. A Bearer/mTLS request carries no proof and so has nothing to
-    # claim.
+    # Claim the proof's replay identity (the namespaced `jkt:jti`), now that the
+    # token behind it is known to be valid. A Bearer/mTLS request carries no
+    # proof and so has nothing to claim.
     defp claim_dpop_jti(nil, _ttl, _opts), do: :ok
 
-    defp claim_dpop_jti(jti, ttl_seconds, opts) when is_binary(jti) do
+    defp claim_dpop_jti(replay_key, ttl_seconds, opts) when is_binary(replay_key) do
       case Keyword.get(opts, :replay_check) do
         fun when is_function(fun, 2) ->
           # The accepted results mirror `Attesto.DPoP.check_replay/2` exactly.
@@ -393,7 +396,7 @@ if Code.ensure_loaded?(Plug.Conn) do
           # 401 `invalid_dpop_proof`, blaming the client for a server fault and
           # hiding the outage. An unsupported return is a host integration bug
           # and is raised, not translated.
-          case fun.(jti, ttl_seconds) do
+          case fun.(replay_key, ttl_seconds) do
             :ok ->
               :ok
 
@@ -403,7 +406,7 @@ if Code.ensure_loaded?(Plug.Conn) do
               # does not hand `:replay_check` to `verify_proof/2` - the claim
               # is deferred until the token has verified - so the core's
               # emission point is never reached on this path.
-              Attesto.Telemetry.dpop_replay_detected(jti)
+              Attesto.Telemetry.dpop_replay_detected(replay_key)
               {:dpop_error, :replay}
 
             other ->

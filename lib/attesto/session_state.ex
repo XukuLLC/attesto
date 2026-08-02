@@ -68,6 +68,10 @@ defmodule Attesto.SessionState do
   `origin` must be a browser-form origin (`scheme://host[:port]`, default port
   omitted) — derive it from the response's `redirect_uri` with `origin/1`.
   `salt` defaults to a fresh `generate_salt/0`.
+
+  Raises `ArgumentError` if an explicit `salt` is empty or contains a space
+  (§2 forbids a space in `session_state`) or a `.` (the `hash "." salt`
+  delimiter). `generate_salt/0` always satisfies this.
   """
   @spec compute(String.t(), String.t(), String.t(), String.t()) :: String.t()
   def compute(client_id, origin, op_browser_state, salt \\ generate_salt())
@@ -95,10 +99,11 @@ defmodule Attesto.SessionState do
   appended only when it is not the scheme's default — exactly the string the
   browser reports as `MessageEvent.origin` for a page loaded from `uri`.
 
-  The value must match the browser's WHATWG serialization byte-for-byte, or the
-  iframe recomputation compares unequal and the OP answers a permanent, false
-  `changed`. `URI.parse/1` (RFC 3986) diverges from the browser in two ways that
-  this corrects:
+  The value must equal the browser's WHATWG `MessageEvent.origin`, or the iframe
+  recomputation compares unequal and the OP answers a permanent, false
+  `changed` (a fail-safe error - it over-reports change, never under-reports).
+  `URI.parse/1` (RFC 3986) diverges from the browser; this closes the two
+  divergences a registered `redirect_uri` realistically hits:
 
     * **case** — the browser lowercases the scheme and host; `URI.parse/1`
       preserves them (`https://RP.Example`), so both are lowercased here.
@@ -106,9 +111,16 @@ defmodule Attesto.SessionState do
       (`https://[::1]`); `URI.parse/1` strips them (`host: "::1"`), so a literal
       host (one containing `:`) is re-bracketed here.
 
-  A host is expected already in ASCII/punycode form (as a registered
-  `redirect_uri` is): full IDNA Unicode→punycode mapping is out of scope, so a
-  raw non-ASCII host would still diverge.
+  This is NOT a full WHATWG serializer. The input is expected to be an
+  already-validated, canonical HTTP(S) `redirect_uri`; noncanonical forms are
+  left as-is and would still diverge (each yielding only the fail-safe false
+  `changed`, never a security bypass):
+
+    * a non-canonical IPv6 spelling (`[0:0:0:0:0:0:0:1]` vs the browser's
+      compressed `[::1]`) or a non-dotted-decimal IPv4 (`0177.0.0.1`);
+    * a raw non-ASCII host — full IDNA Unicode→punycode mapping is out of scope
+      (a registered redirect_uri is already ASCII/punycode);
+    * a non-HTTP(S) scheme, whose browser origin is the opaque `null`.
 
   Returns `{:ok, origin}` or `{:error, :invalid_uri}` for a URI with no
   scheme/host (a `session_state` computed over a malformed origin could never
@@ -163,6 +175,10 @@ defmodule Attesto.SessionState do
   space or `.`-ambiguity in its parts (each part is base64url-no-pad), so it is
   a valid `op_browser_state` for `compute/4` and splits back cleanly in
   `browser_state_valid?/3`.
+
+  Raises `ArgumentError` if `secret` is shorter than 32 bytes — an enforced
+  key-length floor (RFC 2104 §3) for the HMAC that makes the value OP-owned.
+  `browser_state_valid?/3` enforces the same floor.
   """
   @spec mint_browser_state(binary(), binary()) :: String.t()
   def mint_browser_state(secret, login_binding) when is_binary(secret) and is_binary(login_binding) do
@@ -190,6 +206,9 @@ defmodule Attesto.SessionState do
   wrong bytes, take the same path. The segments come from an attacker-supplied
   string and are not length-validated first, so the time taken still varies
   with how much was submitted; see that module for the distinction.
+
+  Raises `ArgumentError` if `secret` is shorter than the 32-byte floor
+  `mint_browser_state/2` enforces (RFC 2104 §3).
   """
   @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
   def browser_state_valid?(secret, value, login_binding)
@@ -224,12 +243,14 @@ defmodule Attesto.SessionState do
     :hmac |> :crypto.mac(:sha256, secret, data) |> Base.url_encode64(padding: false)
   end
 
-  # HMAC-SHA256 accepts any key length, so an empty or short OP secret produces
-  # a MAC an attacker can recompute (`:crypto.mac(:hmac, :sha256, "", data)` is
-  # deterministic and needs no secret) - the browser state would no longer be
-  # OP-owned. RFC 2104 §3 recommends a key at least as long as the hash output
-  # (32 bytes for SHA-256). The secret is OP configuration, not attacker input,
-  # so a too-short one is a misconfiguration to surface loudly, not tolerate.
+  # HMAC-SHA256 accepts any key length, but the OP browser state is only
+  # OP-owned while the key is a real secret. An EMPTY key is the degenerate
+  # case - `:crypto.mac(:hmac, :sha256, "", data)` is deterministic and needs no
+  # secret, so anyone can forge a MAC. A short-but-random key is not itself
+  # recomputable, but RFC 2104 §3 still recommends a key at least as long as the
+  # hash output (32 bytes for SHA-256) for full strength. Enforce that as a
+  # key-length policy: the secret is OP configuration, not attacker input, so a
+  # key below the floor is a misconfiguration to surface loudly, not tolerate.
   @min_secret_bytes 32
   defp validate_secret!(secret) do
     if byte_size(secret) < @min_secret_bytes do

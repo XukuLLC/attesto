@@ -94,6 +94,19 @@ defmodule Attesto.JARMTest do
     assert occurrences(payload, ~s("exp")) == 1
   end
 
+  test "a non-string, non-atom key that would forge a duplicate claim is rejected", %{
+    config: config
+  } do
+    # A charlist key JSON-encodes to the same member name as a string key, so it
+    # could shadow a reserved claim as a duplicate member. The contract is
+    # string keys; a violation must raise, not silently emit a duplicate.
+    for forged <- [%{~c"iss" => "https://evil.example"}, %{~c"aud" => "attacker"}] do
+      assert_raise ArgumentError, fn ->
+        JARM.response_jwt(config, "client-123", forged)
+      end
+    end
+  end
+
   test "signs an error response (no code), addressed to the client", %{config: config} do
     {:ok, jwt} =
       JARM.response_jwt(config, "client-123", %{

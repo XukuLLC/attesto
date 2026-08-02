@@ -752,9 +752,12 @@ defmodule Attesto.DPoPTest do
   # -----------------------------------------------------------------
 
   describe "verify_proof/2 replay protection (:replay_check)" do
-    test "calls :replay_check exactly once on the happy path with the proof's jti and a ttl" do
+    test "calls :replay_check exactly once on the happy path with the namespaced replay key and a ttl" do
       jti = "jti-#{System.unique_integer([:positive])}"
-      {proof, _jkt} = Factory.dpop_proof(jti: jti)
+      {proof, jkt} = Factory.dpop_proof(jti: jti)
+      # The replay identity is the jti NAMESPACED by the proof key (jkt:jti), so
+      # one key's proof cannot evict another's from the cache.
+      replay_key = jkt <> ":" <> jti
       parent = self()
 
       replay_check = fn seen, ttl ->
@@ -762,13 +765,13 @@ defmodule Attesto.DPoPTest do
         :ok
       end
 
-      assert {:ok, %{jti: ^jti}} =
+      assert {:ok, %{jti: ^jti, replay_key: ^replay_key}} =
                DPoP.verify_proof(proof, base_opts(replay_check: replay_check))
 
       # The verifier passes the acceptance window + 1s of retention margin
       # (default max_age 60 +
-      # future skew 60) as the TTL the cache must remember the jti for.
-      assert_received {:replay_check_called, ^jti, 121}
+      # future skew 60) as the TTL the cache must remember the key for.
+      assert_received {:replay_check_called, ^replay_key, 121}
       # Exactly once.
       refute_received {:replay_check_called, _, _}
     end
@@ -790,6 +793,29 @@ defmodule Attesto.DPoPTest do
 
       assert {:error, :replay} =
                DPoP.verify_proof(proof, base_opts(replay_check: replay_check))
+    end
+
+    test "two different keys reusing the same jti get distinct replay keys (no cross-key collision)" do
+      # jti uniqueness is only guaranteed per key (RFC 9449 §4.2). Two proofs
+      # that share a jti but are signed by different keys must present DIFFERENT
+      # replay identities, so recording one cannot falsely evict the other - and
+      # so an attacker cannot pre-burn a victim's jti under the attacker's key.
+      jti = "shared-#{System.unique_integer([:positive])}"
+      {proof_a, jkt_a} = Factory.dpop_proof(jti: jti)
+      {proof_b, jkt_b} = Factory.dpop_proof(jti: jti)
+      assert jkt_a != jkt_b
+
+      seen = fn key, _ttl -> send(self(), {:key, key}) && :ok end
+
+      assert {:ok, %{replay_key: key_a}} =
+               DPoP.verify_proof(proof_a, base_opts(replay_check: seen))
+
+      assert {:ok, %{replay_key: key_b}} =
+               DPoP.verify_proof(proof_b, base_opts(replay_check: seen))
+
+      assert key_a == jkt_a <> ":" <> jti
+      assert key_b == jkt_b <> ":" <> jti
+      assert key_a != key_b
     end
 
     test ":replay_check is NOT consulted when an earlier check would fail" do

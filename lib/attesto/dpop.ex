@@ -52,11 +52,12 @@ defmodule Attesto.DPoP do
     1. The proof's `jti` is length-capped (see `@max_jti_length`) so an
       attacker cannot exhaust the cache by submitting proofs with
       megabyte-sized `jti` values.
-    2. The proof's `jti` is recorded once, and rejected if already seen,
-      for the acceptance window (`max_age_seconds` + future skew). The
-      success map returns `jti` and `replay_ttl` so the caller can record
-      it; deriving the TTL from the verifier's age policy keeps the cache
-      from forgetting a `jti` while the proof is still acceptable.
+    2. The proof's replay identity is recorded once, and rejected if already
+      seen, for the acceptance window plus a one-second integer-boundary margin
+      (`max_age_seconds` + future skew + 1 — see `replay_ttl/1`). The success
+      map returns `replay_key`/`replay_ttl` so the caller can record it;
+      deriving the TTL from the verifier's age policy keeps the cache from
+      forgetting the identity while the proof is still acceptable.
       `Attesto.DPoP.ReplayCache` provides a default ETS-backed store.
 
   ### Claim the `jti` only after the whole request has authenticated
@@ -122,6 +123,7 @@ defmodule Attesto.DPoP do
           iat: non_neg_integer(),
           jkt: String.t(),
           jti: String.t(),
+          replay_key: String.t(),
           replay_ttl: pos_integer()
         }
 
@@ -223,25 +225,41 @@ defmodule Attesto.DPoP do
          {:ok, jti} <- check_jti(claims),
          {:ok, ath} <- check_ath(claims, opts),
          :ok <- check_nonce(claims, opts),
-         :ok <- check_replay(jti, opts) do
+         jkt = JOSE.JWK.thumbprint(jwk),
+         replay_key = replay_key(jkt, jti),
+         :ok <- check_replay(replay_key, opts) do
       {:ok,
        %{
          ath: ath,
          htm: claims["htm"],
          htu: claims["htu"],
          iat: iat,
-         jkt: JOSE.JWK.thumbprint(jwk),
+         jkt: jkt,
          jti: jti,
-         # The window this proof's `jti` must be remembered for, so a caller
-         # that claims the identifier itself - rather than through
-         # `:replay_check` here - uses the same acceptance window this
-         # verification applied instead of deriving it a second time.
+         # The replay identity to record: the `jti` NAMESPACED by the proof key
+         # thumbprint. RFC 9449 §4.2 scopes a proof to its key, and `jti`
+         # uniqueness is only guaranteed per key - two clients (or an attacker's
+         # own key) may legitimately mint the same `jti`. Keying replay on `jti`
+         # alone would let one key's proof evict another's, both a cross-client
+         # false replay and a targeted DoS. A caller that defers the claim MUST
+         # record `replay_key`, not the raw `jti` (which is retained for
+         # telemetry). `jkt` is fixed-length base64url with no `:`, so the
+         # prefix is unambiguous.
+         replay_key: replay_key,
+         # The window this identity must be remembered for, so a caller that
+         # claims it itself - rather than through `:replay_check` here - uses the
+         # same acceptance window this verification applied instead of deriving
+         # it a second time.
          replay_ttl: replay_ttl(opts)
        }}
     end
   end
 
   def verify_proof(_proof, _opts), do: {:error, :invalid_proof}
+
+  # Namespace the replay identity by the proof-key thumbprint (RFC 9449 §4.2):
+  # `jti` is unique only within a key, so the cache must not collide across keys.
+  defp replay_key(jkt, jti), do: jkt <> ":" <> jti
 
   @doc """
   RFC 7638 SHA-256 JWK thumbprint, base64url-encoded without padding.

@@ -212,19 +212,21 @@ defmodule Attesto.Scope do
   defp index_granted(catalog, granted) do
     List.wrap(granted)
     |> Enum.reduce(%{full?: false, resources: MapSet.new(), exact: MapSet.new()}, fn
-      scope, acc when is_binary(scope) ->
-        if scope == @full_wildcard do
-          %{acc | full?: true}
-        else
-          case parse_resource_wildcard(catalog, scope) do
-            {:ok, resource} -> %{acc | resources: MapSet.put(acc.resources, resource)}
-            :error -> %{acc | exact: MapSet.put(acc.exact, scope)}
-          end
-        end
-
-      _scope, acc ->
-        acc
+      scope, acc when is_binary(scope) -> classify_granted(catalog, scope, acc)
+      _scope, acc -> acc
     end)
+  end
+
+  # One granted scope into the index: the full wildcard sets `full?`, a
+  # resource-level wildcard whose resource is catalogued adds to `resources`,
+  # anything else is an exact scope.
+  defp classify_granted(_catalog, @full_wildcard, acc), do: %{acc | full?: true}
+
+  defp classify_granted(catalog, scope, acc) do
+    case parse_resource_wildcard(catalog, scope) do
+      {:ok, resource} -> %{acc | resources: MapSet.put(acc.resources, resource)}
+      :error -> %{acc | exact: MapSet.put(acc.exact, scope)}
+    end
   end
 
   # The index equivalent of `known?(required) and Enum.any?(granted, &covers?/3)`.

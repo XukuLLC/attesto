@@ -32,9 +32,12 @@ defmodule Attesto.DPoP.ReplayCache do
   shape (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any
   replacement plug in without changes to `Attesto.DPoP`. The verifier
   passes its whole acceptance window as `ttl_seconds` - `:max_age_seconds`
-  plus the future-skew allowance it also tolerates, not `:max_age_seconds`
-  alone - so a shared store sized by that value cannot forget a `jti`
-  while a proof carrying it would still be accepted.
+  plus the future-skew allowance it also tolerates, plus a one-second
+  integer-boundary margin, not `:max_age_seconds` alone - so a shared store
+  sized by that value cannot forget an identity while a proof carrying it would
+  still be accepted. (The identity the verifier passes is the `jti` namespaced
+  by the proof-key thumbprint; the `jti`/`ttl_seconds` argument names are
+  historical.)
 
   The boot-time guard **raises** on startup if `Node.list/0` is non-empty
   and `:multi_node_acknowledged?` is not set - a clustered BEAM with a

@@ -438,11 +438,23 @@ defmodule Attesto.RequestObject do
   defp typ_accepted?(nil, accepted), do: Enum.member?(accepted, nil)
 
   defp typ_accepted?(typ, accepted) when is_binary(typ) do
-    down = String.downcase(typ)
-    Enum.any?(accepted, fn a -> is_binary(a) and String.downcase(a) == down end)
+    norm = normalize_typ(typ)
+    Enum.any?(accepted, fn a -> is_binary(a) and normalize_typ(a) == norm end)
   end
 
   defp typ_accepted?(_typ, _accepted), do: false
+
+  # RFC 7515 §4.1.9 / RFC 7519 §5.1: `typ` is a media type whose `application/`
+  # prefix MAY be omitted, and recipients treat e.g. `JWT` and `application/JWT`
+  # as the same type (case-insensitively). Normalize both sides so an accepted
+  # `JWT` also accepts `application/jwt`, and a rejected `oauth-authz-req+jwt`
+  # also rejects its `application/`-prefixed spelling.
+  defp normalize_typ(typ) do
+    case String.downcase(typ) do
+      "application/" <> rest -> rest
+      down -> down
+    end
+  end
 
   defp check_compact_form(jwt) do
     case String.split(jwt, ".") do

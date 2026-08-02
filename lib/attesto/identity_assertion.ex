@@ -72,6 +72,7 @@ defmodule Attesto.IdentityAssertion do
           | :invalid_issuer
           | :invalid_audience
           | :missing_claim
+          | :invalid_claims
           | :client_mismatch
           | :expired
           | :not_yet_valid
