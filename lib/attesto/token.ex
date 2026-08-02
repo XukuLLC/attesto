@@ -632,44 +632,21 @@ defmodule Attesto.Token do
   # `kid` header (a hand-forged token) is tried against every trusted key,
   # which is safe - they are all ours.
   defp candidate_jwks(config, header_kid) do
-    config.keystore.verification_pems()
-    |> Enum.map(fn pem ->
-      {Key.kid(pem), SigningAlg.for_key(config.keystore, pem), Key.jwk(pem)}
-    end)
-    |> filter_by_kid(header_kid)
+    JWS.verification_candidates(config.keystore.verification_pems(),
+      kid: header_kid,
+      malformed_key: :raise,
+      candidate_builder: fn pem ->
+        {Key.kid(pem), SigningAlg.for_key(config.keystore, pem), Key.jwk(pem)}
+      end
+    )
   end
-
-  defp filter_by_kid(keyed, nil), do: keyed
-  defp filter_by_kid(keyed, kid), do: Enum.filter(keyed, fn {k, _alg, _jwk} -> k == kid end)
 
   defp verify_against_any(candidates, jwt) do
-    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, alg, jwk}, acc ->
-      case verify_strict_against(jwk, alg, jwt) do
-        {:ok, _claims} = ok -> {:halt, ok}
-        # A structural parse failure is terminal regardless of key.
-        {:error, :invalid_token} = err -> {:halt, err}
-        {:error, :invalid_signature} -> {:cont, acc}
-      end
-    end)
-  end
-
-  defp verify_strict_against(jwk, alg, jwt) do
-    case JOSE.JWT.verify_strict(jwk, [alg], jwt) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
-        {:ok, claims}
-
-      {false, _jwt_struct, _jws_struct} ->
-        # Covers signature-tamper and alg-confusion: the singleton whitelist
-        # passed to verify_strict forces any header algorithm other than the
-        # one bound to this trusted candidate key to verified? == false.
-        {:error, :invalid_signature}
-
-      _other ->
-        # JOSE wraps malformed input in an internal try/catch returning
-        # `{class, reason}`; collapse to one opaque error so callers
-        # cannot fingerprint the parser.
-        {:error, :invalid_token}
-    end
+    JWS.verify_strict(jwt, candidates,
+      terminal_error: :invalid_signature,
+      malformed_result: :halt,
+      malformed_error: :invalid_token
+    )
   end
 
   defp peek_protected_header(jwt) do

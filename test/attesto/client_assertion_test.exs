@@ -46,6 +46,19 @@ defmodule Attesto.ClientAssertionTest do
     assert claims["sub"] == @client_id
   end
 
+  test "rejects the whole trusted set when one candidate JWK is malformed" do
+    key = ec_key()
+    jwt = assertion(key)
+
+    assert {:error, :invalid_signature} =
+             ClientAssertion.verify(
+               jwt,
+               @client_id,
+               @audience,
+               %{"keys" => [public_jwk(key), %{"not" => "a jwk"}]}
+             )
+  end
+
   test "rejects alg confusion: token header alg must match the trusted key alg" do
     key = ec_key()
     jwt = assertion(key)

@@ -49,6 +49,18 @@ defmodule Attesto.RequestObjectTest do
     assert params["scope"] == "openid"
   end
 
+  test "rejects the whole trusted set when one candidate JWK is malformed" do
+    key = ec_key()
+    jwt = request_object(key)
+
+    assert {:error, :invalid_signature} =
+             RequestObject.verify(
+               jwt,
+               %{"keys" => [public_jwk(key), %{"not" => "a jwk"}]},
+               base_opts()
+             )
+  end
+
   describe ":accepted_algs" do
     test "default rejects an RS256-signed object (FAPI 2 forbids RS256)" do
       key = JOSE.JWK.generate_key({:rsa, 2048})

@@ -366,18 +366,12 @@ defmodule Attesto.DPoP do
   # ----- internal: signature verification -----
 
   defp verify_signature(proof, alg, jwk) do
-    case JOSE.JWT.verify_strict(jwk, [alg], proof) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} when is_map(claims) ->
-        {:ok, claims}
-
-      {false, _jwt, _jws} ->
-        {:error, :invalid_signature}
-
-      _other ->
-        # Same defensive pattern as `Attesto.Token`: JOSE collapses any
-        # internal parser blow-up into a tuple we treat as opaque.
-        {:error, :invalid_proof}
-    end
+    JWS.verify_strict(proof, [{nil, alg, jwk}],
+      terminal_error: :invalid_signature,
+      malformed_result: :halt,
+      malformed_error: :invalid_proof,
+      claims_map?: true
+    )
   end
 
   # ----- internal: claim checks -----

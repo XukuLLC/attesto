@@ -433,17 +433,18 @@ defmodule Attesto.SdJwt do
     end
   end
 
-  defp verify_against_keys(_jwt, _alg, []), do: {:error, :invalid_signature}
+  defp verify_against_keys(jwt, alg, keys) do
+    candidates =
+      JWS.verification_candidates(keys,
+        alg: alg,
+        malformed_key: :skip
+      )
 
-  defp verify_against_keys(jwt, alg, [jwk_map | rest]) do
-    jwk = JOSE.JWK.from_map(jwk_map)
-
-    case JOSE.JWT.verify_strict(jwk, [alg], jwt) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:ok, claims}
-      _ -> verify_against_keys(jwt, alg, rest)
-    end
-  rescue
-    _ -> verify_against_keys(jwt, alg, rest)
+    JWS.verify_strict(jwt, candidates,
+      terminal_error: :invalid_signature,
+      malformed_result: :continue,
+      malformed_error: :invalid_signature
+    )
   end
 
   defp sd_alg(payload) do
@@ -476,10 +477,11 @@ defmodule Attesto.SdJwt do
     if is_binary(alg) and alg in accepted and alg != "none" do
       jwk = JOSE.JWK.from_map(holder_jwk)
 
-      case JOSE.JWT.verify_strict(jwk, [alg], kb_jwt) do
-        {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:ok, claims}
-        _ -> {:error, :invalid_key_binding}
-      end
+      JWS.verify_strict(kb_jwt, [{nil, alg, jwk}],
+        terminal_error: :invalid_key_binding,
+        malformed_result: :halt,
+        malformed_error: :invalid_key_binding
+      )
     else
       {:error, :invalid_key_binding}
     end

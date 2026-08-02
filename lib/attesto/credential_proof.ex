@@ -122,10 +122,11 @@ defmodule Attesto.CredentialProof do
   # ── signature ────────────────────────────────────────────────────────────
 
   defp verify_signature(proof, alg, jwk) do
-    case JOSE.JWT.verify_strict(jwk, [alg], proof) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:ok, claims}
-      _ -> {:error, :invalid_signature}
-    end
+    JWS.verify_strict(proof, [{nil, alg, jwk}],
+      terminal_error: :invalid_signature,
+      malformed_result: :halt,
+      malformed_error: :invalid_signature
+    )
   rescue
     _ -> {:error, :invalid_signature}
   end

@@ -106,6 +106,14 @@ defmodule Attesto.SdJwtTest do
       assert {:error, :invalid_signature} = SdJwt.verify(issuance, wrong_jwk)
     end
 
+    test "skips a malformed issuer candidate and verifies with the next key" do
+      {pem, jwk} = keypair()
+      issuance = SdJwt.issue(%{"iss" => "iss", "x" => 1}, pem: pem, disclosable: ["x"])
+
+      assert {:ok, %{claims: %{"iss" => "iss"}}} =
+               SdJwt.verify(issuance, %{"keys" => [%{"not" => "a jwk"}, jwk]})
+    end
+
     test "a duplicated presented disclosure is rejected" do
       {pem, jwk} = keypair()
       issuance = SdJwt.issue(%{"iss" => "iss", "x" => 1}, pem: pem, disclosable: ["x"])

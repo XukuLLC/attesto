@@ -52,4 +52,12 @@ defmodule Attesto.CredentialProofTest do
 
     assert {:error, :invalid_jwk} = CredentialProof.verify_jwt(proof, verify_opts())
   end
+
+  test "rejects a proof signed by the wrong embedded key" do
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    embedded = JOSE.JWK.generate_key({:ec, "P-256"})
+    proof = sign_proof(signer, public_map(embedded))
+
+    assert {:error, :invalid_signature} = CredentialProof.verify_jwt(proof, verify_opts())
+  end
 end

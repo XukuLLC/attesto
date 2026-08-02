@@ -63,6 +63,16 @@ defmodule Attesto.IdentityAssertionTest do
       assert {:ok, _claims} = IdentityAssertion.verify(jwt, public_jwks(key, "ES256"), opts())
     end
 
+    test "rejects the whole trusted set when one candidate JWK is malformed" do
+      key = ec_key()
+      jwt = assertion(key, "ES256")
+      {_kty, trusted} = JOSE.JWK.to_public_map(key)
+      trusted = Map.merge(trusted, %{"kid" => JOSE.JWK.thumbprint(key), "alg" => "ES256"})
+
+      assert {:error, :invalid_signature} =
+               IdentityAssertion.verify(jwt, %{"keys" => [trusted, %{"not" => "a jwk"}]}, opts())
+    end
+
     test "carries optional claims (scope, email) through" do
       key = rsa_key()
       jwt = assertion(key, "RS256", %{"scope" => "mcp:read mcp:write", "email" => "a@example.com"})

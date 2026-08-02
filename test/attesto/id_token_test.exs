@@ -261,6 +261,14 @@ defmodule Attesto.IDTokenTest do
       assert header!(jwt)["kid"] == Key.kid(first_pem)
       assert {:ok, _claims} = IDToken.verify(config, jwt, client_id: @client_id)
     end
+
+    test "a malformed PEM candidate retains the keystore failure behavior", %{pem: pem} do
+      RotatingKeystore.install([pem, "not a pem"])
+      config = %{Factory.config(pem) | keystore: RotatingKeystore}
+      assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)
+
+      assert_raise ArgumentError, fn -> IDToken.verify(config, jwt, client_id: @client_id) end
+    end
   end
 
   describe "mint/4 validation" do

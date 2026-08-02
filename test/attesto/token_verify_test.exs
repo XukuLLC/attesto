@@ -6,6 +6,7 @@ defmodule Attesto.TokenVerifyTest do
 
   alias Attesto.Keystore.Static
   alias Attesto.Test.Factory
+  alias Attesto.Test.RotationKeystore
   alias Attesto.Token
 
   @issuer "https://api.example.com/"
@@ -699,6 +700,18 @@ defmodule Attesto.TokenVerifyTest do
 
       assert {:ok, claims_b} = Token.verify(rotation_config, jwt_b)
       assert claims_b["sub"] == "oc_b"
+    end
+
+    test "a malformed PEM candidate retains the keystore failure behavior" do
+      pem = Factory.rsa_pem()
+      keystore = RotationKeystore
+      keystore.install(pem, [pem, "not a pem"])
+      config = keystore.config()
+
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(config, %{kind: "client", sub: "oc_bad_key", scopes: [], claims: %{"client_id" => "x"}})
+
+      assert_raise ArgumentError, fn -> Token.verify(config, jwt) end
     end
   end
 

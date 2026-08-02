@@ -10,6 +10,8 @@ defmodule Attesto.JWS do
           signature_segment: binary()
         }
 
+  @type verification_candidate :: {term(), binary(), JOSE.JWK.t()}
+
   @doc false
   @spec decode_compact(binary(), keyword()) ::
           {:ok, compact_segments()}
@@ -104,6 +106,67 @@ defmodule Attesto.JWS do
 
   def reject_unsupported_crit(_header, _opts), do: {:error, :unsupported_crit}
 
+  @doc """
+  Build the trusted candidates used by strict JWT verification.
+
+  The returned tuples retain the input order and are `{kid, alg, jwk}`. The
+  default map builder derives an algorithm from each JWK's `alg` member or
+  key material and validates that algorithm against the key. Passing `alg:`
+  deliberately uses one presented algorithm for every map; SD-JWT issuer
+  verification uses that mode for compatibility with its existing policy.
+
+  Options:
+
+    * `:kid` narrows the result after conversion and algorithm filtering.
+    * `:accepted_algs` filters algorithms; an empty list means no filter.
+    * `:fapi?` applies `SigningAlg.fapi_compatible?/2` after algorithm
+      filtering.
+    * `:malformed_key` is `:reject_set` (default), `:skip`, or `:raise`.
+      The first returns an empty set when any map is malformed, the second
+      drops only that map, and the last lets a custom builder's exception
+      retain its caller-visible behavior.
+    * `:candidate_builder` can build a candidate from non-JWK inputs, such as
+      a PEM. Its result must be a `{kid, alg, jwk}` tuple.
+  """
+  @spec verification_candidates(term(), keyword()) :: [verification_candidate()]
+  def verification_candidates(keys, opts \\ []) when is_list(opts) do
+    malformed_key = Keyword.get(opts, :malformed_key, :reject_set)
+    validate_malformed_key!(malformed_key)
+
+    keys
+    |> normalize_verification_keys()
+    |> Enum.reduce_while([], &reduce_verification_candidate(&1, &2, opts, malformed_key))
+    |> finish_verification_candidates(opts)
+  end
+
+  @doc """
+  Verify a compact JWT against candidates in order using a singleton strict
+  algorithm allowlist for each candidate.
+
+  `:terminal_error` is returned when no candidate verifies. A JOSE result
+  other than a successful result or `{false, _, _}` is controlled by
+  `:malformed_result` (`:halt` or `:continue`) and `:malformed_error`.
+  `:claims_map?` treats a successful JOSE result with non-map claims as a
+  malformed result when set.
+  `:return_key?` optionally includes the successful candidate in the result.
+  """
+  @spec verify_strict(binary(), [verification_candidate()], keyword()) ::
+          {:ok, map()} | {:ok, map(), verification_candidate()} | {:error, atom()}
+  def verify_strict(jwt, candidates, opts \\ [])
+
+  def verify_strict(jwt, candidates, opts) when is_binary(jwt) and is_list(candidates) and is_list(opts) do
+    terminal_error = Keyword.get(opts, :terminal_error, :invalid_signature)
+    malformed_result = Keyword.get(opts, :malformed_result, :halt)
+    claims_map? = Keyword.get(opts, :claims_map?, false)
+    return_key? = Keyword.get(opts, :return_key?, false)
+
+    validate_verification_result_options!(malformed_result, claims_map?, return_key?)
+
+    Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, opts))
+  end
+
+  def verify_strict(_jwt, _candidates, _opts), do: {:error, :invalid_signature}
+
   defp decode_segments(segments, canonical?) do
     Enum.reduce_while(segments, :ok, fn segment, :ok ->
       case check_segment(segment, canonical?) do
@@ -151,6 +214,148 @@ defmodule Attesto.JWS do
 
   defp segment_key(:protected), do: :protected_segment
   defp segment_key(:payload), do: :payload_segment
+
+  defp normalize_verification_keys(%{"keys" => keys}) when is_list(keys), do: keys
+  defp normalize_verification_keys(keys) when is_list(keys), do: keys
+  defp normalize_verification_keys(%{} = jwk), do: [jwk]
+  defp normalize_verification_keys(_keys), do: []
+
+  defp build_verification_candidate(key, opts, :raise) do
+    {:ok, build_candidate!(key, opts)}
+  end
+
+  defp build_verification_candidate(key, opts, malformed_key) do
+    {:ok, build_candidate!(key, opts)}
+  rescue
+    _ -> malformed_candidate(malformed_key)
+  catch
+    _, _ -> malformed_candidate(malformed_key)
+  end
+
+  defp reduce_verification_candidate(key, acc, opts, malformed_key) do
+    case build_verification_candidate(key, opts, malformed_key) do
+      {:ok, candidate} -> accepted_candidate_step(candidate, acc, opts, malformed_key)
+      :skip -> {:cont, acc}
+      :reject_set -> {:halt, :reject_set}
+    end
+  end
+
+  defp accepted_candidate_step(candidate, acc, opts, malformed_key) do
+    case allow_verification_candidate(candidate, opts, malformed_key) do
+      true -> {:cont, [candidate | acc]}
+      false -> {:cont, acc}
+      :skip -> {:cont, acc}
+      :reject_set -> {:halt, :reject_set}
+    end
+  end
+
+  defp verify_candidate(candidate, acc, jwt, opts) do
+    case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
+      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> verified_candidate_result(claims, candidate, acc, opts)
+      {false, _jwt, _jws} -> {:cont, acc}
+      _other -> malformed_candidate_result(acc, opts)
+    end
+  end
+
+  defp verified_candidate_result(claims, candidate, acc, opts) do
+    claims_map? = Keyword.get(opts, :claims_map?, false)
+    malformed_result = Keyword.get(opts, :malformed_result, :halt)
+    malformed_error = Keyword.get(opts, :malformed_error, Keyword.get(opts, :terminal_error, :invalid_signature))
+    return_key? = Keyword.get(opts, :return_key?, false)
+
+    if claims_map? and not is_map(claims),
+      do: malformed_verification_result(acc, malformed_result, malformed_error),
+      else: {:halt, successful_verification(claims, candidate, return_key?)}
+  end
+
+  defp malformed_candidate_result(acc, opts) do
+    malformed_result = Keyword.get(opts, :malformed_result, :halt)
+    malformed_error = Keyword.get(opts, :malformed_error, Keyword.get(opts, :terminal_error, :invalid_signature))
+    malformed_verification_result(acc, malformed_result, malformed_error)
+  end
+
+  defp build_candidate!(key, opts) do
+    candidate =
+      case Keyword.get(opts, :candidate_builder) do
+        builder when is_function(builder, 1) -> builder.(key)
+        nil -> map_candidate!(key, opts)
+        _other -> raise ArgumentError, ":candidate_builder must be a unary function"
+      end
+
+    validate_candidate!(candidate)
+  end
+
+  defp map_candidate!(jwk_map, opts) when is_map(jwk_map) do
+    jwk = JOSE.JWK.from_map(jwk_map)
+
+    alg =
+      case Keyword.fetch(opts, :alg) do
+        {:ok, fixed_alg} when is_binary(fixed_alg) -> fixed_alg
+        {:ok, _other} -> raise ArgumentError, ":alg must be a string"
+        :error -> Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
+      end
+
+    alg = if Keyword.has_key?(opts, :alg), do: alg, else: SigningAlg.validate_for_key!(alg, jwk)
+    {Map.get(jwk_map, "kid"), alg, jwk}
+  end
+
+  defp map_candidate!(_jwk_map, _opts), do: raise(ArgumentError, "verification candidate must be a JWK map")
+
+  defp validate_candidate!({kid, alg, %JOSE.JWK{} = jwk}) when is_binary(alg), do: {kid, alg, jwk}
+
+  defp validate_candidate!(_candidate), do: raise(ArgumentError, "verification candidate must be {kid, alg, jwk}")
+
+  defp candidate_allowed?({_kid, alg, jwk}, opts) do
+    accepted_algs = Keyword.get(opts, :accepted_algs, [])
+    accepted? = accepted_algs == [] or alg in accepted_algs
+    fapi? = Keyword.get(opts, :fapi?, false)
+    accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk))
+  end
+
+  defp allow_verification_candidate(candidate, opts, :raise), do: candidate_allowed?(candidate, opts)
+
+  defp allow_verification_candidate(candidate, opts, malformed_key) do
+    candidate_allowed?(candidate, opts)
+  rescue
+    _ -> malformed_candidate(malformed_key)
+  catch
+    _, _ -> malformed_candidate(malformed_key)
+  end
+
+  defp finish_verification_candidates(:reject_set, _opts), do: []
+
+  defp finish_verification_candidates(candidates, opts) do
+    candidates
+    |> Enum.reverse()
+    |> filter_verification_kid(Keyword.get(opts, :kid))
+  end
+
+  defp filter_verification_kid(candidates, nil), do: candidates
+  defp filter_verification_kid(candidates, kid), do: Enum.filter(candidates, &match?({^kid, _, _}, &1))
+
+  defp malformed_candidate(:skip), do: :skip
+  defp malformed_candidate(:reject_set), do: :reject_set
+
+  defp successful_verification(claims, candidate, true), do: {:ok, claims, candidate}
+  defp successful_verification(claims, _candidate, false), do: {:ok, claims}
+
+  defp malformed_verification_result(acc, :continue, _malformed_error), do: {:cont, acc}
+  defp malformed_verification_result(_acc, :halt, malformed_error), do: {:halt, {:error, malformed_error}}
+
+  defp candidate_jwk({_kid, _alg, jwk}), do: jwk
+  defp candidate_alg({_kid, alg, _jwk}), do: alg
+
+  defp validate_malformed_key!(mode) when mode in [:reject_set, :skip, :raise], do: :ok
+
+  defp validate_malformed_key!(mode),
+    do: raise(ArgumentError, ":malformed_key must be :reject_set, :skip, or :raise; got #{inspect(mode)}")
+
+  defp validate_verification_result_options!(malformed_result, claims_map?, return_key?)
+       when malformed_result in [:halt, :continue] and is_boolean(claims_map?) and is_boolean(return_key?), do: :ok
+
+  defp validate_verification_result_options!(_malformed_result, _claims_map?, _return_key?),
+    do:
+      raise(ArgumentError, ":malformed_result must be :halt or :continue and :claims_map?/return_key? must be boolean")
 
   @doc false
   @spec sign_compact(String.t(), map(), map()) :: String.t()

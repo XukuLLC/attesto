@@ -101,44 +101,19 @@ defmodule Attesto.ClientAssertion do
     enforce_fapi_policy =
       Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
 
-    case candidates(trusted_jwks, Map.get(header, "kid"), accepted_algs, enforce_fapi_policy) do
-      [] -> {:error, :invalid_signature}
-      jwks -> verify_against_any(jwks, assertion)
-    end
-  end
+    candidates =
+      JWS.verification_candidates(trusted_jwks,
+        kid: Map.get(header, "kid"),
+        accepted_algs: accepted_algs,
+        fapi?: enforce_fapi_policy,
+        malformed_key: :reject_set
+      )
 
-  defp candidates(trusted_jwks, header_kid, accepted_algs, enforce_fapi_policy) do
-    trusted_jwks
-    |> normalize_jwks()
-    |> Enum.map(fn jwk_map ->
-      jwk = JOSE.JWK.from_map(jwk_map)
-      alg = Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
-      {Map.get(jwk_map, "kid"), SigningAlg.validate_for_key!(alg, jwk), jwk}
-    end)
-    |> Enum.filter(fn {_kid, alg, jwk} ->
-      alg in accepted_algs and (not enforce_fapi_policy or SigningAlg.fapi_compatible?(alg, jwk))
-    end)
-    |> filter_by_kid(header_kid)
-  rescue
-    _ -> []
-  end
-
-  defp normalize_jwks(%{"keys" => keys}) when is_list(keys), do: keys
-  defp normalize_jwks(keys) when is_list(keys), do: keys
-  defp normalize_jwks(%{} = jwk), do: [jwk]
-  defp normalize_jwks(_), do: []
-
-  defp filter_by_kid(keyed, nil), do: keyed
-  defp filter_by_kid(keyed, kid), do: Enum.filter(keyed, fn {k, _alg, _jwk} -> k == kid end)
-
-  defp verify_against_any(candidates, assertion) do
-    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, alg, jwk}, acc ->
-      case JOSE.JWT.verify_strict(jwk, [alg], assertion) do
-        {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:halt, {:ok, claims}}
-        {false, _jwt, _jws} -> {:cont, acc}
-        _other -> {:halt, {:error, :invalid_assertion}}
-      end
-    end)
+    JWS.verify_strict(assertion, candidates,
+      terminal_error: :invalid_signature,
+      malformed_result: :halt,
+      malformed_error: :invalid_assertion
+    )
   end
 
   defp check_client_id(%{"iss" => id, "sub" => id}, id), do: :ok

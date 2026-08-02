@@ -153,44 +153,18 @@ defmodule Attesto.IdentityAssertion do
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
-    case candidates(trusted_jwks, Map.get(header, "kid"), accepted_algs) do
-      [] -> {:error, :invalid_signature}
-      jwks -> verify_against_any(jwks, jwt)
-    end
-  end
+    candidates =
+      JWS.verification_candidates(trusted_jwks,
+        kid: Map.get(header, "kid"),
+        accepted_algs: accepted_algs,
+        malformed_key: :reject_set
+      )
 
-  defp candidates(trusted_jwks, header_kid, accepted_algs) do
-    trusted_jwks
-    |> normalize_jwks()
-    |> Enum.map(fn jwk_map ->
-      jwk = JOSE.JWK.from_map(jwk_map)
-      alg = Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
-      {Map.get(jwk_map, "kid"), SigningAlg.validate_for_key!(alg, jwk), jwk}
-    end)
-    |> Enum.filter(fn {_kid, alg, _jwk} -> alg in accepted_algs end)
-    |> filter_by_kid(header_kid)
-  rescue
-    _ -> []
-  end
-
-  defp normalize_jwks(%{"keys" => keys}) when is_list(keys), do: keys
-  defp normalize_jwks(keys) when is_list(keys), do: keys
-  defp normalize_jwks(%{} = jwk), do: [jwk]
-  defp normalize_jwks(_), do: []
-
-  defp filter_by_kid(keyed, nil), do: keyed
-  defp filter_by_kid(keyed, kid), do: Enum.filter(keyed, fn {k, _alg, _jwk} -> k == kid end)
-
-  defp verify_against_any(candidates, jwt) do
-    Enum.reduce_while(candidates, {:error, :invalid_signature}, fn {_kid, alg, jwk}, acc ->
-      case JOSE.JWT.verify_strict(jwk, [alg], jwt) do
-        {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> {:halt, {:ok, claims}}
-        # A non-verifying result (`{false, _, _}`) moves on to the next candidate
-        # key; if none verify, the reduce returns the seed
-        # `{:error, :invalid_signature}`.
-        _ -> {:cont, acc}
-      end
-    end)
+    JWS.verify_strict(jwt, candidates,
+      terminal_error: :invalid_signature,
+      malformed_result: :continue,
+      malformed_error: :invalid_signature
+    )
   end
 
   # ── Header checks ─────────────────────────────────────────────────────────
