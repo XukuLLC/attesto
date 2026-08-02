@@ -29,7 +29,7 @@ defmodule Attesto.JARM do
   signed with that pinned algorithm (never `none`).
   """
 
-  alias Attesto.{Claims, Config, JWS, Key, NumericDate, SigningAlg}
+  alias Attesto.{Claims, Config, JWS, NumericDate}
 
   # JARM responses are consumed immediately by the client on the redirect, so
   # the JWT is short-lived. `:lifetime` may only shorten this default.
@@ -70,11 +70,7 @@ defmodule Attesto.JARM do
         "exp" => now + lifetime_seconds(opts)
       })
 
-    pem = config.keystore.signing_pem()
-    alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
-    header = %{"alg" => alg, "kid" => Key.kid(pem)}
-
-    {:ok, JWS.sign_compact(pem, header, claims)}
+    {:ok, JWS.sign_current(config.keystore, claims)}
   end
 
   defp drop_nil(params) do

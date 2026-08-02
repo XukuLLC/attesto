@@ -574,16 +574,10 @@ defmodule Attesto.Token do
     |> Base.url_encode64(padding: false)
   end
 
-  # Sign via JOSE.JWS, not JOSE.JWT: `JOSE.JWT.sign/3` injects a default
-  # `typ: "JWT"` whenever the supplied header omits `typ`, which would
-  # defeat both the RFC 9068 `at+jwt` tagging and the deliberate
-  # no-`typ` case (refresh tokens, or a host that sets the header to
-  # `nil`). `JOSE.JWS.sign/3` emits the protected header verbatim, so the
-  # header `jose_header/3` computes is exactly what ends up on the wire.
+  # The shared signer emits the protected header verbatim, including the
+  # deliberate no-typ case for refresh tokens.
   defp sign(config, claims) do
-    pem = config.keystore.signing_pem()
-    alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
-    Attesto.JWS.sign_compact(pem, jose_header(config, pem, claims, alg), claims)
+    JWS.sign_current(config.keystore, claims, typ: access_token_header_typ(config, claims))
   end
 
   # RFC 9068 §2.1: an OAuth JWT access token SHOULD carry the JOSE header
@@ -592,12 +586,10 @@ defmodule Attesto.Token do
   # tokens when `config.access_token_header_typ` is set (the default);
   # a host that needs a different/legacy header sets it to a custom value
   # or `nil`.
-  defp jose_header(config, pem, claims, alg) do
-    base = %{"alg" => alg, "kid" => Key.kid(pem)}
-
+  defp access_token_header_typ(config, claims) do
     case {config.access_token_header_typ, Map.get(claims, "typ")} do
-      {typ, @typ_access} when is_binary(typ) -> Map.put(base, "typ", typ)
-      _ -> base
+      {typ, @typ_access} when is_binary(typ) -> typ
+      _ -> nil
     end
   end
 

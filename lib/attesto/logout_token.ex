@@ -51,9 +51,8 @@ defmodule Attesto.LogoutToken do
   """
 
   alias Attesto.Config
-  alias Attesto.Key
+  alias Attesto.JWS
   alias Attesto.NumericDate
-  alias Attesto.SigningAlg
 
   # The dedicated logout-token media type (Back-Channel Logout 1.0 §2.4): an
   # RP rejects a plain ID Token (`typ: "JWT"`) presented at its logout endpoint.
@@ -109,8 +108,6 @@ defmodule Attesto.LogoutToken do
          {:ok, identifiers} <- subject_identifiers(opts) do
       iat = NumericDate.now(opts)
       lifetime = lifetime_seconds(opts)
-      pem = config.keystore.signing_pem()
-      alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
 
       claims =
         %{
@@ -123,7 +120,7 @@ defmodule Attesto.LogoutToken do
         }
         |> Map.merge(identifiers)
 
-      {:ok, sign(pem, claims, alg)}
+      {:ok, JWS.sign_current(config.keystore, claims, typ: @header_typ)}
     end
   end
 
@@ -154,14 +151,6 @@ defmodule Attesto.LogoutToken do
       jti when is_binary(jti) and jti != "" -> jti
       _ -> 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
     end
-  end
-
-  defp sign(pem, claims, alg) do
-    Attesto.JWS.sign_compact(pem, jose_header(pem, alg), claims)
-  end
-
-  defp jose_header(pem, alg) do
-    %{"alg" => alg, "kid" => Key.kid(pem), "typ" => @header_typ}
   end
 
   defp lifetime_seconds(opts) do

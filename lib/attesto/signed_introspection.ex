@@ -29,7 +29,7 @@ defmodule Attesto.SignedIntrospection do
   with that pinned algorithm (never `none`).
   """
 
-  alias Attesto.{Config, JWS, Key, NumericDate, SigningAlg}
+  alias Attesto.{Config, JWS, NumericDate}
 
   # RFC 9701 §5: the explicit media type of a signed introspection response.
   @header_typ "token-introspection+jwt"
@@ -68,11 +68,7 @@ defmodule Attesto.SignedIntrospection do
       }
       |> put_exp(now, opts)
 
-    pem = config.keystore.signing_pem()
-    alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
-    header = %{"alg" => alg, "kid" => Key.kid(pem), "typ" => @header_typ}
-
-    {:ok, JWS.sign_compact(pem, header, claims)}
+    {:ok, JWS.sign_current(config.keystore, claims, typ: @header_typ)}
   end
 
   @doc "The JOSE header `typ` a signed introspection response carries (RFC 9701 §5)."

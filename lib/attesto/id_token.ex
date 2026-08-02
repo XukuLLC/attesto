@@ -187,9 +187,9 @@ defmodule Attesto.IDToken do
          {:ok, extra} <- normalize_extra_claims(opts) do
       iat = NumericDate.now(opts)
       lifetime = lifetime_seconds(opts)
-      pem = config.keystore.signing_pem()
-      jwk = Key.jwk(pem)
-      alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
+      signing_context = JWS.current_signing_context(config.keystore)
+      jwk = signing_context.jwk
+      alg = signing_context.alg
 
       claims =
         %{
@@ -209,7 +209,11 @@ defmodule Attesto.IDToken do
         |> put_optional("sid", Keyword.get(opts, :sid))
         |> Map.merge(extra)
 
-      {:ok, sign(pem, claims, alg)}
+      {:ok,
+       JWS.sign_current(config.keystore, claims,
+         typ: @header_typ,
+         signing_context: signing_context
+       )}
     end
   end
 
@@ -347,18 +351,6 @@ defmodule Attesto.IDToken do
       _other ->
         {:error, :invalid_extra_claims}
     end
-  end
-
-  # Sign via JOSE.JWS (not JOSE.JWT.sign/3, which injects a default
-  # `typ: "JWT"` only when the header omits it): emit the protected header
-  # `jose_header/1` computes verbatim, exactly as `Attesto.Token` does, so
-  # the `typ` is the deliberate `JWT` and the `kid`/`alg` are pinned.
-  defp sign(pem, claims, alg) do
-    Attesto.JWS.sign_compact(pem, jose_header(pem, alg), claims)
-  end
-
-  defp jose_header(pem, alg) do
-    %{"alg" => alg, "kid" => Key.kid(pem), "typ" => @header_typ}
   end
 
   # `:lifetime` may only shorten the default - a larger value (or a

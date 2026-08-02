@@ -2,7 +2,10 @@ defmodule Attesto.JWSTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
+  alias __MODULE__.CurrentKeystore
   alias Attesto.JWS
+  alias Attesto.Key
+  alias Attesto.Test.Factory
 
   defp public_map(key, overrides) do
     {_kty, map} = JOSE.JWK.to_public_map(key)
@@ -16,6 +19,59 @@ defmodule Attesto.JWSTest do
       |> JOSE.JWS.compact()
 
     jwt
+  end
+
+  defp protected_header(jwt), do: jwt |> JOSE.JWS.peek_protected() |> JSON.decode!()
+
+  describe "sign_current/3" do
+    test "derives the correct alg and kid for EC and RSA keys" do
+      for {pem, alg} <- [{Factory.ec_pem(), "ES256"}, {Factory.rsa_pem(), "RS256"}] do
+        CurrentKeystore.install(pem)
+
+        jwt =
+          JWS.sign_current(CurrentKeystore, %{"sub" => "user-123"},
+            typ: "JWT",
+            extra_protected: %{"cty" => "example"}
+          )
+
+        assert protected_header(jwt) == %{
+                 "alg" => alg,
+                 "kid" => Key.kid(pem),
+                 "typ" => "JWT",
+                 "cty" => "example"
+               }
+
+        assert {true, %JOSE.JWT{}, %JOSE.JWS{}} =
+                 JOSE.JWT.verify_strict(Key.jwk(pem), [alg], jwt)
+
+        assert CurrentKeystore.signing_pem_calls() == 1
+      end
+    end
+
+    test "rejects extra protected members that collide with helper-owned fields" do
+      pem = Factory.ec_pem()
+      CurrentKeystore.install(pem)
+
+      for reserved <- ["alg", "kid", "typ"] do
+        assert_raise ArgumentError, fn ->
+          JWS.sign_current(CurrentKeystore, %{"ok" => true}, extra_protected: Map.put(%{}, reserved, "caller-value"))
+        end
+      end
+    end
+
+    test "raises when the current PEM is empty or contains multiple keys" do
+      multi_key_pem = Factory.rsa_pem() <> Factory.ec_pem()
+
+      for pem <- ["", multi_key_pem] do
+        CurrentKeystore.install(pem)
+
+        assert_raise ArgumentError, fn ->
+          JWS.sign_current(CurrentKeystore, %{"ok" => true})
+        end
+
+        assert CurrentKeystore.signing_pem_calls() == 1
+      end
+    end
   end
 
   test "keeps candidate order and narrows by kid after algorithm filtering" do
@@ -157,5 +213,26 @@ defmodule Attesto.JWSTest do
       assert {:error, :unsupported_crit} = JWS.reject_unsupported_crit(%{"crit" => []})
       assert {:error, :unsupported_crit} = JWS.reject_unsupported_crit(%{"crit" => "b64"})
     end
+  end
+
+  defmodule CurrentKeystore do
+    @moduledoc false
+    @behaviour Attesto.Keystore
+
+    def install(pem) when is_binary(pem) do
+      Process.put({__MODULE__, :pem}, pem)
+      Process.put({__MODULE__, :calls}, 0)
+    end
+
+    def signing_pem_calls, do: Process.get({__MODULE__, :calls}, 0)
+
+    @impl true
+    def signing_pem do
+      Process.put({__MODULE__, :calls}, signing_pem_calls() + 1)
+      Process.get({__MODULE__, :pem})
+    end
+
+    @impl true
+    def verification_pems, do: [Process.get({__MODULE__, :pem})]
   end
 end

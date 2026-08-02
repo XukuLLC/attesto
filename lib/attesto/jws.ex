@@ -1,8 +1,7 @@
 defmodule Attesto.JWS do
   @moduledoc false
 
-  alias Attesto.Key
-  alias Attesto.SigningAlg
+  alias Attesto.{Key, SigningAlg, Thumbprint}
 
   @type compact_segments :: %{
           protected_segment: binary(),
@@ -11,6 +10,13 @@ defmodule Attesto.JWS do
         }
 
   @type verification_candidate :: {term(), binary(), JOSE.JWK.t()}
+
+  @type signing_context :: %{
+          pem: binary(),
+          jwk: JOSE.JWK.t(),
+          alg: binary(),
+          kid: binary()
+        }
 
   @doc false
   @spec decode_compact(binary(), keyword()) ::
@@ -358,21 +364,99 @@ defmodule Attesto.JWS do
       raise(ArgumentError, ":malformed_result must be :halt or :continue and :claims_map?/return_key? must be boolean")
 
   @doc false
+  @spec current_signing_context(module()) :: signing_context()
+  def current_signing_context(keystore) when is_atom(keystore) do
+    pem = keystore.signing_pem()
+    jwk = Key.signing_jwk(pem)
+    alg = SigningAlg.for_jwk(keystore, jwk, signing?: true)
+    {:ok, kid} = Thumbprint.of_jwk(jwk)
+
+    %{pem: pem, jwk: jwk, alg: alg, kid: kid}
+  end
+
+  @doc """
+  Sign claims with a keystore's current signing key.
+
+  The key is loaded exactly once from the PEM returned by signing_pem/0.
+  alg and kid are derived from that same parsed key, while typ and
+  extra_protected carry caller-specific protected-header members. The helper
+  owns alg, kid, and typ; collisions in extra_protected raise ArgumentError.
+
+  signing_context is an internal escape hatch for a caller that already needs
+  the current parsed key to construct key-dependent claims. It must be a
+  context returned by current_signing_context/1 and avoids reading a rotating
+  keystore a second time.
+  """
+  @spec sign_current(module(), map(), keyword()) :: String.t()
+  def sign_current(keystore, claims, opts \\ [])
+
+  def sign_current(keystore, claims, opts) when is_atom(keystore) and is_map(claims) and is_list(opts) do
+    context = Keyword.get(opts, :signing_context) || current_signing_context(keystore)
+    sign_with_context(context, claims, opts)
+  end
+
+  defp sign_with_context(%{jwk: %JOSE.JWK{}, alg: alg, kid: kid} = context, claims, opts)
+       when is_map(claims) and is_list(opts) do
+    header = current_header(alg, kid, opts)
+    sign_compact_with_jwk(context.jwk, header, claims)
+  end
+
+  defp sign_with_context(_context, _claims, _opts),
+    do: raise(ArgumentError, ":signing_context must come from current_signing_context/1")
+
+  defp current_header(alg, kid, opts) do
+    typ = Keyword.get(opts, :typ)
+    extra_protected = Keyword.get(opts, :extra_protected, %{})
+
+    validate_typ!(typ)
+    validate_extra_protected!(extra_protected)
+
+    %{"alg" => alg, "kid" => kid}
+    |> maybe_put_typ(typ)
+    |> Map.merge(extra_protected)
+  end
+
+  defp maybe_put_typ(header, nil), do: header
+  defp maybe_put_typ(header, typ), do: Map.put(header, "typ", typ)
+
+  defp validate_typ!(typ) when is_binary(typ) or is_nil(typ), do: :ok
+
+  defp validate_typ!(typ), do: raise(ArgumentError, ":typ must be a string or nil; got #{inspect(typ)}")
+
+  defp validate_extra_protected!(extra) when is_map(extra) do
+    if Enum.any?(Map.keys(extra), &reserved_header_key?/1) do
+      raise ArgumentError, ":extra_protected cannot override alg, kid, or typ"
+    end
+
+    :ok
+  end
+
+  defp validate_extra_protected!(extra),
+    do: raise(ArgumentError, ":extra_protected must be a map; got #{inspect(extra)}")
+
+  defp reserved_header_key?(key) when key in ["alg", "kid", "typ", :alg, :kid, :typ], do: true
+  defp reserved_header_key?(_key), do: false
+
+  @doc false
   @spec sign_compact(String.t(), map(), map()) :: String.t()
   def sign_compact(pem, header, claims) when is_binary(pem) and is_map(header) and is_map(claims) do
+    header |> Map.fetch!("alg") |> SigningAlg.validate!()
+    pem |> Key.signing_jwk() |> sign_compact_with_jwk(header, claims)
+  end
+
+  defp sign_compact_with_jwk(jwk, header, claims) do
     alg = header |> Map.fetch!("alg") |> SigningAlg.validate!()
     payload = JSON.encode!(claims)
 
     case alg do
-      "PS" <> _ -> sign_ps_compact(pem, header, payload, alg)
-      _ -> sign_jose_compact(pem, header, payload)
+      "PS" <> _ -> sign_ps_compact(jwk, header, payload, alg)
+      _ -> sign_jose_compact(jwk, header, payload)
     end
   end
 
-  defp sign_jose_compact(pem, header, payload) do
+  defp sign_jose_compact(jwk, header, payload) do
     signed =
-      pem
-      |> Key.signing_jwk()
+      jwk
       |> JOSE.JWS.sign(payload, header)
 
     {_protected_header, compact} = JOSE.JWS.compact(signed)
@@ -382,7 +466,7 @@ defmodule Attesto.JWS do
   # RFC 7518 §3.5: RSASSA-PSS salt length MUST equal the hash output length.
   # JOSE 1.11 signs PS* with OpenSSL's maximum salt length, which it can verify
   # itself but strict FAPI/OIDF validators correctly reject.
-  defp sign_ps_compact(pem, header, payload, alg) do
+  defp sign_ps_compact(jwk, header, payload, alg) do
     encoded_header = encode_segment(header)
     encoded_payload = Base.url_encode64(payload, padding: false)
     signing_input = encoded_header <> "." <> encoded_payload
@@ -391,7 +475,7 @@ defmodule Attesto.JWS do
       :public_key.sign(
         signing_input,
         hash_alg(alg),
-        private_key(pem),
+        private_key(jwk),
         pss_opts(alg)
       )
 
@@ -404,12 +488,7 @@ defmodule Attesto.JWS do
     |> Base.url_encode64(padding: false)
   end
 
-  defp private_key(pem) do
-    pem
-    |> :public_key.pem_decode()
-    |> List.first()
-    |> :public_key.pem_entry_decode()
-  end
+  defp private_key(jwk), do: jwk |> JOSE.JWK.to_key() |> elem(1)
 
   defp pss_opts(alg) do
     [

@@ -72,7 +72,17 @@ defmodule Attesto.SigningAlg do
   """
   @spec for_key(module(), String.t(), keyword()) :: alg()
   def for_key(keystore, pem, opts \\ []) when is_atom(keystore) and is_binary(pem) do
-    jwk = Key.jwk(pem)
+    for_jwk(keystore, Key.jwk(pem), opts)
+  end
+
+  @doc """
+  Resolve the algorithm for an already parsed key in the keystore.
+
+  This is the key-preserving counterpart to for_key/3; callers that already
+  loaded a PEM can derive its algorithm without parsing the PEM a second time.
+  """
+  @spec for_jwk(module(), JOSE.JWK.t(), keyword()) :: alg()
+  def for_jwk(keystore, %JOSE.JWK{} = jwk, opts \\ []) when is_atom(keystore) and is_list(opts) do
     {:ok, kid} = Thumbprint.of_jwk(jwk)
 
     key_algs(keystore)
