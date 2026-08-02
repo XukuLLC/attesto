@@ -39,7 +39,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{SecureCompare, SigningAlg}
+  alias Attesto.{JWS, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -217,6 +217,7 @@ defmodule Attesto.SdJwt do
 
   def verify_key_binding(%{} = verified, holder_jwk, opts) when is_map(holder_jwk) do
     with {:ok, header} <- peek_header(verified.key_binding_jwt),
+         :ok <- check_crit(header, :invalid_key_binding),
          :ok <- check_kb_typ(header),
          {:ok, claims} <- verify_kb_signature(verified.key_binding_jwt, header, holder_jwk, opts),
          :ok <- check_kb_nonce(claims, opts),
@@ -403,6 +404,7 @@ defmodule Attesto.SdJwt do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     with {:ok, header} <- peek_header(jwt),
+         :ok <- check_crit(header, :malformed),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
          true <- alg in accepted do
@@ -423,6 +425,13 @@ defmodule Attesto.SdJwt do
   end
 
   defp check_typ(_header, _accepted), do: {:error, :invalid_typ}
+
+  defp check_crit(header, error) do
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, error}
+    end
+  end
 
   defp verify_against_keys(_jwt, _alg, []), do: {:error, :invalid_signature}
 
@@ -539,12 +548,9 @@ defmodule Attesto.SdJwt do
   defp keys(%{} = jwk), do: [jwk]
 
   defp peek_header(jwt) do
-    with [header_b64, _, _] <- String.split(jwt, "."),
-         {:ok, bytes} <- Base.url_decode64(header_b64, padding: false),
-         {:ok, header} <- JSON.decode(bytes) do
-      {:ok, header}
-    else
-      _ -> {:error, :malformed}
+    case JWS.peek_json(jwt, :protected) do
+      {:ok, header} -> {:ok, header}
+      {:error, _reason} -> {:error, :malformed}
     end
   end
 

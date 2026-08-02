@@ -45,6 +45,7 @@ defmodule Attesto.IdentityAssertion do
       lifetime `exp - iat` does not exceed `:max_lifetime_seconds` when set.
   """
 
+  alias Attesto.JWS
   alias Attesto.SigningAlg
 
   @typ "oauth-id-jag+jwt"
@@ -88,9 +89,8 @@ defmodule Attesto.IdentityAssertion do
   """
   @spec peek_issuer(String.t()) :: {:ok, String.t()} | :error
   def peek_issuer(jwt) when is_binary(jwt) do
-    with [_header, payload, _signature] <- String.split(jwt, ".", parts: 3),
-         {:ok, json} <- Base.url_decode64(payload, padding: false),
-         {:ok, %{"iss" => iss}} when is_binary(iss) and iss != "" <- JSON.decode(json) do
+    with {:ok, claims} <- peek_json(jwt, :payload),
+         {:ok, iss} when is_binary(iss) and iss != "" <- Map.fetch(claims, "iss") do
       {:ok, iss}
     else
       _ -> :error
@@ -129,8 +129,7 @@ defmodule Attesto.IdentityAssertion do
   def verify(jwt, trusted_jwks, opts \\ [])
 
   def verify(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
-    with :ok <- check_compact_form(jwt),
-         {:ok, header} <- peek_header(jwt),
+    with {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
          :ok <- check_supported_alg(header),
          :ok <- check_typ(header),
@@ -196,25 +195,25 @@ defmodule Attesto.IdentityAssertion do
 
   # ── Header checks ─────────────────────────────────────────────────────────
 
-  defp check_compact_form(jwt) do
-    case String.split(jwt, ".") do
-      [_, _, _] -> :ok
-      _ -> {:error, :malformed}
-    end
-  end
-
   defp peek_header(jwt) do
-    with [header, _payload, _signature] <- String.split(jwt, ".", parts: 3),
-         {:ok, json} <- Base.url_decode64(header, padding: false),
-         {:ok, %{} = map} <- JSON.decode(json) do
-      {:ok, map}
-    else
-      _ -> {:error, :malformed}
+    case peek_json(jwt, :protected) do
+      {:ok, map} -> {:ok, map}
+      {:error, _reason} -> {:error, :malformed}
     end
   end
 
   defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
+    end
+  end
+
+  defp peek_json(jwt, segment) do
+    case JWS.peek_json(jwt, segment) do
+      {:ok, map} -> {:ok, map}
+      {:error, _reason} -> {:error, :malformed}
+    end
   end
 
   defp check_supported_alg(%{"alg" => "none"}), do: {:error, :unsupported_alg}

@@ -22,7 +22,7 @@ defmodule Attesto.CredentialProof do
   Conn-free and fail-closed.
   """
 
-  alias Attesto.{Key, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, SigningAlg, Thumbprint}
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
@@ -67,6 +67,7 @@ defmodule Attesto.CredentialProof do
   def verify_jwt(proof, opts) when is_binary(proof) and is_list(opts) do
     with {:ok, header} <- parse_header(proof),
          :ok <- check_typ(header),
+         :ok <- check_crit(header),
          {:ok, alg} <- check_alg(header, opts),
          {:ok, jwk_map, jwk} <- extract_jwk(header, alg),
          {:ok, claims} <- verify_signature(proof, alg, jwk),
@@ -84,12 +85,16 @@ defmodule Attesto.CredentialProof do
   # ── header ───────────────────────────────────────────────────────────────
 
   defp parse_header(proof) do
-    with [header_b64 | _] <- String.split(proof, "."),
-         {:ok, bytes} <- Base.url_decode64(header_b64, padding: false),
-         {:ok, header} when is_map(header) <- JSON.decode(bytes) do
-      {:ok, header}
-    else
-      _ -> {:error, :invalid_proof}
+    case JWS.peek_json(proof, :protected) do
+      {:ok, header} -> {:ok, header}
+      {:error, _reason} -> {:error, :invalid_proof}
+    end
+  end
+
+  defp check_crit(header) do
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :invalid_proof}
     end
   end
 

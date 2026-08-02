@@ -17,6 +17,7 @@ defmodule Attesto.ClientAssertion do
   presented JWT header names it.
   """
 
+  alias Attesto.JWS
   alias Attesto.SigningAlg
 
   @assertion_type "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -46,8 +47,7 @@ defmodule Attesto.ClientAssertion do
   @doc "Peek `iss` from an assertion without trusting it."
   @spec peek_client_id(String.t()) :: {:ok, String.t()} | {:error, :invalid_assertion}
   def peek_client_id(assertion) when is_binary(assertion) do
-    with :ok <- check_compact_form(assertion),
-         {:ok, claims} <- peek_payload(assertion),
+    with {:ok, claims} <- peek_payload(assertion),
          iss when is_binary(iss) and iss != "" <- Map.get(claims, "iss") do
       {:ok, iss}
     else
@@ -81,8 +81,7 @@ defmodule Attesto.ClientAssertion do
 
   def verify(assertion, client_id, expected_audience, trusted_jwks, opts)
       when is_binary(assertion) and is_binary(client_id) and is_list(opts) do
-    with :ok <- check_compact_form(assertion),
-         {:ok, header} <- peek_header(assertion),
+    with {:ok, header} <- peek_header(assertion),
          :ok <- check_crit(header),
          {:ok, claims} <- verify_signature(assertion, header, trusted_jwks, opts),
          :ok <- check_client_id(claims, client_id),
@@ -192,40 +191,19 @@ defmodule Attesto.ClientAssertion do
   end
 
   defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
-  end
-
-  defp check_compact_form(jwt) do
-    case String.split(jwt, ".") do
-      [_, _, _] = segments ->
-        if Enum.all?(segments, &canonical_base64url?/1),
-          do: :ok,
-          else: {:error, :invalid_assertion}
-
-      _ ->
-        {:error, :invalid_assertion}
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
     end
   end
 
-  defp canonical_base64url?(segment) do
-    case Base.url_decode64(segment, padding: false) do
-      {:ok, decoded} -> Base.url_encode64(decoded, padding: false) == segment
-      :error -> false
-    end
-  end
+  defp peek_header(jwt), do: peek_json(jwt, :protected)
+  defp peek_payload(jwt), do: peek_json(jwt, :payload)
 
-  defp peek_header(jwt), do: peek_segment(jwt, 0)
-  defp peek_payload(jwt), do: peek_segment(jwt, 1)
-
-  defp peek_segment(jwt, index) do
-    with segment when is_binary(segment) <- Enum.at(String.split(jwt, "."), index),
-         {:ok, decoded} <- Base.url_decode64(segment, padding: false),
-         {:ok, %{} = map} <- JSON.decode(decoded) do
-      {:ok, map}
-    else
-      _ -> {:error, :invalid_assertion}
+  defp peek_json(jwt, segment) do
+    case JWS.peek_json(jwt, segment) do
+      {:ok, map} -> {:ok, map}
+      {:error, _reason} -> {:error, :invalid_assertion}
     end
-  rescue
-    _ -> {:error, :invalid_assertion}
   end
 end

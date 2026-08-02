@@ -76,6 +76,7 @@ defmodule Attesto.IDToken do
   """
 
   alias Attesto.Config
+  alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.SigningAlg
 
@@ -370,8 +371,7 @@ defmodule Attesto.IDToken do
   # reject any `crit` member (RFC 7515 §4.1.11), select keystore keys by
   # `kid`, and verify strictly against each trusted key's bound algorithm.
   defp verify_signature(config, jwt) do
-    with :ok <- check_compact_form(jwt),
-         {:ok, header} <- peek_protected_header(jwt),
+    with {:ok, header} <- peek_protected_header(jwt),
          :ok <- check_crit(header),
          :ok <- check_header_typ(header) do
       case candidate_jwks(config, Map.get(header, "kid")) do
@@ -381,38 +381,11 @@ defmodule Attesto.IDToken do
     end
   end
 
-  # RFC 7515 §2 / RFC 4648 §5: a compact-JWS segment is unpadded base64url
-  # in *canonical* form. Mirror Attesto.Token exactly: round-trip each
-  # segment through Base.url_decode64/encode64 and require it come back
-  # byte-identical, rejecting `=` padding, non-alphabet bytes, AND a partial
-  # final quantum whose unused low bits are non-zero (two distinct trailing
-  # characters would otherwise decode to the same bytes, letting a
-  # re-encoded variant of the issuer's signature verify). This happens
-  # before JOSE, whose decoder would tolerantly normalise such a segment.
-  # The empty signature segment of an unsecured `alg:none` token round-trips
-  # ("" decodes and re-encodes to ""), so it passes this boundary and is
-  # classified downstream as :invalid_signature, not :invalid_token.
-  defp check_compact_form(jwt) do
-    case String.split(jwt, ".") do
-      [_, _, _] = segments ->
-        if Enum.all?(segments, &canonical_base64url?/1),
-          do: :ok,
-          else: {:error, :invalid_token}
-
-      _ ->
-        {:error, :invalid_token}
-    end
-  end
-
-  defp canonical_base64url?(segment) do
-    case Base.url_decode64(segment, padding: false) do
-      {:ok, decoded} -> Base.url_encode64(decoded, padding: false) == segment
-      :error -> false
-    end
-  end
-
   defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
+    end
   end
 
   defp check_header_typ(%{"typ" => @header_typ}), do: :ok
@@ -459,18 +432,10 @@ defmodule Attesto.IDToken do
   end
 
   defp peek_protected_header(jwt) do
-    case JOSE.JWS.peek_protected(jwt) do
-      protected when is_binary(protected) ->
-        case JSON.decode(protected) do
-          {:ok, %{} = header} -> {:ok, header}
-          _ -> {:error, :invalid_token}
-        end
-
-      _ ->
-        {:error, :invalid_token}
+    case JWS.peek_json(jwt, :protected) do
+      {:ok, header} -> {:ok, header}
+      {:error, _reason} -> {:error, :invalid_token}
     end
-  rescue
-    _ -> {:error, :invalid_token}
   end
 
   # ----- internal: claim checks -----

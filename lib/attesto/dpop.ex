@@ -84,6 +84,7 @@ defmodule Attesto.DPoP do
   prefer the defer-then-record shape above.
   """
 
+  alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.SecureCompare
   alias Attesto.Thumbprint
@@ -311,49 +312,10 @@ defmodule Attesto.DPoP do
   # than letting `JOSE.JWT.verify_strict/3` do it: we need the embedded
   # `jwk` BEFORE we can verify the signature.
   defp parse_header(proof) do
-    case String.split(proof, ".") do
-      # Allow an empty signature segment: an `alg=none` "unsecured JWS"
-      # has the literal compact form `<header>.<payload>.`. We parse the
-      # header anyway so `check_alg/1` can reject it explicitly with
-      # `:invalid_alg`, rather than collapsing the alg-confusion variant
-      # into the opaque `:invalid_proof` bucket.
-      [header_b64, _payload_b64, _sig_b64] when header_b64 != "" ->
-        decode_header(header_b64)
-
-      _ ->
-        {:error, :invalid_proof}
+    case JWS.peek_json(proof, :protected) do
+      {:ok, header} -> {:ok, header}
+      {:error, _reason} -> {:error, :invalid_proof}
     end
-  end
-
-  defp decode_header(b64) do
-    with {:ok, bytes} <- url_decode(b64),
-         {:ok, map} <- json_decode(bytes),
-         true <- is_map(map) do
-      {:ok, map}
-    else
-      _ -> {:error, :invalid_proof}
-    end
-  end
-
-  # Strict, canonical, unpadded base64url (RFC 7515 §2): decode and require the
-  # input to be the canonical encoding of the bytes (no padding, no
-  # non-significant trailing bits). This matches the canonical-form check the
-  # Token/IDToken/ClientAssertion/RequestObject verifiers apply, so the DPoP
-  # header cannot be presented in a non-canonical/aliased form.
-  defp url_decode(s) do
-    case Base.url_decode64(s, padding: false) do
-      {:ok, decoded} ->
-        if Base.url_encode64(decoded, padding: false) == s, do: {:ok, decoded}, else: :error
-
-      :error ->
-        :error
-    end
-  end
-
-  defp json_decode(bytes) do
-    {:ok, JSON.decode!(bytes)}
-  rescue
-    _ -> :error
   end
 
   defp check_typ(%{"typ" => @proof_typ}), do: :ok
@@ -370,7 +332,10 @@ defmodule Attesto.DPoP do
   # critical extension Attesto does not implement (Attesto implements none)
   # is rejected before the signature is trusted.
   defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
+    end
   end
 
   defp extract_jwk(%{"jwk" => jwk} = header) when is_map(jwk) and map_size(jwk) > 0 do

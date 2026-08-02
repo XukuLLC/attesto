@@ -4,6 +4,154 @@ defmodule Attesto.JWS do
   alias Attesto.Key
   alias Attesto.SigningAlg
 
+  @type compact_segments :: %{
+          protected_segment: binary(),
+          payload_segment: binary(),
+          signature_segment: binary()
+        }
+
+  @doc false
+  @spec decode_compact(binary(), keyword()) ::
+          {:ok, compact_segments()}
+          | {:error, :malformed_compact | :non_canonical_base64url}
+  def decode_compact(jwt, opts \\ [])
+
+  def decode_compact(jwt, opts) when is_binary(jwt) and is_list(opts) do
+    canonical? = Keyword.get(opts, :canonical, true)
+    allow_empty_signature? = Keyword.get(opts, :allow_empty_signature, false)
+
+    case :binary.split(jwt, ".", [:global]) do
+      [protected, payload, signature] ->
+        decode_compact_segments(
+          protected,
+          payload,
+          signature,
+          canonical?,
+          allow_empty_signature?
+        )
+
+      _ ->
+        {:error, :malformed_compact}
+    end
+  rescue
+    _ -> {:error, :malformed_compact}
+  end
+
+  def decode_compact(_jwt, _opts), do: {:error, :malformed_compact}
+
+  defp decode_compact_segments(protected, payload, signature, canonical?, allow_empty_signature?) do
+    with :ok <- check_empty_signature(signature, allow_empty_signature?),
+         :ok <- decode_segments([protected, payload, signature], canonical?) do
+      {:ok,
+       %{
+         protected_segment: protected,
+         payload_segment: payload,
+         signature_segment: signature
+       }}
+    end
+  end
+
+  defp check_empty_signature("", false), do: {:error, :malformed_compact}
+  defp check_empty_signature(_signature, _allow_empty_signature), do: :ok
+
+  @doc false
+  @spec peek_json(binary(), :protected | :payload, keyword()) ::
+          {:ok, map()}
+          | {:error, :malformed_compact | :non_canonical_base64url | :invalid_json}
+  def peek_json(jwt, segment, opts \\ [])
+
+  def peek_json(jwt, segment, opts) when is_binary(jwt) and segment in [:protected, :payload] and is_list(opts) do
+    with {:ok, compact} <-
+           decode_compact(jwt,
+             canonical: Keyword.get(opts, :canonical, true),
+             # A peek must let the caller inspect an unsecured JWS header and
+             # return its protocol-specific `alg=none` error before JOSE runs.
+             allow_empty_signature: Keyword.get(opts, :allow_empty_signature, true)
+           ),
+         encoded = Map.fetch!(compact, segment_key(segment)),
+         {:ok, bytes} <- decode_segment(encoded),
+         {:ok, map} <- decode_json_map(bytes) do
+      {:ok, map}
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def peek_json(_jwt, _segment, _opts), do: {:error, :malformed_compact}
+
+  @doc false
+  @spec reject_unsupported_crit(map(), keyword()) :: :ok | {:error, :unsupported_crit}
+  def reject_unsupported_crit(header, opts \\ [])
+
+  def reject_unsupported_crit(header, opts) when is_map(header) and is_list(opts) do
+    supported = Keyword.get(opts, :supported, [])
+
+    case Map.fetch(header, "crit") do
+      :error ->
+        :ok
+
+      {:ok, crit} when is_list(crit) and crit != [] ->
+        if Enum.all?(crit, &(is_binary(&1) and &1 in supported)),
+          do: :ok,
+          else: {:error, :unsupported_crit}
+
+      _ ->
+        # An empty or non-array `crit` member is malformed, even when the
+        # caller understands no critical extensions.
+        {:error, :unsupported_crit}
+    end
+  end
+
+  def reject_unsupported_crit(_header, _opts), do: {:error, :unsupported_crit}
+
+  defp decode_segments(segments, canonical?) do
+    Enum.reduce_while(segments, :ok, fn segment, :ok ->
+      case check_segment(segment, canonical?) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp check_segment(segment, canonical?) do
+    with {:ok, decoded} <- decode_segment(segment),
+         :ok <- check_canonical_segment(segment, decoded, canonical?) do
+      :ok
+    else
+      {:error, :invalid_base64url} -> {:error, :malformed_compact}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp check_canonical_segment(_segment, _decoded, false), do: :ok
+
+  defp check_canonical_segment(segment, decoded, true) do
+    if Base.url_encode64(decoded, padding: false) == segment,
+      do: :ok,
+      else: {:error, :non_canonical_base64url}
+  end
+
+  defp decode_segment(segment) do
+    case Base.url_decode64(segment, padding: false) do
+      {:ok, decoded} -> {:ok, decoded}
+      :error -> {:error, :invalid_base64url}
+    end
+  rescue
+    _ -> {:error, :invalid_base64url}
+  end
+
+  defp decode_json_map(bytes) do
+    case JSON.decode(bytes) do
+      {:ok, %{} = map} -> {:ok, map}
+      _ -> {:error, :invalid_json}
+    end
+  rescue
+    _ -> {:error, :invalid_json}
+  end
+
+  defp segment_key(:protected), do: :protected_segment
+  defp segment_key(:payload), do: :payload_segment
+
   @doc false
   @spec sign_compact(String.t(), map(), map()) :: String.t()
   def sign_compact(pem, header, claims) when is_binary(pem) and is_map(header) and is_map(claims) do

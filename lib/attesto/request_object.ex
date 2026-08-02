@@ -8,6 +8,7 @@ defmodule Attesto.RequestObject do
   second unsigned parameter encoding.
   """
 
+  alias Attesto.JWS
   alias Attesto.SigningAlg
 
   @clock_skew_seconds 60
@@ -116,8 +117,7 @@ defmodule Attesto.RequestObject do
   def verify_with_claims(jwt, trusted_jwks, opts \\ [])
 
   def verify_with_claims(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
-    with :ok <- check_compact_form(jwt),
-         {:ok, header} <- peek_header(jwt),
+    with {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
          :ok <- check_supported_alg(header),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
@@ -412,7 +412,10 @@ defmodule Attesto.RequestObject do
   end
 
   defp check_crit(header) do
-    if Map.has_key?(header, "crit"), do: {:error, :unsupported_critical_header}, else: :ok
+    case JWS.reject_unsupported_crit(header, supported: []) do
+      :ok -> :ok
+      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
+    end
   end
 
   defp check_supported_alg(%{"alg" => "none"}), do: {:error, :request_not_supported}
@@ -464,36 +467,10 @@ defmodule Attesto.RequestObject do
     end
   end
 
-  defp check_compact_form(jwt) do
-    case String.split(jwt, ".") do
-      [_, _, _] = segments ->
-        if Enum.all?(segments, &canonical_base64url?/1),
-          do: :ok,
-          else: {:error, :invalid_request_object}
-
-      _ ->
-        {:error, :invalid_request_object}
+  defp peek_header(jwt) do
+    case JWS.peek_json(jwt, :protected) do
+      {:ok, map} -> {:ok, map}
+      {:error, _reason} -> {:error, :invalid_request_object}
     end
-  end
-
-  defp canonical_base64url?(segment) do
-    case Base.url_decode64(segment, padding: false) do
-      {:ok, decoded} -> Base.url_encode64(decoded, padding: false) == segment
-      :error -> false
-    end
-  end
-
-  defp peek_header(jwt), do: peek_segment(jwt, 0)
-
-  defp peek_segment(jwt, index) do
-    with segment when is_binary(segment) <- Enum.at(String.split(jwt, "."), index),
-         {:ok, decoded} <- Base.url_decode64(segment, padding: false),
-         {:ok, %{} = map} <- JSON.decode(decoded) do
-      {:ok, map}
-    else
-      _ -> {:error, :invalid_request_object}
-    end
-  rescue
-    _ -> {:error, :invalid_request_object}
   end
 end
