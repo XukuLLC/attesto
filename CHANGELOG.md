@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-02
+
 ### Security
 
 - DPoP replay identities are now namespaced by the proof key. `jti` uniqueness
