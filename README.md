@@ -358,16 +358,28 @@ fixed plug.
 ## Security telemetry
 
 Most refusals are routine — an expired token, an unknown client, a scope
-that was not granted. Three are not. Each of these means someone is
-holding a credential they should not, and each is emitted as a
-[`:telemetry`](https://hexdocs.pm/telemetry) event so it can reach a pager
-or a SIEM without wrapping every call site:
+that was not granted. Three are the shape a stolen credential makes, and
+each is emitted as a [`:telemetry`](https://hexdocs.pm/telemetry) event so
+it can reach a pager or a SIEM without wrapping every call site:
 
 | Event | Fires when |
 |---|---|
 | `[:attesto, :refresh_token, :reuse_detected]` | a rotated refresh token is presented again — **the family has already been revoked**, so this is the only notice that the session ended for a reason |
 | `[:attesto, :dpop, :replay_detected]` | a DPoP proof carries a `jti` the replay store already recorded |
 | `[:attesto, :token, :sender_constraint_mismatch]` | a DPoP- or mTLS-bound token is presented with the wrong proof of possession |
+
+**Indicators, not verdicts.** None of them proves theft. A client can
+present its own bound token under a second key as often as it likes, and a
+key rotation or a stale cached key produces the same mismatch innocently —
+so rate-limit and correlate before paging. `reuse_detected` is the one
+worth escalating fastest, because reaching it has already revoked the
+family. A rotation that finds its family revoked underneath it returns
+`:grant_revoked` and emits **nothing**: an ordinary logout can cause it,
+and the library cannot tell the two apart.
+
+**Handlers run synchronously.** `:telemetry` invokes them on the calling
+process with no timeout, so a handler that blocks blocks the refusal that
+produced the event. Hand work to a queue and return.
 
 ```elixir
 :telemetry.attach_many(
