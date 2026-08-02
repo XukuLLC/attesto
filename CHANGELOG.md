@@ -13,9 +13,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every (required, granted) pair, so a large caller-supplied `scope` value - on
   which RFC 6749 §3.3 places no bound - was a denial-of-service lever: 500,000
   scope tokens took ~20 seconds. Classifying the granted set once and testing
-  each required scope against that index in O(1) drops the same input to ~40ms,
-  with an identical result (pinned by a property test against the naive form).
-  Surfaced by mining the class behind Keycloak CVE-2026-4634 against this code.
+  each required scope against that index in O(1) drops the same input to ~40ms.
+  For every proper-list input (the typespec's contract) the result is identical
+  to the naive form, pinned by a generated property test; an improper list now
+  raises rather than short-circuiting, a louder failure on a value the contract
+  already forbids. Surfaced by mining the class behind Keycloak CVE-2026-4634.
 
 ## [1.6.0] - 2026-08-01
 

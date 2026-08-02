@@ -178,10 +178,15 @@ defmodule Attesto.Scope do
     # per-pair allocation. Since `required` is the caller-supplied requested
     # scope at a token endpoint, that made a large `scope` parameter a
     # denial-of-service lever (RFC 6749 §3.3 places no bound on the value). This
-    # form is O(|granted| + |required|) and allocates once per side, so the same
-    # 500k-token input that took ~20s is now flat. The result is identical to
-    # the naive form (verified by property test): the index encodes exactly the
-    # three ways `covers?/3` can hold.
+    # form removes that cross-product scan: `granted` is classified once and
+    # each required scope is then an O(1) index lookup, so the 500k-token input
+    # that took ~20s is now ~40ms. For every input the typespec allows - proper
+    # lists of binaries - the result is identical to the naive form (the index
+    # encodes exactly the three ways `covers?/3` can hold; a 500-run generated
+    # property pins it). An IMPROPER list is the one behaviour change: the naive
+    # form could short-circuit before reaching the improper tail, while the
+    # eager classification here traverses it and raises - a louder failure on a
+    # value the contract already forbids.
     index = index_granted(catalog, granted)
     Enum.all?(required, &granted_by_index?(catalog, index, &1))
   end

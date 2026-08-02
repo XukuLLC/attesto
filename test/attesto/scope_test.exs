@@ -1,6 +1,7 @@
 defmodule Attesto.ScopeTest do
   @moduledoc false
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Attesto.Scope
 
@@ -342,35 +343,47 @@ defmodule Attesto.ScopeTest do
       %{catalog: Scope.new_catalog(Enum.map(1..200, &"res#{&1}.read") ++ Enum.map(1..200, &"res#{&1}.write"))}
     end
 
-    # The indexed grants_all?/3 must agree with the naive per-required
-    # Enum.all?(grants?/3) form on every input. Cover exact, resource-wildcard,
-    # full-wildcard, unknown, and mixed granted sets.
-    test "agrees with the naive Enum.all?(grants?) form", %{catalog: catalog} do
+    # Exercise arbitrary proper lists, including catalogs that contain entries
+    # which also parse as grant wildcards. This is a generated property rather
+    # than a fixed table so interactions among catalog membership, wildcard
+    # classification, duplicate/empty values, and non-binary members are covered.
+    property "agrees with the naive Enum.all?(grants?) form" do
+      catalog_values = ["res.read", "res.write", "res.*", "other.read", "unknown.*", "*", "", <<255>>]
+      input_values = catalog_values ++ ["res.read.*", ".*", "*.read", nil, 123, :scope]
+
+      check all(
+              catalog_entries <- list_of(member_of(catalog_values), max_length: 8),
+              granted <- list_of(member_of(input_values), max_length: 12),
+              required <- list_of(member_of(input_values), min_length: 1, max_length: 8),
+              max_runs: 500
+            ) do
+        catalog = Scope.new_catalog(catalog_entries)
+        naive = Enum.all?(required, &Scope.grants?(catalog, granted, &1))
+
+        assert Scope.grants_all?(catalog, granted, required) == naive,
+               "mismatch: catalog=#{inspect(catalog_entries)} granted=#{inspect(granted)} " <>
+                 "required=#{inspect(required)}"
+      end
+    end
+
+    test "agrees on wildcard/catalog ambiguities and malformed grant members" do
+      catalog = Scope.new_catalog(["res.read", "res.*", "other.read"])
       naive = fn granted, required -> Enum.all?(required, &Scope.grants?(catalog, granted, &1)) end
 
-      granted_sets = [
-        ["res1.read", "res2.read"],
-        ["res1.*"],
-        ["*"],
-        ["res1.*", "res2.write", "res3.read"],
-        ["res1.read", "nonsense", "res5.*", "*"],
-        [],
-        ["res1.read", 123, nil, "res2.*"]
+      cases = [
+        # This entry is both exact-known and parsed as a resource wildcard. Both
+        # implementations must give wildcard parsing precedence.
+        {["res.*"], ["res.*", "res.read"]},
+        # An unknown resource wildcard follows the exact fallback but cannot
+        # grant a known scope under another resource.
+        {["ghost.*"], ["res.read"]},
+        # Duplicates, empty strings, and non-binaries do not alter the
+        # existential grant result.
+        {["", nil, 123, "res.read", "res.read"], ["res.read"]}
       ]
 
-      required_sets = [
-        ["res1.read"],
-        ["res1.read", "res1.write"],
-        ["res2.read", "res3.read"],
-        ["res1.read", "res200.write"],
-        ["uncatalogued.read"],
-        ["res1.*"],
-        ["res1.read", "res2.read", "res5.write"]
-      ]
-
-      for granted <- granted_sets, required <- required_sets, required != [] do
-        assert Scope.grants_all?(catalog, granted, required) == naive.(granted, required),
-               "mismatch: granted=#{inspect(granted)} required=#{inspect(required)}"
+      for {granted, required} <- cases do
+        assert Scope.grants_all?(catalog, granted, required) == naive.(granted, required)
       end
     end
 
@@ -379,30 +392,33 @@ defmodule Attesto.ScopeTest do
     # scopes must stay well under a second - and 10x the input stays ~10x the
     # time, not ~100x.
     @tag :timing
-    test "stays linear as the required list grows", %{catalog: catalog} do
-      granted = Enum.map(1..200, &"res#{&1}.read")
-      # Build the inputs OUTSIDE the timer: constructing a 500k-element list of
-      # interpolated strings is itself superlinear in wall-clock (GC), and timing
-      # it alongside the call is what made an earlier measurement look
-      # superlinear when the function is not.
-      r_50k = Enum.map(1..50_000, fn i -> "res#{rem(i, 200) + 1}.read" end)
-      r_500k = Enum.map(1..500_000, fn i -> "res#{rem(i, 200) + 1}.read" end)
+    test "stays linear when BOTH granted and required grow (pins the cross-product removal)" do
+      # The earlier version held `granted` at 200 and only grew `required`. That
+      # cannot distinguish the fix: the old O(required x granted) form is also
+      # ~linear when only `required` grows. The cross-product blowup appears
+      # only when BOTH axes grow together, so scale both, and make every
+      # required scope match (required == granted) so the old `Enum.all?` never
+      # short-circuits and each `Enum.any?` scans deep - the true worst case.
+      build = fn n ->
+        scopes = Enum.map(1..n, &"res#{&1}.read")
+        {Scope.new_catalog(scopes), scopes, scopes}
+      end
 
-      # Warm the module so the first call does not pay load cost.
-      Scope.grants_all?(catalog, granted, r_50k)
+      {cat_a, g_a, r_a} = build.(4_000)
+      {cat_b, g_b, r_b} = build.(16_000)
 
-      {us_50k, true} = :timer.tc(fn -> Scope.grants_all?(catalog, granted, r_50k) end)
-      {us_500k, true} = :timer.tc(fn -> Scope.grants_all?(catalog, granted, r_500k) end)
+      Scope.grants_all?(cat_a, g_a, r_a)
 
-      # Absolute bound: the pre-fix code took ~20s at 500k; linear is ~40ms.
-      # 500ms is a wide margin that still catches a regression to superlinear.
-      assert us_500k < 500_000, "500k scopes took #{Float.round(us_500k / 1000, 1)}ms; expected < 500ms"
+      {us_a, true} = :timer.tc(fn -> Scope.grants_all?(cat_a, g_a, r_a) end)
+      {us_b, true} = :timer.tc(fn -> Scope.grants_all?(cat_b, g_b, r_b) end)
 
-      # 10x the input must give ~10x the time, not the ~20x the superlinear
-      # scan showed. 15x leaves headroom for noise while still failing on a
-      # return to quadratic-ish behaviour.
-      ratio = us_500k / max(us_50k, 1)
-      assert ratio < 15, "10x input gave #{Float.round(ratio, 1)}x time; expected ~linear (<15x)"
+      # 4x on both axes is 16x work for the cross-product, ~4x for linear.
+      # Absolute: 16k x 16k = 256M naive ops would be seconds; linear is ~ms.
+      assert us_b < 500_000,
+             "16k x 16k took #{Float.round(us_b / 1000, 1)}ms; expected < 500ms (naive would be seconds)"
+
+      ratio = us_b / max(us_a, 1)
+      assert ratio < 8, "4x on both axes gave #{Float.round(ratio, 1)}x time; linear is ~4x, cross-product ~16x"
     end
   end
 end
