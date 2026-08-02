@@ -68,6 +68,7 @@ defmodule Attesto.Token do
   and reusable (token introspection, multiple surfaces).
   """
 
+  alias Attesto.Claims
   alias Attesto.Config
   alias Attesto.JWS
   alias Attesto.Key
@@ -441,21 +442,22 @@ defmodule Attesto.Token do
   defp normalize_extra_claims(config, kind, principal) do
     extra = Map.get(principal, :claims, %{})
 
-    cond do
-      not is_map(extra) ->
-        {:error, :invalid_claims}
+    if is_map(extra),
+      do: normalize_extra_claim_map(config, kind, extra),
+      else: {:error, :invalid_claims}
+  end
 
-      not all_string_keys?(extra) ->
-        {:error, :invalid_claims}
-
-      Enum.any?(Map.keys(extra), &(&1 in Config.reserved_claims(config))) ->
-        {:error, :reserved_claim_conflict}
-
-      true ->
-        case PrincipalKind.check_required(kind, extra) do
-          :ok -> {:ok, extra}
-          {:error, _} -> {:error, :invalid_claims}
-        end
+  defp normalize_extra_claim_map(config, kind, extra) do
+    with {:ok, normalized} <-
+           Claims.merge_registered(extra, %{},
+             reserved: Config.reserved_claims(config),
+             atom_keys: :reject
+           ),
+         :ok <- PrincipalKind.check_required(kind, normalized) do
+      {:ok, normalized}
+    else
+      {:error, :reserved_claim_conflict} -> {:error, :reserved_claim_conflict}
+      {:error, _reason} -> {:error, :invalid_claims}
     end
   end
 
@@ -597,8 +599,6 @@ defmodule Attesto.Token do
       _ -> base
     end
   end
-
-  defp all_string_keys?(map), do: Enum.all?(Map.keys(map), &is_binary/1)
 
   # ----- internal: verification -----
 

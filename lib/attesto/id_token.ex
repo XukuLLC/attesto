@@ -75,6 +75,7 @@ defmodule Attesto.IDToken do
   them; the untrusted JWS header never selects the digest.
   """
 
+  alias Attesto.Claims
   alias Attesto.Config
   alias Attesto.JWS
   alias Attesto.Key
@@ -333,10 +334,13 @@ defmodule Attesto.IDToken do
         {:ok, %{}}
 
       extra when is_map(extra) ->
-        cond do
-          not Enum.all?(Map.keys(extra), &is_binary/1) -> {:error, :invalid_extra_claims}
-          Enum.any?(Map.keys(extra), &(&1 in @reserved_claims)) -> {:error, :reserved_claim_conflict}
-          true -> {:ok, extra}
+        case Claims.merge_registered(extra, %{},
+               reserved: @reserved_claims,
+               atom_keys: :reject
+             ) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, :reserved_claim_conflict} -> {:error, :reserved_claim_conflict}
+          {:error, _reason} -> {:error, :invalid_extra_claims}
         end
 
       _other ->
