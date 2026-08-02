@@ -32,6 +32,17 @@ defmodule Attesto.VpToken do
   callback receiving the issuer's `iss` claim. The optional `:now` value is
   passed to both the VC and holder-binding verifiers.
 
+  > #### `:resolve_issuer` receives an UNVERIFIED `iss` {: .warning}
+  >
+  > The callback is handed the `iss` peeked from the still-unverified issuer
+  > JWT (verifying the signature requires the key, which requires `iss` — so
+  > the lookup is unavoidably ahead of verification). The signature is then
+  > checked against whatever keys the callback returns, so a forged `iss`
+  > cannot forge a credential — it only misdirects the key lookup. But the
+  > callback MUST NOT make a network request to an `iss`-derived URL without an
+  > allow-list: an attacker controls `iss`, so a naive fetch is an SSRF sink.
+  > Resolve from a trusted issuer registry, not by dereferencing `iss`.
+
   A string presentation produces one safe result for its query ID. A list of
   presentations produces a list of safe results. Raw JWTs are never returned.
   """
