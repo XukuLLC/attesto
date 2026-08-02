@@ -64,6 +64,7 @@ defmodule Attesto.SdJwt do
           :malformed
           | :invalid_signature
           | :unsupported_alg
+          | :invalid_typ
           | :invalid_disclosure
           | :unused_disclosure
           | :duplicate_digest
@@ -402,6 +403,7 @@ defmodule Attesto.SdJwt do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     with {:ok, header} <- peek_header(jwt),
+         :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
          true <- alg in accepted do
       verify_against_keys(jwt, alg, keys(jwks))
@@ -411,6 +413,16 @@ defmodule Attesto.SdJwt do
       {:error, _} = err -> err
     end
   end
+
+  # Enforce the Issuer-signed JWT's `typ` header against a caller allowlist (e.g.
+  # SD-JWT VC's `vc+sd-jwt`). No constraint when `:accepted_typ` is absent.
+  defp check_typ(_header, nil), do: :ok
+
+  defp check_typ(%{"typ" => typ}, accepted) when is_list(accepted) do
+    if typ in accepted, do: :ok, else: {:error, :invalid_typ}
+  end
+
+  defp check_typ(_header, _accepted), do: {:error, :invalid_typ}
 
   defp verify_against_keys(_jwt, _alg, []), do: {:error, :invalid_signature}
 
