@@ -765,9 +765,10 @@ defmodule Attesto.DPoPTest do
       assert {:ok, %{jti: ^jti}} =
                DPoP.verify_proof(proof, base_opts(replay_check: replay_check))
 
-      # The verifier passes the acceptance window (default max_age 60 +
+      # The verifier passes the acceptance window + 1s of retention margin
+      # (default max_age 60 +
       # future skew 60) as the TTL the cache must remember the jti for.
-      assert_received {:replay_check_called, ^jti, 120}
+      assert_received {:replay_check_called, ^jti, 121}
       # Exactly once.
       refute_received {:replay_check_called, _, _}
     end
@@ -780,7 +781,7 @@ defmodule Attesto.DPoPTest do
       assert {:ok, _} =
                DPoP.verify_proof(proof, base_opts(max_age_seconds: 300, replay_check: replay_check))
 
-      assert_received {:ttl, 360}
+      assert_received {:ttl, 361}
     end
 
     test "rejects the request when :replay_check returns {:error, :replay}" do

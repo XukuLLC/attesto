@@ -584,7 +584,15 @@ defmodule Attesto.DPoP do
   # so the cache TTL is derived from the verifier's own age policy rather
   # than a fixed default that could diverge from it.
   defp replay_ttl(opts) do
-    Keyword.get(opts, :max_age_seconds, @default_max_age_seconds) + @future_skew_seconds
+    # `+ 1` closes an off-by-one at the edge of the proof's life. The freshness
+    # checks are inclusive on integer seconds (`iat > now + skew` and
+    # `iat < now - max_age` both reject only strictly), so a proof minted at the
+    # furthest-future accepted `iat` stays acceptable through real-time
+    # `max_age + skew` whole seconds. A TTL of exactly `max_age + skew` evicts
+    # the `jti` a fraction before that boundary, leaving a sub-second window in
+    # which the same proof is still fresh but no longer remembered - a replay.
+    # One extra second of retention removes it.
+    Keyword.get(opts, :max_age_seconds, @default_max_age_seconds) + @future_skew_seconds + 1
   end
 
   defp check_ath(claims, opts) do

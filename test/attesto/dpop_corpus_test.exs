@@ -407,7 +407,8 @@ defmodule Attesto.DPoPCorpusTest do
     test ":replay fires only after every other gate passes (clean proof reaches it)" do
       # This is the case the sibling suites under-cover: a fully valid proof
       # that fails ONLY at the replay gate, with the check observing the jti
-      # and the acceptance-window ttl (default max_age 60 + skew 60 = 120).
+      # and the acceptance-window ttl plus 1s retention margin
+      # (default max_age 60 + skew 60 + 1 = 121).
       jti = "corpus-replay-#{System.unique_integer([:positive])}"
       {proof, _jkt} = Factory.dpop_proof(jti: jti, iat: @now)
       parent = self()
@@ -418,7 +419,7 @@ defmodule Attesto.DPoPCorpusTest do
       end
 
       assert {:error, :replay} = DPoP.verify_proof(proof, opts(replay_check: replay_check))
-      assert_received {:replay_seen, ^jti, 120}
+      assert_received {:replay_seen, ^jti, 121}
     end
 
     test ":replay_check is NOT consulted when an earlier gate (htm) already fails" do

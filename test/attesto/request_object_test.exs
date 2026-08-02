@@ -563,6 +563,32 @@ defmodule Attesto.RequestObjectTest do
     end
   end
 
+  describe "parameter coercion is total (never raises)" do
+    test "an extension claim that is an array with a non-string member is dropped, not raised on" do
+      # Under the default JAR path (no `:string_valued_claims` constraint) an
+      # arbitrary passthrough claim reaches `claims_to_params/1`. A list member
+      # that is not a binary must make the whole claim drop out - never reach
+      # `Enum.join/2`, which raises `Protocol.UndefinedError` on a non-string.
+      # A registered client with a valid signing key could otherwise crash the
+      # auth-request process at will.
+      key = ec_key()
+      jwt = request_object(key, %{"ext_list" => ["ok", %{"nested" => 1}]})
+
+      assert {:ok, params} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+
+      refute Map.has_key?(params, "ext_list")
+    end
+
+    test "an all-string extension array is still joined into a space-delimited param" do
+      key = ec_key()
+      jwt = request_object(key, %{"ext_list" => ["a", "b"]})
+
+      assert {:ok, %{"ext_list" => "a b"}} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+  end
+
   describe "forbidden nested request parameters (RFC 9101 §4)" do
     test "rejects a request object that carries a nested request claim" do
       key = ec_key()

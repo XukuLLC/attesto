@@ -380,11 +380,26 @@ defmodule Attesto.RequestObject do
     claims
     |> Map.drop(~w(iss sub aud exp nbf iat jti))
     |> Enum.reduce(%{}, fn
-      {key, value}, acc when is_binary(value) -> Map.put(acc, key, value)
-      {key, value}, acc when is_boolean(value) or is_integer(value) -> Map.put(acc, key, to_string(value))
-      {key, value}, acc when is_list(value) -> Map.put(acc, key, Enum.join(value, " "))
-      {key, value}, acc when is_map(value) -> Map.put(acc, key, JSON.encode!(value))
-      {_key, _value}, acc -> acc
+      {key, value}, acc when is_binary(value) ->
+        Map.put(acc, key, value)
+
+      {key, value}, acc when is_boolean(value) or is_integer(value) ->
+        Map.put(acc, key, to_string(value))
+
+      # A list is space-joined ONLY when every element is a string (an array
+      # `resource`/`scope` in a signed request object). A list carrying a
+      # non-string element (`"scope": [{"x": 1}]`) is dropped, not joined:
+      # `Enum.join/2` raises `Protocol.UndefinedError` on a map/list element, and
+      # this reduce runs on a signature-VALID request object, so an unguarded
+      # join let a registered client crash the authorization-request process.
+      {key, value}, acc when is_list(value) ->
+        if Enum.all?(value, &is_binary/1), do: Map.put(acc, key, Enum.join(value, " ")), else: acc
+
+      {key, value}, acc when is_map(value) ->
+        Map.put(acc, key, JSON.encode!(value))
+
+      {_key, _value}, acc ->
+        acc
     end)
   end
 
