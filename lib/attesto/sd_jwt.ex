@@ -39,7 +39,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, NumericDate, SecureCompare, SigningAlg}
+  alias Attesto.{JWS, NumericDate, Secret, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -75,7 +75,7 @@ defmodule Attesto.SdJwt do
 
   @doc "A fresh salt for a Disclosure: 128-bit CSPRNG value, base64url, no padding."
   @spec generate_salt() :: String.t()
-  def generate_salt, do: @salt_bytes |> :crypto.strong_rand_bytes() |> b64()
+  def generate_salt, do: Secret.generate(@salt_bytes)
 
   @doc """
   The Disclosure string for an object property (`[salt, name, value]`).
@@ -85,13 +85,13 @@ defmodule Attesto.SdJwt do
   """
   @spec object_disclosure(String.t(), String.t(), term()) :: String.t()
   def object_disclosure(salt, name, value) when is_binary(salt) and is_binary(name) do
-    [salt, name, value] |> JSON.encode!() |> b64()
+    [salt, name, value] |> JSON.encode!() |> JWS.encode64()
   end
 
   @doc "The Disclosure string for an array element (`[salt, value]`)."
   @spec array_disclosure(String.t(), term()) :: String.t()
   def array_disclosure(salt, value) when is_binary(salt) do
-    [salt, value] |> JSON.encode!() |> b64()
+    [salt, value] |> JSON.encode!() |> JWS.encode64()
   end
 
   @doc """
@@ -100,7 +100,7 @@ defmodule Attesto.SdJwt do
   """
   @spec digest(String.t(), String.t()) :: String.t()
   def digest(disclosure, sd_alg \\ @default_sd_alg) when is_binary(disclosure) do
-    :crypto.hash(hash_algorithm(sd_alg), disclosure) |> b64()
+    :crypto.hash(hash_algorithm(sd_alg), disclosure) |> JWS.encode64()
   end
 
   # ── Issuance ───────────────────────────────────────────────────────────────
@@ -526,7 +526,7 @@ defmodule Attesto.SdJwt do
   # stood immediately before the KB-JWT, trailing separator included.
   defp presentation_hash(%{issuer_jwt: jwt, disclosures: disclosures}) do
     to_hash = Enum.join([jwt | disclosures] ++ [""], @separator)
-    :crypto.hash(:sha256, to_hash) |> b64()
+    :crypto.hash(:sha256, to_hash) |> JWS.encode64()
   end
 
   # ── Shared helpers ─────────────────────────────────────────────────────────
@@ -562,6 +562,4 @@ defmodule Attesto.SdJwt do
   defp hash_algorithm("sha-384"), do: :sha384
   defp hash_algorithm("sha-512"), do: :sha512
   defp hash_algorithm(other), do: raise(ArgumentError, "unsupported _sd_alg: #{inspect(other)}")
-
-  defp b64(bytes), do: Base.url_encode64(bytes, padding: false)
 end

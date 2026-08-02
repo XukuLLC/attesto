@@ -135,7 +135,21 @@ defmodule Attesto.JWSTest do
 
   # ── parser primitives (the compact-JWS parser consolidation) ──────────────
 
-  defp b64(bytes), do: Base.url_encode64(bytes, padding: false)
+  describe "base64url helpers" do
+    test "encode64/1 and decode64/2 round-trip binary data" do
+      bytes = <<0, 1, 2, 253, 254, 255>>
+      encoded = JWS.encode64(bytes)
+
+      assert {:ok, ^bytes} = JWS.decode64(encoded)
+      assert encoded == "AAEC_f7_"
+    end
+
+    test "decode64/2 rejects non-canonical trailing bits" do
+      assert {:error, :non_canonical_base64url} = JWS.decode64("AAB")
+    end
+  end
+
+  defp b64(bytes), do: JWS.encode64(bytes)
 
   describe "decode_compact/2" do
     test "splits a canonical three-segment JWT" do

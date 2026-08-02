@@ -75,6 +75,7 @@ defmodule Attesto.Token do
   alias Attesto.NumericDate
   alias Attesto.PrincipalKind
   alias Attesto.Scope
+  alias Attesto.Secret
   alias Attesto.SigningAlg
   alias Attesto.Thumbprint
 
@@ -217,7 +218,7 @@ defmodule Attesto.Token do
          {:ok, auth_context} <- normalize_auth_context(opts),
          {:ok, confirmation} <- normalize_confirmation(opts) do
       iat = NumericDate.now(opts)
-      lifetime = lifetime_seconds(config, opts)
+      lifetime = NumericDate.bounded_lifetime(opts, :lifetime, config.default_lifetime_seconds)
       scope_string = Enum.join(scopes, " ")
 
       claims =
@@ -569,9 +570,7 @@ defmodule Attesto.Token do
   defp token_type_for(%{"x5t#S256" => _}), do: @bearer_token_type
 
   defp generate_jti do
-    @jti_byte_length
-    |> :crypto.strong_rand_bytes()
-    |> Base.url_encode64(padding: false)
+    Secret.generate(@jti_byte_length)
   end
 
   # The shared signer emits the protected header verbatim, including the
@@ -875,16 +874,4 @@ defmodule Attesto.Token do
 
   defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
-
-  # `:lifetime` may only shorten the configured default - a larger value
-  # (or a non-positive / non-integer) falls back to the default, capping
-  # the blast radius of a miswired caller.
-  defp lifetime_seconds(config, opts) do
-    default = config.default_lifetime_seconds
-
-    case Keyword.get(opts, :lifetime) do
-      n when is_integer(n) and n > 0 and n <= default -> n
-      _ -> default
-    end
-  end
 end

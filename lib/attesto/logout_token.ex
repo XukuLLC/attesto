@@ -53,6 +53,7 @@ defmodule Attesto.LogoutToken do
   alias Attesto.Config
   alias Attesto.JWS
   alias Attesto.NumericDate
+  alias Attesto.Secret
 
   # The dedicated logout-token media type (Back-Channel Logout 1.0 §2.4): an
   # RP rejects a plain ID Token (`typ: "JWT"`) presented at its logout endpoint.
@@ -107,7 +108,7 @@ defmodule Attesto.LogoutToken do
     with :ok <- check_non_empty(client_id, :invalid_client_id),
          {:ok, identifiers} <- subject_identifiers(opts) do
       iat = NumericDate.now(opts)
-      lifetime = lifetime_seconds(opts)
+      lifetime = NumericDate.bounded_lifetime(opts, :lifetime, @default_lifetime_seconds)
 
       claims =
         %{
@@ -149,14 +150,7 @@ defmodule Attesto.LogoutToken do
   defp jti(opts) do
     case Keyword.get(opts, :jti) do
       jti when is_binary(jti) and jti != "" -> jti
-      _ -> 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-    end
-  end
-
-  defp lifetime_seconds(opts) do
-    case Keyword.get(opts, :lifetime) do
-      n when is_integer(n) and n > 0 and n <= @default_lifetime_seconds -> n
-      _ -> @default_lifetime_seconds
+      _ -> Secret.generate(16)
     end
   end
 

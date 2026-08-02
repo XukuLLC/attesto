@@ -56,7 +56,7 @@ defmodule Attesto.SessionState do
   unchanged.
   """
 
-  alias Attesto.SecureCompare
+  alias Attesto.{Secret, SecureCompare}
 
   # 128-bit values: the salt only needs to be unique per response, and the
   # browser state unguessable enough that it cannot be predicted cross-origin.
@@ -149,9 +149,7 @@ defmodule Attesto.SessionState do
 
   @doc "A fresh random salt for `compute/4` (unpadded URL-safe Base64, no spaces or dots)."
   @spec generate_salt() :: String.t()
-  def generate_salt do
-    @entropy_bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-  end
+  def generate_salt, do: Secret.generate(@entropy_bytes)
 
   @doc """
   A fresh OP browser state value.
@@ -161,9 +159,7 @@ defmodule Attesto.SessionState do
   and changes it when the End-User's login state changes (login/logout).
   """
   @spec generate_browser_state() :: String.t()
-  def generate_browser_state do
-    @entropy_bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-  end
+  def generate_browser_state, do: Secret.generate(@entropy_bytes)
 
   @doc """
   Mint an OP browser-state value that is OP-owned and bound to the End-User's

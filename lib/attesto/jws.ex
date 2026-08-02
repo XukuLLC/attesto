@@ -19,6 +19,33 @@ defmodule Attesto.JWS do
         }
 
   @doc false
+  @spec encode64(binary()) :: binary()
+  def encode64(bytes) when is_binary(bytes), do: Base.url_encode64(bytes, padding: false)
+
+  @doc false
+  @spec decode64(binary(), keyword()) ::
+          {:ok, binary()} | {:error, :invalid_base64url | :non_canonical_base64url}
+  def decode64(value, opts \\ [])
+
+  def decode64(value, opts) when is_binary(value) and is_list(opts) do
+    canonical? = Keyword.get(opts, :canonical, true)
+
+    case Base.url_decode64(value, padding: false) do
+      {:ok, decoded} ->
+        if canonical? == false or encode64(decoded) == value,
+          do: {:ok, decoded},
+          else: {:error, :non_canonical_base64url}
+
+      :error ->
+        {:error, :invalid_base64url}
+    end
+  rescue
+    _ -> {:error, :invalid_base64url}
+  end
+
+  def decode64(_value, _opts), do: {:error, :invalid_base64url}
+
+  @doc false
   @spec decode_compact(binary(), keyword()) ::
           {:ok, compact_segments()}
           | {:error, :malformed_compact | :non_canonical_base64url}
@@ -77,7 +104,7 @@ defmodule Attesto.JWS do
              allow_empty_signature: Keyword.get(opts, :allow_empty_signature, true)
            ),
          encoded = Map.fetch!(compact, segment_key(segment)),
-         {:ok, bytes} <- decode_segment(encoded),
+         {:ok, bytes} <- decode64(encoded, canonical: Keyword.get(opts, :canonical, true)),
          {:ok, map} <- decode_json_map(bytes) do
       {:ok, map}
     else
@@ -183,30 +210,11 @@ defmodule Attesto.JWS do
   end
 
   defp check_segment(segment, canonical?) do
-    with {:ok, decoded} <- decode_segment(segment),
-         :ok <- check_canonical_segment(segment, decoded, canonical?) do
-      :ok
-    else
+    case decode64(segment, canonical: canonical?) do
+      {:ok, _decoded} -> :ok
       {:error, :invalid_base64url} -> {:error, :malformed_compact}
-      {:error, _reason} = error -> error
+      {:error, :non_canonical_base64url} -> {:error, :non_canonical_base64url}
     end
-  end
-
-  defp check_canonical_segment(_segment, _decoded, false), do: :ok
-
-  defp check_canonical_segment(segment, decoded, true) do
-    if Base.url_encode64(decoded, padding: false) == segment,
-      do: :ok,
-      else: {:error, :non_canonical_base64url}
-  end
-
-  defp decode_segment(segment) do
-    case Base.url_decode64(segment, padding: false) do
-      {:ok, decoded} -> {:ok, decoded}
-      :error -> {:error, :invalid_base64url}
-    end
-  rescue
-    _ -> {:error, :invalid_base64url}
   end
 
   defp decode_json_map(bytes) do
@@ -468,7 +476,7 @@ defmodule Attesto.JWS do
   # itself but strict FAPI/OIDF validators correctly reject.
   defp sign_ps_compact(jwk, header, payload, alg) do
     encoded_header = encode_segment(header)
-    encoded_payload = Base.url_encode64(payload, padding: false)
+    encoded_payload = encode64(payload)
     signing_input = encoded_header <> "." <> encoded_payload
 
     signature =
@@ -479,13 +487,13 @@ defmodule Attesto.JWS do
         pss_opts(alg)
       )
 
-    signing_input <> "." <> Base.url_encode64(signature, padding: false)
+    signing_input <> "." <> encode64(signature)
   end
 
   defp encode_segment(value) do
     value
     |> JSON.encode!()
-    |> Base.url_encode64(padding: false)
+    |> encode64()
   end
 
   defp private_key(jwk), do: jwk |> JOSE.JWK.to_key() |> elem(1)

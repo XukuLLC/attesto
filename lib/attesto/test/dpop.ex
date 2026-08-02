@@ -56,6 +56,7 @@ defmodule Attesto.Test.DPoP do
 
   alias Attesto.Config
   alias Attesto.DPoP
+  alias Attesto.Secret
   alias Attesto.SigningAlg
   alias Attesto.Token
 
@@ -256,9 +257,7 @@ defmodule Attesto.Test.DPoP do
   end
 
   defp generate_jti do
-    @jti_byte_length
-    |> :crypto.strong_rand_bytes()
-    |> Base.url_encode64(padding: false)
+    Secret.generate(@jti_byte_length)
   end
 
   defp unix_now(opts) do

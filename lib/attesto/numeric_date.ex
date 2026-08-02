@@ -87,6 +87,20 @@ defmodule Attesto.NumericDate do
   def within_lifetime?(_finish, _start, _max_seconds), do: false
 
   @doc """
+  Resolve a positive lifetime option that may only shorten `default`.
+
+  A missing, non-positive, non-integer, or longer requested lifetime falls
+  back to the supplied default.
+  """
+  @spec bounded_lifetime(keyword(), atom(), pos_integer()) :: pos_integer()
+  def bounded_lifetime(opts, key, default) when is_list(opts) and is_integer(default) and default > 0 do
+    case Keyword.get(opts, key) do
+      n when is_integer(n) and n > 0 and n <= default -> n
+      _ -> default
+    end
+  end
+
+  @doc """
   Resolve a Unix-second clock from options.
 
   `default: :datetime | :system` preserves the caller's original live-clock

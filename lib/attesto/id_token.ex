@@ -186,7 +186,7 @@ defmodule Attesto.IDToken do
          :ok <- check_non_empty(client_id, :invalid_client_id),
          {:ok, extra} <- normalize_extra_claims(opts) do
       iat = NumericDate.now(opts)
-      lifetime = lifetime_seconds(opts)
+      lifetime = NumericDate.bounded_lifetime(opts, :lifetime, @default_lifetime_seconds)
       signing_context = JWS.current_signing_context(config.keystore)
       jwk = signing_context.jwk
       alg = signing_context.alg
@@ -350,15 +350,6 @@ defmodule Attesto.IDToken do
 
       _other ->
         {:error, :invalid_extra_claims}
-    end
-  end
-
-  # `:lifetime` may only shorten the default - a larger value (or a
-  # non-positive / non-integer) falls back to the default.
-  defp lifetime_seconds(opts) do
-    case Keyword.get(opts, :lifetime) do
-      n when is_integer(n) and n > 0 and n <= @default_lifetime_seconds -> n
-      _ -> @default_lifetime_seconds
     end
   end
 

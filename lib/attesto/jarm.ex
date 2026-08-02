@@ -67,7 +67,7 @@ defmodule Attesto.JARM do
         "iss" => config.issuer,
         "aud" => client_id,
         "iat" => now,
-        "exp" => now + lifetime_seconds(opts)
+        "exp" => now + NumericDate.bounded_lifetime(opts, :lifetime, @default_lifetime_seconds)
       })
 
     {:ok, JWS.sign_current(config.keystore, claims)}
@@ -101,15 +101,6 @@ defmodule Attesto.JARM do
 
       {:error, _reason} ->
         raise ArgumentError, "invalid JARM response params"
-    end
-  end
-
-  # `:lifetime` may only shorten the default - a larger value (or a
-  # non-positive / non-integer) falls back to the default.
-  defp lifetime_seconds(opts) do
-    case Keyword.get(opts, :lifetime) do
-      n when is_integer(n) and n > 0 and n <= @default_lifetime_seconds -> n
-      _ -> @default_lifetime_seconds
     end
   end
 end

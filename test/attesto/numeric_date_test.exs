@@ -55,6 +55,20 @@ defmodule Attesto.NumericDateTest do
     end
   end
 
+  describe "bounded_lifetime/3" do
+    test "honors a shorter requested lifetime" do
+      assert NumericDate.bounded_lifetime([lifetime: 60], :lifetime, 600) == 60
+    end
+
+    test "falls back to the default for larger or invalid values" do
+      for requested <- [601, 0, -1, 1.5, "60", nil] do
+        assert NumericDate.bounded_lifetime([lifetime: requested], :lifetime, 600) == 600
+      end
+
+      assert NumericDate.bounded_lifetime([], :lifetime, 600) == 600
+    end
+  end
+
   describe "now/2" do
     test "accepts integer and DateTime overrides" do
       datetime = DateTime.from_unix!(@now, :second)

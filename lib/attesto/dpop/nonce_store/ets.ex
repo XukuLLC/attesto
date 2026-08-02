@@ -29,6 +29,7 @@ defmodule Attesto.DPoP.NonceStore.ETS do
   use GenServer
 
   alias Attesto.DPoP.NonceStore
+  alias Attesto.Secret
 
   @table __MODULE__
   @default_ttl_seconds 300
@@ -47,7 +48,7 @@ defmodule Attesto.DPoP.NonceStore.ETS do
 
   @impl NonceStore
   def issue(ttl_seconds \\ @default_ttl_seconds) when is_integer(ttl_seconds) and ttl_seconds > 0 do
-    nonce = @nonce_bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+    nonce = Secret.generate(@nonce_bytes)
     true = :ets.insert(@table, {nonce, System.system_time(:second) + ttl_seconds})
     nonce
   end
