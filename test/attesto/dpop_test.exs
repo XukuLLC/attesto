@@ -527,6 +527,22 @@ defmodule Attesto.DPoPTest do
       assert {:ok, _} = DPoP.verify_proof(proof, base_opts())
     end
 
+    test "accepts both exact 60-second freshness boundaries" do
+      now = unix_now()
+
+      {past_proof, _jkt} = Factory.dpop_proof(iat: now - 60)
+      assert {:ok, _} = DPoP.verify_proof(past_proof, base_opts(now: now))
+
+      {future_proof, _jkt} = Factory.dpop_proof(iat: now + 60)
+      assert {:ok, _} = DPoP.verify_proof(future_proof, base_opts(now: now))
+
+      {stale_proof, _jkt} = Factory.dpop_proof(iat: now - 61)
+      assert {:error, :proof_expired} = DPoP.verify_proof(stale_proof, base_opts(now: now))
+
+      {too_future_proof, _jkt} = Factory.dpop_proof(iat: now + 61)
+      assert {:error, :invalid_iat} = DPoP.verify_proof(too_future_proof, base_opts(now: now))
+    end
+
     test "rejects missing iat" do
       key = gen_ec_key()
       claims = %{"htm" => @http_method, "htu" => @http_uri, "jti" => "j1"}

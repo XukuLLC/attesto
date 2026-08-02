@@ -167,6 +167,43 @@ defmodule Attesto.SdJwtTest do
                )
     end
 
+    test "keeps the 300-second age and 60-second future-skew boundaries", ctx do
+      now = 1_700_000_000
+
+      for {offset, expected} <- [
+            {-300, :ok},
+            {-301, :error},
+            {60, :ok},
+            {61, :error}
+          ] do
+        kb =
+          kb_jwt(ctx.holder_pem, %{
+            "nonce" => "n-123",
+            "aud" => "https://verifier.example",
+            "iat" => now + offset,
+            "sd_hash" => sd_hash(ctx.issuance, [0])
+          })
+
+        presentation = present(ctx.issuance, [0], kb)
+        {:ok, verified} = SdJwt.verify(presentation, ctx.issuer_jwk)
+
+        result =
+          SdJwt.verify_key_binding(
+            verified,
+            ctx.holder_jwk,
+            nonce: "n-123",
+            audience: "https://verifier.example",
+            now: now
+          )
+
+        case {expected, result} do
+          {:ok, :ok} -> :ok
+          {:error, {:error, :invalid_key_binding}} -> :ok
+          _ -> flunk("unexpected result at iat offset #{offset}")
+        end
+      end
+    end
+
     test "rejects a wrong nonce, wrong audience, and a mismatched sd_hash", ctx do
       now = System.system_time(:second)
 

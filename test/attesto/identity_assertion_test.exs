@@ -257,6 +257,37 @@ defmodule Attesto.IdentityAssertionTest do
                  opts(max_lifetime_seconds: 600)
                )
     end
+
+    test "keeps zero expiry leeway and 60-second future skew" do
+      key = rsa_key()
+      now = 1_700_000_000
+      trusted = public_jwks(key, "RS256")
+
+      assert {:error, :expired} =
+               IdentityAssertion.verify(
+                 assertion(key, "RS256", %{"iat" => now, "exp" => now}),
+                 trusted,
+                 opts(now: now)
+               )
+
+      assert {:ok, _} =
+               IdentityAssertion.verify(
+                 assertion(key, "RS256", %{
+                   "iat" => now + 60,
+                   "exp" => now + 300,
+                   "nbf" => now + 60
+                 }),
+                 trusted,
+                 opts(now: now)
+               )
+
+      assert {:error, :not_yet_valid} =
+               IdentityAssertion.verify(
+                 assertion(key, "RS256", %{"iat" => now + 61, "exp" => now + 300}),
+                 trusted,
+                 opts(now: now)
+               )
+    end
   end
 
   describe "peek_issuer/1" do

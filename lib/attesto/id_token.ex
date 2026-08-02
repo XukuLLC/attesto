@@ -79,6 +79,7 @@ defmodule Attesto.IDToken do
   alias Attesto.Config
   alias Attesto.JWS
   alias Attesto.Key
+  alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @signing_alg "RS256"
@@ -184,7 +185,7 @@ defmodule Attesto.IDToken do
     with :ok <- check_non_empty(subject, :invalid_subject),
          :ok <- check_non_empty(client_id, :invalid_client_id),
          {:ok, extra} <- normalize_extra_claims(opts) do
-      iat = unix_now(opts)
+      iat = NumericDate.now(opts)
       lifetime = lifetime_seconds(opts)
       pem = config.keystore.signing_pem()
       jwk = Key.jwk(pem)
@@ -482,7 +483,9 @@ defmodule Attesto.IDToken do
   end
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
-    if exp > unix_now(opts), do: :ok, else: {:error, :expired}
+    if NumericDate.not_expired?(exp, NumericDate.now(opts), leeway: 0),
+      do: :ok,
+      else: {:error, :expired}
   end
 
   defp check_expiry(_claims, _opts), do: {:error, :expired}
@@ -490,7 +493,9 @@ defmodule Attesto.IDToken do
   # An `iat` meaningfully in the future was issued by a clock far ahead of
   # ours or forged; reject it (with the same modest skew as Attesto.Token).
   defp check_iat_not_future(%{"iat" => iat}, opts) when is_integer(iat) do
-    if iat <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(iat, NumericDate.now(opts), skew: @clock_skew_seconds),
+      do: :ok,
+      else: {:error, :not_yet_valid}
   end
 
   defp check_iat_not_future(_claims, _opts), do: :ok
@@ -516,12 +521,4 @@ defmodule Attesto.IDToken do
 
   defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 end

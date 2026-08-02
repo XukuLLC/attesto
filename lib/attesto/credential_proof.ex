@@ -22,7 +22,7 @@ defmodule Attesto.CredentialProof do
   Conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, Key, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, NumericDate, SigningAlg, Thumbprint}
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
@@ -167,18 +167,13 @@ defmodule Attesto.CredentialProof do
   end
 
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) do
-    now = unix_now(opts)
+    now = NumericDate.now(opts, invalid_override: :fallback)
     max_age = Keyword.get(opts, :max_age_seconds, @default_max_age_seconds)
-    if iat <= now + @future_skew_seconds and iat >= now - max_age, do: :ok, else: {:error, :invalid_iat}
+
+    if NumericDate.fresh?(iat, now, future_skew: @future_skew_seconds, max_age: max_age) == :ok,
+      do: :ok,
+      else: {:error, :invalid_iat}
   end
 
   defp check_iat(_claims, _opts), do: {:error, :invalid_iat}
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-      n when is_integer(n) -> n
-      _ -> DateTime.utc_now() |> DateTime.to_unix(:second)
-    end
-  end
 end

@@ -86,6 +86,7 @@ defmodule Attesto.DPoP do
 
   alias Attesto.JWS
   alias Attesto.Key
+  alias Attesto.NumericDate
   alias Attesto.SecureCompare
   alias Attesto.Thumbprint
 
@@ -416,13 +417,14 @@ defmodule Attesto.DPoP do
   defp normalize_htu_port(port), do: port
 
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
-    now = unix_now(opts)
+    now = NumericDate.now(opts)
     max_age = Keyword.get(opts, :max_age_seconds, @default_max_age_seconds)
 
-    cond do
-      iat > now + @future_skew_seconds -> {:error, :invalid_iat}
-      iat < now - max_age -> {:error, :proof_expired}
-      true -> {:ok, iat}
+    case NumericDate.fresh?(iat, now, future_skew: @future_skew_seconds, max_age: max_age) do
+      :ok -> {:ok, iat}
+      :future -> {:error, :invalid_iat}
+      :stale -> {:error, :proof_expired}
+      :invalid -> {:error, :invalid_iat}
     end
   end
 
@@ -541,14 +543,6 @@ defmodule Attesto.DPoP do
   end
 
   # ----- internal: helpers -----
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 
   defp require_string!(opts, key) do
     case Keyword.get(opts, key) do

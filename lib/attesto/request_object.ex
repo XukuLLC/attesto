@@ -9,6 +9,7 @@ defmodule Attesto.RequestObject do
   """
 
   alias Attesto.JWS
+  alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @clock_skew_seconds 60
@@ -217,26 +218,54 @@ defmodule Attesto.RequestObject do
   defp aud_intersects?(aud, expected) when is_binary(aud), do: aud in expected
   defp aud_intersects?(aud, expected) when is_list(aud), do: Enum.any?(aud, &(&1 in expected))
 
-  defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) and exp >= 0 do
-    if exp > unix_now(opts), do: :ok, else: {:error, :expired}
+  defp check_expiry(claims, opts) do
+    case NumericDate.fetch(claims, "exp", required: false, non_negative: true) do
+      {:ok, exp} ->
+        if NumericDate.not_expired?(
+             exp,
+             NumericDate.now(opts, default: :system, invalid_override: :fallback),
+             leeway: 0
+           ),
+           do: :ok,
+           else: {:error, :expired}
+
+      # Lenient JAR behavior intentionally ignores a missing or malformed
+      # optional `exp`; `require_exp` is enforced below in check_lifetime/2.
+      :missing ->
+        :ok
+
+      {:error, :invalid} ->
+        :ok
+    end
   end
 
-  defp check_expiry(_claims, _opts), do: :ok
+  defp check_iat(claims, opts) do
+    case NumericDate.fetch(claims, "iat", required: false, non_negative: true) do
+      {:ok, iat} ->
+        if NumericDate.not_before_reached?(
+             iat,
+             NumericDate.now(opts, default: :system, invalid_override: :fallback),
+             skew: @clock_skew_seconds
+           ),
+           do: :ok,
+           else: {:error, :not_yet_valid}
 
-  defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
-    if iat <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+      {:error, :invalid} ->
+        {:error, :not_yet_valid}
+
+      :missing ->
+        check_missing_iat(opts)
+    end
   end
 
-  defp check_iat(%{"iat" => _}, _opts), do: {:error, :not_yet_valid}
-
-  # Under `require_iat: true` (CIBA Core §7.1.1) a missing `iat` is a failure;
-  # a present one was validated above.
-  defp check_iat(_claims, opts) do
+  defp check_missing_iat(opts) do
     if Keyword.get(opts, :require_iat, false) == true,
       do: {:error, :invalid_request_object},
       else: :ok
   end
 
+  # Under `require_iat: true` (CIBA Core §7.1.1) a missing `iat` is a failure;
+  # a present one was validated above.
   # Under `require_jti: true` (CIBA Core §7.1.1) the object must carry a
   # non-empty string `jti`. Uniqueness/replay tracking is the caller's concern;
   # this verifier is stateless.
@@ -289,26 +318,62 @@ defmodule Attesto.RequestObject do
   # stale a present `nbf` may be. Defaults (no require, no age bound) leave the
   # lenient JAR/OIDC §6.1 behaviour intact apart from honouring a present `nbf`.
   defp check_nbf(claims, opts) do
-    nbf = Map.get(claims, "nbf")
+    case NumericDate.fetch(claims, "nbf", required: false, non_negative: true) do
+      {:ok, nbf} -> check_valid_nbf(nbf, opts)
+      :missing -> check_optional_nbf(opts)
+      {:error, :invalid} -> check_invalid_nbf(claims, opts)
+    end
+  end
 
+  defp check_valid_nbf(nbf, opts) do
     cond do
-      require_nbf?(opts) and not numericdate?(nbf) -> {:error, :not_yet_valid}
       nbf_in_future?(nbf, opts) -> {:error, :not_yet_valid}
       nbf_too_old?(nbf, opts) -> {:error, :not_yet_valid}
       true -> :ok
     end
   end
 
+  defp check_optional_nbf(opts) do
+    if require_nbf?(opts), do: {:error, :not_yet_valid}, else: :ok
+  end
+
+  defp check_invalid_nbf(claims, opts) do
+    if require_nbf?(opts), do: {:error, :not_yet_valid}, else: check_legacy_nbf_age(claims, opts)
+  end
+
+  # Preserve the legacy age-bound behavior for a negative integer: without a
+  # required claim it is otherwise ignored, but an explicit max-age policy
+  # still sees the same raw integer.
+  defp check_legacy_nbf_age(claims, opts) do
+    if nbf_too_old?(Map.get(claims, "nbf"), opts),
+      do: {:error, :not_yet_valid},
+      else: :ok
+  end
+
   defp require_nbf?(opts), do: Keyword.get(opts, :require_nbf, false) == true
 
-  defp nbf_in_future?(nbf, opts) when is_integer(nbf), do: nbf > unix_now(opts) + @clock_skew_seconds
+  defp nbf_in_future?(nbf, opts) when is_integer(nbf) do
+    not NumericDate.not_before_reached?(
+      nbf,
+      NumericDate.now(opts, default: :system, invalid_override: :fallback),
+      skew: @clock_skew_seconds
+    )
+  end
 
   defp nbf_in_future?(_nbf, _opts), do: false
 
   defp nbf_too_old?(nbf, opts) when is_integer(nbf) do
     case Keyword.get(opts, :max_nbf_age_seconds) do
-      max when is_integer(max) and max > 0 -> nbf < unix_now(opts) - max
-      _ -> false
+      max when is_integer(max) and max > 0 ->
+        NumericDate.fresh?(
+          nbf,
+          NumericDate.now(opts, default: :system, invalid_override: :fallback),
+          future_skew: 0,
+          max_age: max
+        ) == :stale
+
+      _ ->
+        false
     end
   end
 
@@ -327,7 +392,7 @@ defmodule Attesto.RequestObject do
     nbf = Map.get(claims, "nbf")
 
     cond do
-      require_exp?(opts) and not numericdate?(exp) -> {:error, :expired}
+      require_exp?(opts) and not NumericDate.valid?(exp, non_negative: true) -> {:error, :expired}
       lifetime_exceeded?(exp, nbf, opts) -> {:error, :expired}
       true -> :ok
     end
@@ -339,17 +404,10 @@ defmodule Attesto.RequestObject do
   # anchors; a missing or malformed `nbf`/`exp` is itself a failure.
   defp lifetime_exceeded?(exp, nbf, opts) do
     case Keyword.get(opts, :max_lifetime_seconds) do
-      max when is_integer(max) and max > 0 -> not within_lifetime?(exp, nbf, max)
+      max when is_integer(max) and max > 0 -> not NumericDate.within_lifetime?(exp, nbf, max)
       _ -> false
     end
   end
-
-  defp within_lifetime?(exp, nbf, max) when is_integer(exp) and is_integer(nbf), do: exp <= nbf + max
-
-  defp within_lifetime?(_exp, _nbf, _max), do: false
-
-  # A JWT NumericDate (RFC 7519 §2): a non-negative integer count of seconds.
-  defp numericdate?(value), do: is_integer(value) and value >= 0
 
   defp claims_to_params(claims) do
     claims
@@ -376,14 +434,6 @@ defmodule Attesto.RequestObject do
       {_key, _value}, acc ->
         acc
     end)
-  end
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt)
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
-    end
   end
 
   defp check_crit(header) do

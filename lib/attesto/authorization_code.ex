@@ -79,6 +79,7 @@ defmodule Attesto.AuthorizationCode do
   """
 
   alias Attesto.AuthorizationCode.Grant
+  alias Attesto.NumericDate
   alias Attesto.PKCE
   alias Attesto.Scope
   alias Attesto.Secret
@@ -160,7 +161,7 @@ defmodule Attesto.AuthorizationCode do
         store.put(%{
           code_hash: Secret.hash(code),
           data: data,
-          expires_at: unix_now(opts) + ttl
+          expires_at: NumericDate.now(opts) + ttl
         })
 
       {:ok, code}
@@ -360,7 +361,7 @@ defmodule Attesto.AuthorizationCode do
   # ----- redeem validation -----
 
   defp check_expiry(expires_at, opts) do
-    if expires_at > unix_now(opts), do: :ok, else: {:error, :expired}
+    if expires_at > NumericDate.now(opts), do: :ok, else: {:error, :expired}
   end
 
   # RFC 6749 §3.1.2 / §4.1.3: the redirect URI is compared by exact
@@ -432,12 +433,4 @@ defmodule Attesto.AuthorizationCode do
   defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)
   defp valid_optional_family_id?(nil), do: true
   defp valid_optional_family_id?(family_id), do: non_empty_binary?(family_id)
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 end

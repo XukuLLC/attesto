@@ -46,6 +46,7 @@ defmodule Attesto.IdentityAssertion do
   """
 
   alias Attesto.JWS
+  alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @typ "oauth-id-jag+jwt"
@@ -257,13 +258,25 @@ defmodule Attesto.IdentityAssertion do
   defp check_client(_claims, _client_id), do: {:error, :client_mismatch}
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) and exp >= 0 do
-    if exp > unix_now(opts), do: :ok, else: {:error, :expired}
+    if NumericDate.not_expired?(
+         exp,
+         NumericDate.now(opts, default: :system, invalid_override: :fallback),
+         leeway: 0
+       ),
+       do: :ok,
+       else: {:error, :expired}
   end
 
   defp check_expiry(_claims, _opts), do: {:error, :expired}
 
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
-    if iat <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(
+         iat,
+         NumericDate.now(opts, default: :system, invalid_override: :fallback),
+         skew: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :not_yet_valid}
   end
 
   defp check_iat(_claims, _opts), do: {:error, :not_yet_valid}
@@ -271,7 +284,13 @@ defmodule Attesto.IdentityAssertion do
   # RFC 7519 §4.1.5: `nbf` is OPTIONAL for an ID-JAG, but when present it must
   # not be in the future (clock skew tolerated).
   defp check_nbf(%{"nbf" => nbf}, opts) when is_integer(nbf) do
-    if nbf <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(
+         nbf,
+         NumericDate.now(opts, default: :system, invalid_override: :fallback),
+         skew: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :not_yet_valid}
   end
 
   # A PRESENT `nbf` that is not an integer NumericDate is malformed, and must be
@@ -287,7 +306,7 @@ defmodule Attesto.IdentityAssertion do
   defp check_lifetime(%{"exp" => exp, "iat" => iat}, opts) when is_integer(exp) and is_integer(iat) do
     case Keyword.get(opts, :max_lifetime_seconds) do
       max when is_integer(max) and max > 0 ->
-        if exp - iat <= max, do: :ok, else: {:error, :expired}
+        if NumericDate.within_lifetime?(exp, iat, max), do: :ok, else: {:error, :expired}
 
       _ ->
         :ok
@@ -296,13 +315,5 @@ defmodule Attesto.IdentityAssertion do
 
   defp check_lifetime(_claims, _opts), do: :ok
 
-  defp numericdate?(value), do: is_integer(value) and value >= 0
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt)
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
-    end
-  end
+  defp numericdate?(value), do: NumericDate.valid?(value, non_negative: true)
 end

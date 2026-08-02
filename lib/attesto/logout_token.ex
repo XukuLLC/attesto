@@ -52,6 +52,7 @@ defmodule Attesto.LogoutToken do
 
   alias Attesto.Config
   alias Attesto.Key
+  alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   # The dedicated logout-token media type (Back-Channel Logout 1.0 §2.4): an
@@ -106,7 +107,7 @@ defmodule Attesto.LogoutToken do
   def mint(%Config{} = config, client_id, opts) when is_binary(client_id) and is_list(opts) do
     with :ok <- check_non_empty(client_id, :invalid_client_id),
          {:ok, identifiers} <- subject_identifiers(opts) do
-      iat = unix_now(opts)
+      iat = NumericDate.now(opts)
       lifetime = lifetime_seconds(opts)
       pem = config.keystore.signing_pem()
       alg = SigningAlg.for_key(config.keystore, pem, signing?: true)
@@ -172,12 +173,4 @@ defmodule Attesto.LogoutToken do
 
   defp check_non_empty(value, _error) when is_binary(value) and value != "", do: :ok
   defp check_non_empty(_value, error), do: {:error, error}
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 end

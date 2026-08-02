@@ -28,6 +28,7 @@ defmodule Attesto.DeviceCode do
   """
 
   alias Attesto.DeviceCode.Grant
+  alias Attesto.NumericDate
   alias Attesto.Secret
 
   # RFC 8628 §6.1: a base-20 alphabet with no vowels (no accidental words) and no
@@ -86,7 +87,14 @@ defmodule Attesto.DeviceCode do
         dpop_jkt: Map.get(attrs, :dpop_jkt)
       }
 
-      put_with_retry(store, device_code, data, length, unix_now(opts) + ttl, @user_code_collision_retries)
+      put_with_retry(
+        store,
+        device_code,
+        data,
+        length,
+        NumericDate.now(opts, default: :system) + ttl,
+        @user_code_collision_retries
+      )
     end
   end
 
@@ -137,7 +145,11 @@ defmodule Attesto.DeviceCode do
   def redeem(store, device_code, params, opts \\ [])
       when is_atom(store) and is_binary(device_code) and is_map(params) and is_list(opts) do
     hash = Secret.hash(device_code)
-    poll_opts = %{now: unix_now(opts), interval: Keyword.get(opts, :interval, @default_interval_seconds)}
+
+    poll_opts = %{
+      now: NumericDate.now(opts, default: :system),
+      interval: Keyword.get(opts, :interval, @default_interval_seconds)
+    }
 
     case store.poll(hash, poll_opts) do
       {:ok, record} -> redeem_polled(store, hash, record, params, opts)
@@ -161,7 +173,7 @@ defmodule Attesto.DeviceCode do
   end
 
   defp consume(store, hash, opts) do
-    case store.consume(hash, %{now: unix_now(opts)}) do
+    case store.consume(hash, %{now: NumericDate.now(opts, default: :system)}) do
       {:ok, record} ->
         {:ok, Grant.from_record(record)}
 
@@ -274,7 +286,7 @@ defmodule Attesto.DeviceCode do
   defp require_subject(_approval), do: {:error, :invalid_subject}
 
   defp check_not_expired(%{expires_at: expires_at}, opts) do
-    if expires_at > unix_now(opts), do: :ok, else: {:error, :expired_token}
+    if expires_at > NumericDate.now(opts, default: :system), do: :ok, else: {:error, :expired_token}
   end
 
   # RFC 8628 §3.4: the polling client must be the one the code was issued to.
@@ -318,14 +330,6 @@ defmodule Attesto.DeviceCode do
     case :crypto.strong_rand_bytes(1) do
       <<b>> when b < @rejection_ceiling -> Enum.at(@user_code_alphabet, rem(b, @alphabet_size))
       _ -> random_alphabet_char()
-    end
-  end
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> System.system_time(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
     end
   end
 end

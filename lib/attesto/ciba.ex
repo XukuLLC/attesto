@@ -45,6 +45,7 @@ defmodule Attesto.CIBA do
 
   alias Attesto.CIBA.Grant
   alias Attesto.CIBA.Request
+  alias Attesto.NumericDate
   alias Attesto.Secret
 
   @grant_type "urn:openid:params:grant-type:ciba"
@@ -163,7 +164,7 @@ defmodule Attesto.CIBA do
   @spec issue(module(), Request.t(), issue_attrs(), keyword()) :: {:ok, issued()} | {:error, :invalid_subject}
   def issue(store, %Request{} = request, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
     with :ok <- require_subject(attrs) do
-      now = unix_now(opts)
+      now = NumericDate.now(opts, default: :system)
       expires_in = effective_expires_in(request, opts)
       interval = if request.delivery_mode != :push, do: Keyword.get(opts, :interval, @default_interval)
       auth_req_id = Secret.generate(@auth_req_id_bytes)
@@ -271,7 +272,7 @@ defmodule Attesto.CIBA do
   # serialized transition, so a concurrent approval is not clobbered (its
   # status is preserved; the next redeem observes it and mints).
   defp throttle_pending(store, hash, opts) do
-    case store.poll(hash, %{now: unix_now(opts)}) do
+    case store.poll(hash, %{now: NumericDate.now(opts, default: :system)}) do
       {:ok, _record} -> {:error, :authorization_pending}
       {:error, :slow_down} -> {:error, :slow_down}
       # Vanished between the read and the poll (e.g. swept): treat as unknown.
@@ -280,7 +281,7 @@ defmodule Attesto.CIBA do
   end
 
   defp consume(store, hash, opts) do
-    case store.consume(hash, %{now: unix_now(opts)}) do
+    case store.consume(hash, %{now: NumericDate.now(opts, default: :system)}) do
       {:ok, record} ->
         {:ok, Grant.from_record(record)}
 
@@ -315,7 +316,7 @@ defmodule Attesto.CIBA do
              :not_found | :already_decided | :expired | :invalid_auth_req_id | :invalid_subject | :subject_mismatch}
   def approve(store, auth_req_id, approval, opts \\ [])
       when is_atom(store) and is_binary(auth_req_id) and is_map(approval) and is_list(opts) do
-    now = unix_now(opts)
+    now = NumericDate.now(opts, default: :system)
 
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id),
          :ok <- require_subject(approval),
@@ -349,7 +350,7 @@ defmodule Attesto.CIBA do
           {:ok, decision()} | {:error, :not_found | :already_decided | :expired | :invalid_auth_req_id}
   def deny(store, auth_req_id, opts \\ []) when is_atom(store) and is_binary(auth_req_id) and is_list(opts) do
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id) do
-      case store.deny(hash, %{now: unix_now(opts)}) do
+      case store.deny(hash, %{now: NumericDate.now(opts, default: :system)}) do
         {:ok, record} -> {:ok, decision_view(record)}
         {:error, _reason} = err -> err
       end
@@ -434,7 +435,7 @@ defmodule Attesto.CIBA do
   end
 
   defp check_not_expired(%{expires_at: expires_at}, opts) do
-    if expires_at > unix_now(opts), do: :ok, else: {:error, :expired_token}
+    if expires_at > NumericDate.now(opts, default: :system), do: :ok, else: {:error, :expired_token}
   end
 
   # §11: an auth_req_id "issued to another Client" is invalid_grant.
@@ -485,13 +486,5 @@ defmodule Attesto.CIBA do
       status: record.status,
       subject: Map.get(data, :subject)
     }
-  end
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> System.system_time(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
   end
 end

@@ -24,7 +24,7 @@ defmodule Attesto.SdJwtVc do
   Conn-free and fail-closed, like the rest of attesto core.
   """
 
-  alias Attesto.SdJwt
+  alias Attesto.{NumericDate, SdJwt}
 
   # RFC-registered media type for an SD-JWT VC; the newer draft additionally
   # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
@@ -75,7 +75,11 @@ defmodule Attesto.SdJwtVc do
     disclosable = Keyword.get(opts, :disclosable, Map.keys(subject_claims))
 
     registered =
-      %{"iss" => iss, "vct" => vct, "iat" => Keyword.get(opts, :iat, now(opts))}
+      %{
+        "iss" => iss,
+        "vct" => vct,
+        "iat" => Keyword.get(opts, :iat, NumericDate.now(opts, invalid_override: :fallback))
+      }
       |> put_present("exp", Keyword.get(opts, :exp))
       |> put_present("nbf", Keyword.get(opts, :nbf))
       |> put_present("sub", Keyword.get(opts, :sub))
@@ -142,14 +146,26 @@ defmodule Attesto.SdJwtVc do
   # `exp`/`nbf` are OPTIONAL in SD-JWT VC, but when present must hold. A present
   # non-integer value is malformed and fails closed (mirrors `Attesto.Token`).
   defp check_exp(%{"exp" => exp}, opts) when is_integer(exp) do
-    if exp > now(opts) - @clock_skew_seconds, do: :ok, else: {:error, :expired}
+    if NumericDate.not_expired?(
+         exp,
+         NumericDate.now(opts, invalid_override: :fallback),
+         leeway: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :expired}
   end
 
   defp check_exp(%{"exp" => _}, _opts), do: {:error, :expired}
   defp check_exp(_claims, _opts), do: :ok
 
   defp check_nbf(%{"nbf" => nbf}, opts) when is_integer(nbf) do
-    if nbf <= now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(
+         nbf,
+         NumericDate.now(opts, invalid_override: :fallback),
+         skew: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :not_yet_valid}
   end
 
   defp check_nbf(%{"nbf" => _}, _opts), do: {:error, :not_yet_valid}
@@ -157,12 +173,4 @@ defmodule Attesto.SdJwtVc do
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
-
-  defp now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-      n when is_integer(n) -> n
-      _ -> DateTime.utc_now() |> DateTime.to_unix(:second)
-    end
-  end
 end

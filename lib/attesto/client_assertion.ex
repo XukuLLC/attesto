@@ -18,6 +18,7 @@ defmodule Attesto.ClientAssertion do
   """
 
   alias Attesto.JWS
+  alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @assertion_type "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -133,22 +134,33 @@ defmodule Attesto.ClientAssertion do
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) and exp >= 0 do
-    now = unix_now(opts)
-    if exp > now, do: check_max_lifetime(exp, now, opts), else: {:error, :expired}
+    now = NumericDate.now(opts, default: :system, invalid_override: :fallback)
+
+    if NumericDate.not_expired?(exp, now, leeway: 0),
+      do: check_max_lifetime(exp, now, opts),
+      else: {:error, :expired}
   end
 
   defp check_expiry(_claims, _opts), do: {:error, :expired}
 
   defp check_max_lifetime(exp, now, opts) do
     case Keyword.get(opts, :max_lifetime) do
-      n when is_integer(n) and n > 0 and exp - now <= n -> :ok
-      n when is_integer(n) and n > 0 -> {:error, :invalid_assertion}
-      _ -> :ok
+      n when is_integer(n) and n > 0 ->
+        if NumericDate.within_lifetime?(exp, now, n), do: :ok, else: {:error, :invalid_assertion}
+
+      _ ->
+        :ok
     end
   end
 
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
-    if iat <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(
+         iat,
+         NumericDate.now(opts, default: :system, invalid_override: :fallback),
+         skew: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :not_yet_valid}
   end
 
   defp check_iat(%{"iat" => _}, _opts), do: {:error, :not_yet_valid}
@@ -156,14 +168,6 @@ defmodule Attesto.ClientAssertion do
 
   defp check_jti(%{"jti" => jti}) when is_binary(jti) and jti != "", do: :ok
   defp check_jti(_claims), do: {:error, :missing_jti}
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt)
-      n when is_integer(n) -> n
-      _ -> System.system_time(:second)
-    end
-  end
 
   defp check_crit(header) do
     case JWS.reject_unsupported_crit(header, supported: []) do

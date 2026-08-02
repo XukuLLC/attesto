@@ -29,7 +29,7 @@ defmodule Attesto.SignedIntrospection do
   with that pinned algorithm (never `none`).
   """
 
-  alias Attesto.{Config, JWS, Key, SigningAlg}
+  alias Attesto.{Config, JWS, Key, NumericDate, SigningAlg}
 
   # RFC 9701 §5: the explicit media type of a signed introspection response.
   @header_typ "token-introspection+jwt"
@@ -57,7 +57,7 @@ defmodule Attesto.SignedIntrospection do
           {:ok, String.t()}
   def response_jwt(%Config{} = config, audience, introspection_response, opts \\ [])
       when is_binary(audience) and audience != "" and is_map(introspection_response) do
-    now = unix_now(opts)
+    now = NumericDate.now(opts)
 
     claims =
       %{
@@ -83,14 +83,6 @@ defmodule Attesto.SignedIntrospection do
     case Keyword.get(opts, :lifetime) do
       n when is_integer(n) and n > 0 -> Map.put(claims, "exp", now + n)
       _ -> claims
-    end
-  end
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
     end
   end
 end

@@ -73,6 +73,23 @@ defmodule Attesto.SdJwtVcTest do
       future = SdJwtVc.issue([iss: "i", vct: "t", pem: pem], nbf: now + 3600)
       assert {:error, :not_yet_valid} = SdJwtVc.verify(future, jwk, now: now)
     end
+
+    test "keeps the 60-second expiry and not-before leeway boundaries" do
+      {pem, jwk} = keypair()
+      now = 1_700_000_000
+
+      accepted_exp = SdJwtVc.issue([iss: "i", vct: "t", pem: pem], exp: now - 30, iat: now)
+      assert {:ok, _} = SdJwtVc.verify(accepted_exp, jwk, now: now)
+
+      rejected_exp = SdJwtVc.issue([iss: "i", vct: "t", pem: pem], exp: now - 61, iat: now)
+      assert {:error, :expired} = SdJwtVc.verify(rejected_exp, jwk, now: now)
+
+      accepted_nbf = SdJwtVc.issue([iss: "i", vct: "t", pem: pem], nbf: now + 60, iat: now)
+      assert {:ok, _} = SdJwtVc.verify(accepted_nbf, jwk, now: now)
+
+      rejected_nbf = SdJwtVc.issue([iss: "i", vct: "t", pem: pem], nbf: now + 61, iat: now)
+      assert {:error, :not_yet_valid} = SdJwtVc.verify(rejected_nbf, jwk, now: now)
+    end
   end
 
   test "holder key binding verifies against the credential's cnf key" do

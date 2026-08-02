@@ -88,6 +88,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     alias Attesto.DPoP
     alias Attesto.MTLS
+    alias Attesto.NumericDate
     alias Attesto.Plug.OAuthError
     alias Attesto.StepUp.Requirement
     alias Attesto.Token
@@ -544,7 +545,11 @@ if Code.ensure_loaded?(Plug.Conn) do
           :ok
 
         spec ->
-          case Attesto.StepUp.evaluate(Requirement.parse(spec), claims, step_up_now(opts)) do
+          case Attesto.StepUp.evaluate(
+                 Requirement.parse(spec),
+                 claims,
+                 NumericDate.now(opts, default: :system, invalid_override: :fallback)
+               ) do
             :ok -> :ok
             {:error, :insufficient_user_authentication, challenge} -> {:challenge, challenge}
           end
@@ -555,13 +560,5 @@ if Code.ensure_loaded?(Plug.Conn) do
     # presented and re-challenged under DPoP), mirroring the scope-rejection path.
     defp step_up_scheme(%{"cnf" => %{"jkt" => jkt}}) when is_binary(jkt), do: :dpop
     defp step_up_scheme(_claims), do: :bearer
-
-    defp step_up_now(opts) do
-      case Keyword.get(opts, :now) do
-        %DateTime{} = dt -> DateTime.to_unix(dt)
-        n when is_integer(n) -> n
-        _ -> System.system_time(:second)
-      end
-    end
   end
 end

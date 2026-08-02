@@ -46,6 +46,39 @@ defmodule Attesto.ClientAssertionTest do
     assert claims["sub"] == @client_id
   end
 
+  test "keeps zero expiry leeway and 60-second future iat skew" do
+    key = ec_key()
+    now = 1_700_000_000
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    assert {:error, :expired} =
+             ClientAssertion.verify(
+               assertion(key, %{"iat" => now, "exp" => now}),
+               @client_id,
+               @audience,
+               trusted,
+               now: now
+             )
+
+    assert {:ok, _} =
+             ClientAssertion.verify(
+               assertion(key, %{"iat" => now + 60, "exp" => now + 300}),
+               @client_id,
+               @audience,
+               trusted,
+               now: now
+             )
+
+    assert {:error, :not_yet_valid} =
+             ClientAssertion.verify(
+               assertion(key, %{"iat" => now + 61, "exp" => now + 300}),
+               @client_id,
+               @audience,
+               trusted,
+               now: now
+             )
+  end
+
   test "rejects the whole trusted set when one candidate JWK is malformed" do
     key = ec_key()
     jwt = assertion(key)

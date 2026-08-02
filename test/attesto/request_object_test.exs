@@ -246,6 +246,19 @@ defmodule Attesto.RequestObjectTest do
                RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts() ++ [now: now])
     end
 
+    test "accepts nbf exactly at the 60-second skew boundary" do
+      key = ec_key()
+      now = 1_700_000_000
+      jwt = request_object(key, %{"iat" => now, "nbf" => now + 60})
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [now: now]
+               )
+    end
+
     test "require_nbf rejects a non-integer nbf" do
       key = ec_key()
       jwt = request_object(key, %{"nbf" => "soon"})
@@ -348,6 +361,25 @@ defmodule Attesto.RequestObjectTest do
                  jwt,
                  %{"keys" => [public_jwk(key)]},
                  base_opts() ++ [require_exp: true]
+               )
+    end
+
+    test "keeps zero expiry leeway and ignores malformed optional temporal claims" do
+      key = ec_key()
+      now = 1_700_000_000
+
+      assert {:error, :expired} =
+               RequestObject.verify(
+                 request_object(key, %{"iat" => now, "exp" => now}),
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [now: now]
+               )
+
+      assert {:ok, _params} =
+               RequestObject.verify(
+                 request_object(key, %{"iat" => now, "exp" => "later", "nbf" => "soon"}),
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [now: now]
                )
     end
 

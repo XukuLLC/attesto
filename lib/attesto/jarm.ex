@@ -29,7 +29,7 @@ defmodule Attesto.JARM do
   signed with that pinned algorithm (never `none`).
   """
 
-  alias Attesto.{Claims, Config, JWS, Key, SigningAlg}
+  alias Attesto.{Claims, Config, JWS, Key, NumericDate, SigningAlg}
 
   # JARM responses are consumed immediately by the client on the redirect, so
   # the JWT is short-lived. `:lifetime` may only shorten this default.
@@ -57,7 +57,7 @@ defmodule Attesto.JARM do
           {:ok, String.t()}
   def response_jwt(%Config{} = config, client_id, params, opts \\ [])
       when is_binary(client_id) and client_id != "" and is_map(params) do
-    now = unix_now(opts)
+    now = NumericDate.now(opts)
 
     claims =
       params
@@ -114,14 +114,6 @@ defmodule Attesto.JARM do
     case Keyword.get(opts, :lifetime) do
       n when is_integer(n) and n > 0 and n <= @default_lifetime_seconds -> n
       _ -> @default_lifetime_seconds
-    end
-  end
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
     end
   end
 end

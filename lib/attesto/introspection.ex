@@ -40,7 +40,7 @@ defmodule Attesto.Introspection do
   unmatched hint still falls through to the other.
   """
 
-  alias Attesto.{Config, Secret, Token}
+  alias Attesto.{Config, NumericDate, Secret, Token}
 
   @inactive %{"active" => false}
 
@@ -156,7 +156,7 @@ defmodule Attesto.Introspection do
   defp refresh_token_response(_config, token, opts) do
     with store when is_atom(store) and not is_nil(store) <- Keyword.get(opts, :refresh_store),
          {:ok, entry} <- store.get(Secret.hash(token)),
-         true <- active_refresh?(entry, now(opts)) do
+         true <- active_refresh?(entry, NumericDate.now(opts)) do
       rfc7662_refresh_response(entry)
     else
       _ -> nil
@@ -243,14 +243,6 @@ defmodule Attesto.Introspection do
     case Map.get(claims, key) do
       nil -> response
       value -> Map.put(response, key, value)
-    end
-  end
-
-  defp now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
     end
   end
 end

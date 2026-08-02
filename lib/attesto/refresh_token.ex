@@ -29,6 +29,7 @@ defmodule Attesto.RefreshToken do
   token, not the code); rotation is deliberately the stricter of the two.
   """
 
+  alias Attesto.NumericDate
   alias Attesto.Scope
   alias Attesto.Secret
   alias Attesto.Thumbprint
@@ -108,7 +109,7 @@ defmodule Attesto.RefreshToken do
              family_id: family_id,
              generation: generation,
              data: data,
-             expires_at: unix_now(opts) + ttl,
+             expires_at: NumericDate.now(opts) + ttl,
              consumed: false,
              consumed_at: nil,
              successor: nil
@@ -268,7 +269,7 @@ defmodule Attesto.RefreshToken do
               generation: issued.generation,
               context: successor_data
             },
-            now: unix_now(opts)
+            now: NumericDate.now(opts)
           )
 
         {:ok,
@@ -362,7 +363,7 @@ defmodule Attesto.RefreshToken do
   # rotation claimed this token between our read and here, `consume`
   # reports `{:reuse, _}` and we revoke the family.
   defp claim(store, record, opts) do
-    case store.consume(record.token_hash, now: unix_now(opts)) do
+    case store.consume(record.token_hash, now: NumericDate.now(opts)) do
       {:ok, claimed} ->
         {:ok, claimed}
 
@@ -379,7 +380,7 @@ defmodule Attesto.RefreshToken do
     consumed_at = Map.get(record, :consumed_at)
 
     is_integer(grace) and grace > 0 and is_integer(consumed_at) and
-      unix_now(opts) - consumed_at <= grace
+      NumericDate.now(opts) - consumed_at <= grace
   end
 
   defp same_successor(record, scope, resource) do
@@ -439,7 +440,7 @@ defmodule Attesto.RefreshToken do
   defp valid_optional_auth_time?(auth_time), do: is_integer(auth_time) and auth_time >= 0
 
   defp check_expiry(%{expires_at: expires_at}, opts) do
-    if expires_at > unix_now(opts), do: :ok, else: {:error, :expired}
+    if expires_at > NumericDate.now(opts), do: :ok, else: {:error, :expired}
   end
 
   defp check_dpop(%{dpop_jkt: bound}, opts) when is_binary(bound) do
@@ -466,12 +467,4 @@ defmodule Attesto.RefreshToken do
   defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &non_empty_binary?/1)
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 end

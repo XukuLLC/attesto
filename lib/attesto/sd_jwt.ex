@@ -39,7 +39,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, SecureCompare, SigningAlg}
+  alias Attesto.{JWS, NumericDate, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -504,10 +504,12 @@ defmodule Attesto.SdJwt do
   defp check_kb_audience(_claims, _opts), do: {:error, :invalid_key_binding}
 
   defp check_kb_iat(%{"iat" => iat}, opts) when is_integer(iat) do
-    now = kb_now(opts)
+    now = NumericDate.now(opts, invalid_override: :fallback)
     max_age = Keyword.get(opts, :max_age_seconds, @default_kb_max_age)
     # Reject a future-dated or too-old key binding.
-    if iat <= now + 60 and iat >= now - max_age, do: :ok, else: {:error, :invalid_key_binding}
+    if NumericDate.fresh?(iat, now, future_skew: 60, max_age: max_age) == :ok,
+      do: :ok,
+      else: {:error, :invalid_key_binding}
   end
 
   defp check_kb_iat(_claims, _opts), do: {:error, :invalid_key_binding}
@@ -560,14 +562,6 @@ defmodule Attesto.SdJwt do
   defp hash_algorithm("sha-384"), do: :sha384
   defp hash_algorithm("sha-512"), do: :sha512
   defp hash_algorithm(other), do: raise(ArgumentError, "unsupported _sd_alg: #{inspect(other)}")
-
-  defp kb_now(opts) do
-    case Keyword.get(opts, :now) do
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-      n when is_integer(n) -> n
-      _ -> DateTime.utc_now() |> DateTime.to_unix(:second)
-    end
-  end
 
   defp b64(bytes), do: Base.url_encode64(bytes, padding: false)
 end

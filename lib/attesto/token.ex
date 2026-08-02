@@ -72,6 +72,7 @@ defmodule Attesto.Token do
   alias Attesto.Config
   alias Attesto.JWS
   alias Attesto.Key
+  alias Attesto.NumericDate
   alias Attesto.PrincipalKind
   alias Attesto.Scope
   alias Attesto.SigningAlg
@@ -215,7 +216,7 @@ defmodule Attesto.Token do
          {:ok, audience} <- normalize_audience(config, opts),
          {:ok, auth_context} <- normalize_auth_context(opts),
          {:ok, confirmation} <- normalize_confirmation(opts) do
-      iat = unix_now(opts)
+      iat = NumericDate.now(opts)
       lifetime = lifetime_seconds(config, opts)
       scope_string = Enum.join(scopes, " ")
 
@@ -809,7 +810,9 @@ defmodule Attesto.Token do
   defp trusted_audience?(_audience, _trusted), do: false
 
   defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
-    if exp > unix_now(opts), do: :ok, else: {:error, :expired}
+    if NumericDate.not_expired?(exp, NumericDate.now(opts), leeway: 0),
+      do: :ok,
+      else: {:error, :expired}
   end
 
   defp check_expiry(_claims, _opts), do: {:error, :expired}
@@ -818,7 +821,9 @@ defmodule Attesto.Token do
   # is optional - absent is fine - but if present it must be an integer no
   # later than now (a small skew tolerates a slightly fast verifier clock).
   defp check_not_before(%{"nbf" => nbf}, opts) when is_integer(nbf) do
-    if nbf <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(nbf, NumericDate.now(opts), skew: @clock_skew_seconds),
+      do: :ok,
+      else: {:error, :not_yet_valid}
   end
 
   defp check_not_before(%{"nbf" => _}, _opts), do: {:error, :invalid_claims}
@@ -828,7 +833,9 @@ defmodule Attesto.Token do
   # a clock far ahead of ours or forged; reject it (with the same modest
   # skew). `iat` integer-ness is established by `check_required_claims/2`.
   defp check_iat_not_future(%{"iat" => iat}, opts) when is_integer(iat) do
-    if iat <= unix_now(opts) + @clock_skew_seconds, do: :ok, else: {:error, :not_yet_valid}
+    if NumericDate.not_before_reached?(iat, NumericDate.now(opts), skew: @clock_skew_seconds),
+      do: :ok,
+      else: {:error, :not_yet_valid}
   end
 
   defp check_iat_not_future(_claims, _opts), do: :ok
@@ -884,14 +891,6 @@ defmodule Attesto.Token do
 
   defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
-
-  defp unix_now(opts) do
-    case Keyword.get(opts, :now) do
-      nil -> DateTime.utc_now() |> DateTime.to_unix(:second)
-      n when is_integer(n) -> n
-      %DateTime{} = dt -> DateTime.to_unix(dt, :second)
-    end
-  end
 
   # `:lifetime` may only shorten the configured default - a larger value
   # (or a non-positive / non-integer) falls back to the default, capping

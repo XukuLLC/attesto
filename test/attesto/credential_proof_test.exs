@@ -14,19 +14,23 @@ defmodule Attesto.CredentialProofTest do
     jwk_map
   end
 
-  defp sign_proof(key, jwk_map) do
+  defp sign_proof(key, jwk_map, claim_overrides \\ %{}) do
     header = %{
       "alg" => "ES256",
       "jwk" => jwk_map,
       "typ" => "openid4vci-proof+jwt"
     }
 
-    claims = %{
-      "aud" => @issuer,
-      "iat" => @now,
-      "iss" => @client_id,
-      "nonce" => @nonce
-    }
+    claims =
+      Map.merge(
+        %{
+          "aud" => @issuer,
+          "iat" => @now,
+          "iss" => @client_id,
+          "nonce" => @nonce
+        },
+        claim_overrides
+      )
 
     {_, proof} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
     proof
@@ -59,5 +63,25 @@ defmodule Attesto.CredentialProofTest do
     proof = sign_proof(signer, public_map(embedded))
 
     assert {:error, :invalid_signature} = CredentialProof.verify_jwt(proof, verify_opts())
+  end
+
+  test "keeps the 300-second age and 60-second future-skew boundaries" do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    jwk_map = public_map(key)
+
+    for {offset, expected} <- [
+          {-300, :ok},
+          {-301, :error},
+          {60, :ok},
+          {61, :error}
+        ] do
+      proof = sign_proof(key, jwk_map, %{"iat" => @now + offset})
+
+      case {expected, CredentialProof.verify_jwt(proof, verify_opts())} do
+        {:ok, {:ok, _}} -> :ok
+        {:error, {:error, :invalid_iat}} -> :ok
+        _ -> flunk("unexpected result at iat offset #{offset}")
+      end
+    end
   end
 end

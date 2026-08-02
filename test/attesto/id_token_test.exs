@@ -514,6 +514,34 @@ defmodule Attesto.IDTokenTest do
                IDToken.verify(config, jwt, client_id: @client_id, now: now)
     end
 
+    test "keeps zero expiry leeway and 60-second future iat skew", %{config: config} do
+      now = 1_700_000_000
+
+      assert {:error, :expired} =
+               IDToken.verify(
+                 config,
+                 signed_id_token(config, %{iat: now, exp: now}),
+                 client_id: @client_id,
+                 now: now
+               )
+
+      assert {:ok, _} =
+               IDToken.verify(
+                 config,
+                 signed_id_token(config, %{iat: now + 60, exp: now + 300}),
+                 client_id: @client_id,
+                 now: now
+               )
+
+      assert {:error, :not_yet_valid} =
+               IDToken.verify(
+                 config,
+                 signed_id_token(config, %{iat: now + 61, exp: now + 300}),
+                 client_id: @client_id,
+                 now: now
+               )
+    end
+
     test "rejects a structurally broken token", %{config: config} do
       assert {:error, :invalid_token} = IDToken.verify(config, "not.a.jwt", client_id: @client_id)
     end
