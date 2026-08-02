@@ -4,6 +4,81 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-01
+
+### Security
+
+- Claim a DPoP proof's `jti` only after the access token has verified.
+  `Attesto.Plug.Authenticate` ran `:replay_check` during proof validation, two
+  steps before `verify_token`. That callback is check-AND-record — the default
+  claims the identifier with `:ets.insert_new/2` in the same step that tests it
+  — so an unauthenticated caller wrote a row on every request. A DPoP proof is
+  signed by a key the caller generated, so anyone can mint a valid one, pair it
+  with any string in the `Authorization` header, and grow an unbounded ETS table
+  for the cost of a signature.
+
+  The guarantee is unchanged: the claim still happens before the request is
+  served, it is still the same atomic check-and-record, and a replayed `jti` on
+  an otherwise-valid request is still refused (RFC 9449 §11.1).
+
+  The authorization-server path needed the same fix, in `attesto_phoenix` — an
+  earlier draft of this entry claimed it did not, on the grounds that
+  `%Request{}` carries an authenticated client. That is false for a **public
+  client** (RFC 6749 §2.1), which presents a `client_id` and no credential, so
+  the same unauthenticated write was reachable at the token endpoint. See that
+  package's changelog.
+
+- `Attesto.SecureCompare.equal?/2` no longer short-circuits on a length
+  mismatch. Both operands are hashed to 32 bytes and those digests are
+  compared, so the comparison no longer separates "wrong length" from "right
+  length, wrong bytes" — the distinction an attacker probes with. A matching
+  pair does one extra byte comparison to rule out a digest collision; that
+  branch separates right from wrong, which the answer already reveals.
+
+  `Attesto.PKCE.verify/3` was never exposed - it gates on
+  `Attesto.Thumbprint.valid?/1`, which requires an exact byte size - but
+  `Attesto.DPoP`'s `ath` comparison takes an arbitrary-length value straight
+  from the presented proof, so it was, and it is the caller this most benefits.
+
+  Note what the change does and does not buy: the comparison no longer reveals
+  HOW the operands differ, but hashing reads every byte, so its duration still
+  depends on their total size.
+
+### Added
+
+- `Attesto.Telemetry` — `:telemetry` events for the refusals that mean someone
+  holds a credential they should not:
+
+  | Event | Fires when |
+  |---|---|
+  | `[:attesto, :refresh_token, :reuse_detected]` | a rotated token is presented again; the family has been revoked |
+  | `[:attesto, :dpop, :replay_detected]` | a proof carries an already-recorded `jti` |
+  | `[:attesto, :token, :sender_constraint_mismatch]` | a sender-bound token is presented with the wrong proof of possession |
+
+  Previously these returned an atom and nothing else, so a host that wanted to
+  alert had to wrap every call site. Metadata carries correlation handles
+  (`family_id`, `client_id`, `subject`, `jti`, `binding`, `reason`). No
+  credential or digest of one is ever copied into an event, but some handles are
+  read out of credentials - `jti` from the proof, `client_id` from the token -
+  and `jti` is the client's to choose, so a handler should treat metadata as
+  untrusted input. The events are indicators to correlate, not proof of theft. Ordinary failures — expired,
+  unknown client, wrong scope — are deliberately not events. Event names and
+  metadata keys are public API; see the module docs.
+
+  Adds `:telemetry` as a dependency.
+
+- `Attesto.DPoP.verify_proof/2` now reports the `replay_ttl` it derived, so a
+  caller claiming the `jti` itself uses that verification's own acceptance
+  window rather than re-deriving the formula.
+
+### Documentation
+
+- `Attesto.DPoP.ReplayCache` now names `AttestoPhoenix.Store.EctoReplayCheck` as
+  the shared-store implementation to use on a multi-node deployment. It
+  previously described one in the abstract ("e.g. a Postgres-backed cache"),
+  which read as an instruction to go and build something the family already
+  ships.
+
 ## [1.5.0] - 2026-07-28
 
 ### Security

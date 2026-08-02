@@ -75,7 +75,8 @@ defmodule Attesto.ConcurrencySwarmTest do
       # a loser whose read landed after a concurrent revoke deleted the row
       # (:invalid_grant). All three are safe.
       assert Enum.all?(results, fn r ->
-               match?({:ok, _}, r) or r in [{:error, :reuse_detected}, {:error, :invalid_grant}]
+               match?({:ok, _}, r) or
+                 r in [{:error, :reuse_detected}, {:error, :grant_revoked}, {:error, :invalid_grant}]
              end),
              "results must be {:ok,_}, :reuse_detected, or :invalid_grant; got #{inspect(results)}"
 

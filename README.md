@@ -104,6 +104,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
 - [What you supply / what's in the box](#what-you-supply--whats-in-the-box)
 - [RFC coverage](#rfc-coverage)
 - [Plug integration (optional)](#plug-integration-optional)
+- [Security telemetry](#security-telemetry)
 - [Cluster safety](#cluster-safety)
 - [Status](#status)
 - [Development](#development)
@@ -123,7 +124,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
 ```elixir
 def deps do
   [
-    {:attesto, "~> 1.4"}
+    {:attesto, "~> 1.5"}
   ]
 end
 ```
@@ -354,6 +355,58 @@ add it only if you use this layer. The token-endpoint grant logic stays
 yours - client auth, policy, and store wiring are too host-specific for a
 fixed plug.
 
+## Security telemetry
+
+Most refusals are routine — an expired token, an unknown client, a scope
+that was not granted. Three are the shape a stolen credential makes, and
+each is emitted as a [`:telemetry`](https://hexdocs.pm/telemetry) event so
+it can reach a pager or a SIEM without wrapping every call site:
+
+| Event | Fires when |
+|---|---|
+| `[:attesto, :refresh_token, :reuse_detected]` | a rotated refresh token is presented again — **the family has already been revoked**, so this is the only notice that the session ended for a reason |
+| `[:attesto, :dpop, :replay_detected]` | a DPoP proof carries a `jti` the replay store already recorded |
+| `[:attesto, :token, :sender_constraint_mismatch]` | a DPoP- or mTLS-bound token is presented with the wrong proof of possession |
+
+**Indicators, not verdicts.** None of them proves theft. A client can
+present its own bound token under a second key as often as it likes, and a
+key rotation or a stale cached key produces the same mismatch innocently —
+so rate-limit and correlate before paging. `reuse_detected` is the one
+worth escalating fastest, because reaching it has already revoked the
+family. A rotation that finds its family revoked underneath it returns
+`:grant_revoked` and emits **nothing**: an ordinary logout can cause it,
+and the library cannot tell the two apart.
+
+**Handlers run synchronously.** `:telemetry` invokes them on the calling
+process with no timeout, so a handler that blocks blocks the refusal that
+produced the event. Hand work to a queue and return.
+
+```elixir
+:telemetry.attach_many(
+  "attesto-security",
+  Attesto.Telemetry.events(),
+  &MyApp.Security.handle_event/4,
+  nil
+)
+```
+
+Metadata carries correlation handles — `family_id`, `client_id`,
+`subject`, `jti`, `binding`, `reason`. No token, code, secret, or assertion
+is ever copied into an event, in plaintext or hashed, and nothing emitted
+can be presented to obtain anything.
+
+Some of those handles are read out of credentials, though — `jti` from the
+DPoP proof, `client_id` from the presented token — and carry whatever their
+author put there. `jti` in particular is the client's to choose. Treat
+metadata as untrusted input wherever the handler sends it, and treat the
+events as indicators to correlate rather than proof of theft;
+`Attesto.Telemetry` covers both. Event names and metadata keys are public
+API.
+
+Routine failures are deliberately **not** events. Emitting them would bury
+the three above in traffic that is simply what a healthy authorization
+server looks like.
+
 ## Cluster safety
 
 The engine is pure and stateless, so it is **cluster-safe by
@@ -362,7 +415,12 @@ node. All *state* (authorization codes, refresh-token families, seen DPoP
 `jti` values, DPoP nonces) lives behind storage behaviours whose contracts
 mandate the atomic primitives (atomic `take`, atomic compare-and-set
 `consume`, sticky family revocation). Implement those behaviours over a
-shared store (Postgres, Redis) and the whole system is cluster-safe.
+shared store (Postgres, Redis) and the whole system is cluster-safe — or
+take [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix), which
+ships Ecto implementations of all of them (including
+`AttestoPhoenix.Store.EctoReplayCheck`, whose unique constraint on `jti`
+makes the DPoP record-and-check atomic across nodes) with migrations and
+an expiry sweeper.
 
 The bundled ETS reference stores are deliberately **single-node** - a
 captured credential would otherwise be replayable once per node. Rather
@@ -374,7 +432,7 @@ constraint.
 
 ## Status
 
-A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS certificate-bound tokens, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, and Client ID Metadata Document (CIMD) verification. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host implements those over its own database (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.4`.
+A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS certificate-bound tokens, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.5`.
 
 ## Development
 

@@ -278,26 +278,37 @@ defmodule Attesto.Token do
        audience. When a `:trusted_audiences` list is supplied, a scalar
        audience must be in that explicit set and every member of an array
        audience must be trusted. A resolver-backed audience decision is
-       deferred until every other token check succeeds.
+       deferred until every other check EXCEPT the binding (step 10) has
+       succeeded - see that step for why it goes last.
     5. **Temporal.** `exp` is strictly greater than `now` (no skew
        leeway). If `nbf` is present it MUST be an integer no later than
        `now` (RFC 7519 §4.1.5; a small clock-skew tolerance applies), else
-       `:not_yet_valid`. An `iat` meaningfully in the future is also
        `:not_yet_valid`.
     6. **Required claims** are present and well-typed: `sub`/`jti`
        non-empty strings, `scope` a string, `iat` a non-negative integer,
-       and both the principal-kind claim and `typ` present.
-    7. **Principal.** The principal-kind claim names a configured kind AND
+       and both the principal-kind claim and `typ` present. This runs BEFORE
+       the future-`iat` check below, so a token that is both malformed and
+       future-dated reports `:invalid_claims`.
+    7. **`iat` not meaningfully in the future**, else `:not_yet_valid`.
+    8. **Principal.** The principal-kind claim names a configured kind AND
        `sub` begins with that kind's `sub_prefix`; otherwise
        `:invalid_principal`.
-    8. **Per-kind claims.** The kind's `required_claims` are all present
+    9. **Per-kind claims.** The kind's `required_claims` are all present
        with the right shape; otherwise `:invalid_claims`.
-    9. **`typ`** is a known value AND equals the expected purpose
+   10. **`typ`** is a known value AND equals the expected purpose
        (`:expected_typ`, default `"access"`).
-   10. **Binding.** A DPoP-bound token requires a matching `:dpop_jkt`; an
+   11. **Binding.** A DPoP-bound token requires a matching `:dpop_jkt`; an
        mTLS-bound token a matching `:mtls_cert_thumbprint`; an unbound
        token requires neither. The cross-scheme option MUST be absent.
        See the error list for the precise outcomes.
+
+       This runs LAST, after a resolver-backed audience decision, because a
+       binding mismatch emits
+       `[:attesto, :token, :sender_constraint_mismatch]`. Checking it earlier
+       let any sender-bound token from this issuer - not one this resource
+       would accept - raise that event by being presented under another key.
+       A token failing both therefore reports `:invalid_audience`, not the
+       binding error.
 
   ## Options
 
@@ -308,8 +319,11 @@ defmodule Attesto.Token do
       This is intended for authorization-server operations such as RFC 7662
       introspection that recognize multiple RFC 8707 resource audiences. The
       resolver receives claims only after signature, exact issuer, temporal,
-      required-claim, principal, purpose, and confirmation checks succeed; the
-      `aud` claim is syntactically valid but has not yet been authorized. Use
+      required-claim, principal, purpose, and confirmation-SHAPE checks
+      succeed; the `aud` claim is syntactically valid but has not yet been
+      authorized, and the sender BINDING has not yet been checked, so a
+      resolver may see a token whose proof of possession later proves wrong.
+      Use
       those claims only to select audience policy. Do not derive trust from
       `aud` itself or perform irreversible work in the resolver. A resolver
       failure or malformed return fails closed. This option never disables
@@ -343,8 +357,19 @@ defmodule Attesto.Token do
          {:ok, kind} <- check_principal(config, claims),
          :ok <- check_principal_identity_claims(kind, claims),
          :ok <- check_typ(claims, opts),
-         :ok <- maybe_check_confirmation_binding(claims, opts),
-         :ok <- check_deferred_audience(claims, opts) do
+         # Audience before binding, deliberately. `maybe_check_confirmation_binding/2`
+         # emits `[:attesto, :token, :sender_constraint_mismatch]`, an event
+         # documented as evidence that a token has left its holder. Evaluating
+         # it first meant any sender-bound token from this issuer - not one for
+         # this resource - could be presented here under a second DPoP key to
+         # raise that alarm. Nothing claims the proof's `jti` on a failed
+         # verification either, so the same proof could be replayed for its
+         # whole freshness window, making the alarm arbitrarily cheap to ring.
+         #
+         # Deciding "is this token even for me" first means a token this
+         # resource would refuse anyway never reaches the check that reports.
+         :ok <- check_deferred_audience(claims, opts),
+         :ok <- maybe_check_confirmation_binding(claims, opts) do
       {:ok, claims}
     end
   end
@@ -737,8 +762,16 @@ defmodule Attesto.Token do
       cross != nil -> {:error, :mtls_cert_unexpected}
       presented == nil -> {:error, :dpop_proof_required}
       presented == bound -> :ok
-      true -> {:error, :dpop_binding_mismatch}
+      true -> sender_constraint_mismatch(:dpop, :dpop_binding_mismatch, claims)
     end
+  end
+
+  # A sender-bound token presented with the wrong proof of possession is the
+  # signature of a token that has left the holder it was issued to, so it is
+  # reported as well as refused (see `Attesto.Telemetry`).
+  defp sender_constraint_mismatch(binding, reason, claims) do
+    Attesto.Telemetry.sender_constraint_mismatch(binding, reason, claims)
+    {:error, reason}
   end
 
   defp check_mtls_pair(claims, opts) do
@@ -750,7 +783,7 @@ defmodule Attesto.Token do
       cross != nil -> {:error, :dpop_proof_unexpected}
       presented == nil -> {:error, :mtls_cert_required}
       presented == bound -> :ok
-      true -> {:error, :mtls_binding_mismatch}
+      true -> sender_constraint_mismatch(:mtls, :mtls_binding_mismatch, claims)
     end
   end
 

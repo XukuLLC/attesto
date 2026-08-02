@@ -129,10 +129,15 @@ if Code.ensure_loaded?(Plug.Conn) do
     def call(conn, opts) do
       config = resolve_config(opts)
 
+      # The DPoP proof is verified before the token (its `jkt` is an input to
+      # token verification), but its `jti` is claimed only after - see
+      # `verify_dpop_proof/4`. Claiming earlier would let an unauthenticated
+      # request write to the replay store.
       with {:ok, scheme, token} <- authorization(conn, opts),
-           {:ok, dpop_jkt} <- verify_dpop(conn, scheme, token, opts),
+           {:ok, dpop_jkt, dpop_jti, replay_ttl} <- verify_dpop(conn, scheme, token, opts),
            {:ok, mtls_thumb} <- cert_thumbprint(conn, opts),
-           {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb, opts) do
+           {:ok, claims} <- verify_token(config, token, dpop_jkt, mtls_thumb, opts),
+           :ok <- claim_dpop_jti(dpop_jti, replay_ttl, opts) do
         conn = assign(conn, Keyword.get(opts, :claims_key, @default_claims_key), claims)
 
         # RFC 9470 §3: after the token is verified, enforce any route step-up
@@ -325,7 +330,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp verify_dpop(conn, :bearer, _token, _opts) do
       case get_req_header(conn, "dpop") do
         [_ | _] -> {:dpop_error, :dpop_scheme_required}
-        _ -> {:ok, nil}
+        _ -> {:ok, nil, nil, nil}
       end
     end
 
@@ -337,19 +342,81 @@ if Code.ensure_loaded?(Plug.Conn) do
     # acknowledged running unprotected. This is scoped to DPoP requests, so
     # a Bearer/mTLS-only deployment is never forced to provide a replay
     # store it has no use for.
+    # The proof is validated here but its `jti` is NOT yet claimed, and the
+    # ordering is deliberate. `:replay_check` is a check-AND-record operation:
+    # the default (`Attesto.DPoP.ReplayCache.check_and_record/2`) claims the
+    # identifier with `:ets.insert_new/2` in the same step that tests it.
+    # Running it during proof validation would mean an unauthenticated caller
+    # writes a row on every request: a DPoP proof is signed by a key the caller
+    # generated, so anyone can mint a valid one, pair it with any string in the
+    # `Authorization` header, and grow an unbounded table for the cost of a
+    # signature.
+    #
+    # So the `jti` travels out of here unclaimed and is claimed by
+    # `claim_dpop_jti/3` once the access token has verified. Nothing about the
+    # guarantee changes: the claim still happens before the request is served,
+    # it is still the same atomic check-and-record, and a replayed `jti` on an
+    # otherwise-valid request is still refused (RFC 9449 §11.1).
+    #
+    # What changes is the population that can write: a caller must now present
+    # a token this server issued before its proof costs the store anything.
+    # The claim is deliberately NOT deferred past that point - a request that
+    # authenticates and is then refused a step-up challenge (RFC 9470) has
+    # still had its proof claimed, because by then the proof HAS been used
+    # against a valid token and must not be replayable.
     defp verify_dpop_proof(conn, proof, token, opts) do
       if replay_protected?(opts) do
         verify_opts =
           [http_method: conn.method, http_uri: htu(conn, opts), access_token: token]
-          |> put_opt(:replay_check, Keyword.get(opts, :replay_check))
           |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
 
         case DPoP.verify_proof(proof, verify_opts) do
-          {:ok, %{jkt: jkt}} -> {:ok, jkt}
+          {:ok, %{jkt: jkt, jti: jti, replay_ttl: ttl}} -> {:ok, jkt, jti, ttl}
           {:error, reason} -> {:dpop_error, reason}
         end
       else
         {:dpop_error, :replay_check_unconfigured}
+      end
+    end
+
+    # Claim the proof identifier, now that the token behind it is known to be
+    # valid. A Bearer/mTLS request carries no proof and so has nothing to
+    # claim.
+    defp claim_dpop_jti(nil, _ttl, _opts), do: :ok
+
+    defp claim_dpop_jti(jti, ttl_seconds, opts) when is_binary(jti) do
+      case Keyword.get(opts, :replay_check) do
+        fun when is_function(fun, 2) ->
+          # The accepted results mirror `Attesto.DPoP.check_replay/2` exactly.
+          # Accepting any `{:error, _}` here would turn a replay-store outage
+          # (`{:error, :unavailable}` from a host's shared store, say) into a
+          # 401 `invalid_dpop_proof`, blaming the client for a server fault and
+          # hiding the outage. An unsupported return is a host integration bug
+          # and is raised, not translated.
+          case fun.(jti, ttl_seconds) do
+            :ok ->
+              :ok
+
+            {:error, :replay} ->
+              # RFC 9449 §11.1. Emitted here rather than in
+              # `Attesto.DPoP.check_replay/2`, because this plug deliberately
+              # does not hand `:replay_check` to `verify_proof/2` - the claim
+              # is deferred until the token has verified - so the core's
+              # emission point is never reached on this path.
+              Attesto.Telemetry.dpop_replay_detected(jti)
+              {:dpop_error, :replay}
+
+            other ->
+              raise ArgumentError,
+                    "Attesto.Plug.Authenticate :replay_check must return :ok or {:error, :replay}; " <>
+                      "got #{inspect(other)}"
+          end
+
+        _ ->
+          # `replay_protected?/1` already allowed this request through on the
+          # host's explicit acknowledgement that it runs without replay
+          # protection.
+          :ok
       end
     end
 

@@ -454,6 +454,145 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
     end
 
+    # RFC 9449 §11.1 requires single-use enforcement of the proof `jti`, and
+    # the default check is check-AND-record. Running it during proof
+    # validation would mean an unauthenticated caller writes a row on every
+    # request: a proof is signed by a key the caller generated, so anyone can
+    # mint a valid one and pair it with any string in the Authorization
+    # header. The claim therefore waits until the access token has verified.
+    test "a valid proof with an unverifiable token never claims its jti", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+
+      # A syntactically fine proof, correctly bound to the presented string -
+      # which is not a token this server issued.
+      garbage = "not.a.token"
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(garbage))
+
+      test_pid = self()
+
+      conn =
+        [{"authorization", "DPoP " <> garbage}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            replay_check: fn jti, _ttl ->
+              send(test_pid, {:claimed, jti})
+              :ok
+            end
+          )
+        )
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+
+      refute_received {:claimed, _jti},
+                      "an unauthenticated request must not write to the replay store"
+    end
+
+    test "a valid request does claim its jti", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: ath)
+
+      test_pid = self()
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            replay_check: fn jti, ttl ->
+              send(test_pid, {:claimed, jti, ttl})
+              :ok
+            end
+          )
+        )
+
+      refute conn.halted
+      assert_received {:claimed, jti, ttl}
+      assert is_binary(jti)
+      assert is_integer(ttl) and ttl > 0, "the claim must carry the verifier's own acceptance window"
+    end
+
+    # The property that must not regress: deferring WHEN the claim happens
+    # does not weaken WHETHER a replay is refused.
+    # The plug no longer routes through `DPoP.check_replay/2` (it defers the
+    # claim), so the core's emission point is never reached on this path. The
+    # advertised event has to come from the plug or it does not come at all.
+    test "a replay refused by the plug still emits the advertised event", %{config: config} do
+      handler = "plug-replay-telemetry"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:attesto, :dpop, :replay_detected],
+        fn _e, _m, meta, _c -> send(test_pid, {:replay_event, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(token))
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :replay} end))
+
+      assert conn.status == 401
+      assert_received {:replay_event, meta}
+      assert is_binary(meta.jti)
+    end
+
+    # A replay store that is down must not be reported as a bad client.
+    test "an unexpected :replay_check return raises rather than becoming a 401", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(token))
+
+      opts = Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :unavailable} end)
+
+      assert_raise ArgumentError, ~r/must return :ok or \{:error, :replay\}/, fn ->
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(opts)
+      end
+    end
+
+    test "a replayed jti on an otherwise-valid request is still refused", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: ath)
+
+      opts =
+        Authenticate.init(
+          config: config,
+          replay_check: fn _jti, _ttl -> {:error, :replay} end
+        )
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(opts)
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_dpop_proof"
+      assert JSON.decode!(conn.resp_body)["error_description"] == "replay"
+    end
+
     test "a proof bound to the wrong htu is 401 invalid_dpop_proof", %{config: config} do
       jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       jkt = JOSE.JWK.thumbprint(jwk)

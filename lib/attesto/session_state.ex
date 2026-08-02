@@ -146,7 +146,11 @@ defmodule Attesto.SessionState do
       browser state MUST rotate (Session Management 1.0 §3.2) and any earlier
       RP `session_state` becomes `changed`.
 
-  Both comparisons are constant-time.
+  Both comparisons go through `Attesto.SecureCompare.equal?/2`, so neither
+  reveals HOW the presented value differs - wrong length, or right length and
+  wrong bytes, take the same path. The segments come from an attacker-supplied
+  string and are not length-validated first, so the time taken still varies
+  with how much was submitted; see that module for the distinction.
   """
   @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
   def browser_state_valid?(secret, value, login_binding)

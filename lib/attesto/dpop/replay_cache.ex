@@ -20,14 +20,21 @@ defmodule Attesto.DPoP.ReplayCache do
   given access token reaches the same node - otherwise a captured proof
   is replayable once per node behind a load balancer. On a multi-node
   deployment you MUST swap the verifier's `:replay_check` callback for a
-  shared-store implementation (e.g. a Postgres-backed cache using
-  `INSERT ... ON CONFLICT DO NOTHING` for an atomic record-and-check, or
-  Redis) and set `:multi_node_acknowledged?: true` to silence the
-  boot-time guard. The verifier's `:replay_check` shape
-  (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any such
+  shared-store implementation and set `:multi_node_acknowledged?: true` to
+  silence the boot-time guard.
+
+  **`AttestoPhoenix.Store.EctoReplayCheck` is that implementation** if you
+  run `attesto_phoenix`: one relational table whose unique constraint on
+  `jti` makes the record-and-check atomic across every node, with a
+  matching schema and expiry sweeper. Reach for it before writing your own.
+  Any other shared store (Redis, or another database using
+  `INSERT ... ON CONFLICT DO NOTHING`) works too - the `:replay_check`
+  shape (`(jti, ttl_seconds) -> :ok | {:error, :replay}`) lets any
   replacement plug in without changes to `Attesto.DPoP`. The verifier
-  passes its own `:max_age_seconds` as `ttl_seconds`, so a shared store
-  can size each `jti`'s retention to the proof's freshness window.
+  passes its whole acceptance window as `ttl_seconds` - `:max_age_seconds`
+  plus the future-skew allowance it also tolerates, not `:max_age_seconds`
+  alone - so a shared store sized by that value cannot forget a `jti`
+  while a proof carrying it would still be accepted.
 
   The boot-time guard **raises** on startup if `Node.list/0` is non-empty
   and `:multi_node_acknowledged?` is not set - a clustered BEAM with a
@@ -36,12 +43,28 @@ defmodule Attesto.DPoP.ReplayCache do
   refuses to enter. Failing the supervised start surfaces the
   misconfiguration loudly rather than emitting a log nobody reads.
 
+  ## Retention is per entry, not per cache
+
+  How long a `jti` is remembered is decided by the caller, not by this
+  process: `check_and_record/2` takes the TTL as an argument and stamps it
+  onto the entry. `Attesto.DPoP.verify_proof/2` passes its whole acceptance
+  window, so retention tracks the verifier's freshness policy automatically
+  and a `jti` cannot be forgotten while a proof carrying it would still be
+  accepted.
+
+  There is deliberately no `:ttl_seconds` start option. One would be a
+  cache-wide value that `check_and_record/2` has no way to consult - it is
+  a plain function, not a call into this GenServer - so it could only ever
+  disagree with the TTL the verifier actually supplies.
+
+  `check_and_record/1` exists for a caller with no verifier to take the
+  window from, and falls back to 60 seconds. Prefer
+  the two-arity form: a caller that defers the claim itself (as
+  `Attesto.Plug.Authenticate` does) should pass the `replay_ttl` that
+  `verify_proof/2` returned, so the two agree by construction.
+
   ## Configuration (start options)
 
-    * `:ttl_seconds` (default `60`) - how long each `jti` is remembered.
-      SHOULD match (or modestly exceed) the verifier's `:max_age_seconds`
-      so a proof whose `iat` window has already closed is rejected by
-      freshness OR by replay, never just by eviction race.
     * `:sweep_interval_ms` (default `30_000`) - how often expired entries
       are deleted in bulk. The cache is correct without sweeping (lookups
       re-validate expiry); the sweeper just bounds table size.
@@ -52,7 +75,7 @@ defmodule Attesto.DPoP.ReplayCache do
   ## Wiring
 
       children = [
-        {Attesto.DPoP.ReplayCache, ttl_seconds: 60}
+        Attesto.DPoP.ReplayCache
       ]
 
   then, at the verifier:
