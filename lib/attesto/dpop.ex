@@ -52,19 +52,33 @@ defmodule Attesto.DPoP do
     1. The proof's `jti` is length-capped (see `@max_jti_length`) so an
       attacker cannot exhaust the cache by submitting proofs with
       megabyte-sized `jti` values.
-    2. If the caller supplies the `:replay_check` opt, the verifier
-      invokes it with the proof's `jti` AND the TTL the cache must remember
-      it for (the acceptance window: `max_age_seconds` + future skew),
-      AFTER every other check has passed (so an attacker cannot fill the
-      cache with proofs that would have failed anyway). Deriving the TTL
-      from the verifier's age policy keeps the cache from forgetting a
-      `jti` while the proof is still acceptable. The callback returns `:ok`
-      or `{:error, :replay}`. `Attesto.DPoP.ReplayCache` provides a default
-      ETS-backed implementation (`check_and_record/2`).
+    2. The proof's `jti` is recorded once, and rejected if already seen,
+      for the acceptance window (`max_age_seconds` + future skew). The
+      success map returns `jti` and `replay_ttl` so the caller can record
+      it; deriving the TTL from the verifier's age policy keeps the cache
+      from forgetting a `jti` while the proof is still acceptable.
+      `Attesto.DPoP.ReplayCache` provides a default ETS-backed store.
 
-  Protected-resource pipelines MUST pass `:replay_check`. Leaving it out
-  is acceptable only in test scaffolding and at the token endpoint on
-  first use of a proof (the endpoint records the `jti` itself).
+  ### Claim the `jti` only after the whole request has authenticated
+
+  A protected-resource pipeline MUST reject a replayed proof, but it MUST
+  record the `jti` **after** the access token and its `cnf.jkt` binding
+  verify - not during proof verification. Recording it earlier lets a
+  captured-but-otherwise-valid proof (presented with no token, or a token
+  that will fail binding) burn the `jti` first, so the legitimate request
+  carrying that same proof is then rejected as a replay: a targeted denial
+  of service. The token endpoint has the same obligation - record the
+  `jti` only once the grant has validated.
+
+  So the correct shape is: call `verify_proof/2` **without** `:replay_check`,
+  verify the access token and compare its `cnf.jkt` to the returned `jkt`,
+  and only then record the returned `jti` for `replay_ttl` seconds.
+  `Attesto.Plug.Authenticate` does exactly this.
+
+  The `:replay_check` opt records the `jti` inline, during verification,
+  before any of that. It exists for flows with no subsequent binding step
+  and for test scaffolding; a protected-resource or token pipeline should
+  prefer the defer-then-record shape above.
   """
 
   alias Attesto.SecureCompare
@@ -159,11 +173,14 @@ defmodule Attesto.DPoP do
       also accepted to tolerate modest client-side clock skew.
     * `:replay_check` - a two-arity function called with the proof's
       `jti` and the TTL (seconds) the store must remember it for, AFTER
-      every other check has passed. Returns `:ok` if the `jti` has not
-      been seen, or `{:error, :replay}` if it has. Required by
-      protected-resource pipelines; pass
-      `&Attesto.DPoP.ReplayCache.check_and_record/2`. Omit only in test
-      scaffolding.
+      every other proof check has passed. Returns `:ok` if the `jti` has
+      not been seen, or `{:error, :replay}` if it has. This records the
+      `jti` **inline**, before the caller has verified the access token
+      and its `cnf.jkt` binding - so a protected-resource or token
+      pipeline should NOT use it; omit it, verify the token, then record
+      the returned `jti`/`replay_ttl` (see the "Replay protection" section
+      and `Attesto.Plug.Authenticate`). Use it only for a flow with no
+      later binding step, or in test scaffolding.
     * `:nonce_check` - a one-arity function called with the proof's
       `nonce` claim (which may be `nil`). Returns `:ok` or
       `{:error, :use_dpop_nonce}` (RFC 9449 §8), the latter telling the

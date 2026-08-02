@@ -70,6 +70,23 @@ defmodule Attesto.SessionStateTest do
       assert SessionState.origin("/relative/path") == {:error, :invalid_uri}
       assert SessionState.origin("not a uri") == {:error, :invalid_uri}
     end
+
+    test "lowercases scheme and host to match the browser's WHATWG origin" do
+      # The browser reports MessageEvent.origin lowercased; a preserved-case
+      # origin would recompute unequal and answer a permanent false `changed`.
+      assert SessionState.origin("HTTPS://RP.Example.COM/cb") == {:ok, "https://rp.example.com"}
+      assert SessionState.origin("https://RP.Example:8443/cb") == {:ok, "https://rp.example:8443"}
+    end
+
+    test "wraps an IPv6 host in brackets and lowercases its hex" do
+      # URI.parse strips the brackets (host: "2001:DB8::1"); the browser origin
+      # keeps them, so interpolation must re-bracket or it emits a malformed
+      # (and never-matching) origin.
+      assert SessionState.origin("https://[2001:DB8::1]:8443/cb") ==
+               {:ok, "https://[2001:db8::1]:8443"}
+
+      assert SessionState.origin("http://[::1]/cb") == {:ok, "http://[::1]"}
+    end
   end
 
   describe "generated values" do

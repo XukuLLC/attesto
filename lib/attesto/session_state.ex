@@ -95,6 +95,21 @@ defmodule Attesto.SessionState do
   appended only when it is not the scheme's default — exactly the string the
   browser reports as `MessageEvent.origin` for a page loaded from `uri`.
 
+  The value must match the browser's WHATWG serialization byte-for-byte, or the
+  iframe recomputation compares unequal and the OP answers a permanent, false
+  `changed`. `URI.parse/1` (RFC 3986) diverges from the browser in two ways that
+  this corrects:
+
+    * **case** — the browser lowercases the scheme and host; `URI.parse/1`
+      preserves them (`https://RP.Example`), so both are lowercased here.
+    * **IPv6** — the browser serializes an IPv6 host in brackets
+      (`https://[::1]`); `URI.parse/1` strips them (`host: "::1"`), so a literal
+      host (one containing `:`) is re-bracketed here.
+
+  A host is expected already in ASCII/punycode form (as a registered
+  `redirect_uri` is): full IDNA Unicode→punycode mapping is out of scope, so a
+  raw non-ASCII host would still diverge.
+
   Returns `{:ok, origin}` or `{:error, :invalid_uri}` for a URI with no
   scheme/host (a `session_state` computed over a malformed origin could never
   compare equal in the browser, so fail closed instead).
@@ -104,11 +119,20 @@ defmodule Attesto.SessionState do
     case URI.parse(uri) do
       %URI{scheme: scheme, host: host} = parsed
       when is_binary(scheme) and scheme != "" and is_binary(host) and host != "" ->
+        scheme = String.downcase(scheme)
+        host = host |> String.downcase() |> bracket_ipv6()
         {:ok, "#{scheme}://#{host}#{origin_port(scheme, parsed.port)}"}
 
       _ ->
         {:error, :invalid_uri}
     end
+  end
+
+  # An IPv6 literal (the only host form containing `:`) must be wrapped in
+  # brackets to match the browser's WHATWG origin; a DNS host never contains a
+  # colon, so this is unambiguous.
+  defp bracket_ipv6(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
   end
 
   @doc "A fresh random salt for `compute/4` (unpadded URL-safe Base64, no spaces or dots)."
