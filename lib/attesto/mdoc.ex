@@ -614,8 +614,6 @@ if Code.ensure_loaded?(CBOR) do
       _kind, _reason -> {:error, :invalid_mdoc}
     end
 
-    defp decode_complete(_encoded), do: {:error, :invalid_mdoc}
-
     defp bytes(value) when is_binary(value), do: %CBOR.Tag{tag: :bytes, value: value}
 
     defp byte_string(%CBOR.Tag{tag: :bytes, value: value}) when is_binary(value), do: {:ok, value}

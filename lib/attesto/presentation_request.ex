@@ -97,11 +97,6 @@ defmodule Attesto.PresentationRequest do
     )
   end
 
-  defp normalize_dcql_query!(value) do
-    raise ArgumentError,
-          "Attesto.PresentationRequest :dcql_query must be a map; got #{inspect(value)}"
-  end
-
   defp credentials!(value, key) when is_list(value) and value != [] do
     if Enum.all?(value, &is_map/1) do
       credentials = Enum.map(value, &normalize_credential_query!/1)

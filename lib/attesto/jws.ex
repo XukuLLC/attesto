@@ -265,9 +265,16 @@ defmodule Attesto.JWS do
 
   defp verify_candidate(candidate, acc, jwt, opts) do
     case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} -> verified_candidate_result(claims, candidate, acc, opts)
-      {false, _jwt, _jws} -> {:cont, acc}
-      _other -> malformed_candidate_result(acc, opts)
+      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
+        verified_candidate_result(claims, candidate, acc, opts)
+
+      {false, _jwt, _jws} ->
+        {:cont, acc}
+
+      _other ->
+        malformed_result = Keyword.get(opts, :malformed_result, :halt)
+        malformed_error = Keyword.get(opts, :malformed_error, Keyword.get(opts, :terminal_error, :invalid_signature))
+        malformed_verification_result(acc, malformed_result, malformed_error)
     end
   end
 
@@ -280,12 +287,6 @@ defmodule Attesto.JWS do
     if claims_map? and not is_map(claims),
       do: malformed_verification_result(acc, malformed_result, malformed_error),
       else: {:halt, successful_verification(claims, candidate, return_key?)}
-  end
-
-  defp malformed_candidate_result(acc, opts) do
-    malformed_result = Keyword.get(opts, :malformed_result, :halt)
-    malformed_error = Keyword.get(opts, :malformed_error, Keyword.get(opts, :terminal_error, :invalid_signature))
-    malformed_verification_result(acc, malformed_result, malformed_error)
   end
 
   defp build_candidate!(key, opts) do

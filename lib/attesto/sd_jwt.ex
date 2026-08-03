@@ -60,6 +60,13 @@ defmodule Attesto.SdJwt do
           disclosures: [String.t()]
         }
 
+  @type key_binding_input :: %{
+          required(:key_binding_jwt) => String.t() | nil,
+          required(:issuer_jwt) => String.t(),
+          required(:disclosures) => [String.t()],
+          optional(term()) => term()
+        }
+
   @type verify_error ::
           :malformed
           | :invalid_signature
@@ -212,7 +219,7 @@ defmodule Attesto.SdJwt do
   holder signed over exactly the presentation the verifier reconstructed claims
   from.
   """
-  @spec verify_key_binding(verified(), map(), keyword()) :: :ok | {:error, atom()}
+  @spec verify_key_binding(key_binding_input(), map(), keyword()) :: :ok | {:error, atom()}
   def verify_key_binding(%{key_binding_jwt: nil}, _holder_jwk, _opts), do: {:error, :missing_key_binding}
 
   def verify_key_binding(%{} = verified, holder_jwk, opts) when is_map(holder_jwk) do
