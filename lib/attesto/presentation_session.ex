@@ -101,6 +101,23 @@ defmodule Attesto.PresentationSession do
   end
 
   @doc """
+  Attach the signed OID4VP request object to a pending session.
+
+  Called once at creation time (the request object needs the session's `nonce`
+  and its `id`/`state`, which `create/3` generates). Atomic on the pending
+  status. Returns `{:error, :unavailable}` if the session is unknown, expired,
+  or already completed.
+  """
+  @spec attach_request_object(module(), String.t(), String.t()) :: :ok | {:error, :unavailable}
+  def attach_request_object(store, id, request_object)
+      when is_atom(store) and is_binary(id) and is_binary(request_object) and request_object != "" do
+    case store.attach_request_object(id, request_object) do
+      :ok -> :ok
+      :error -> {:error, :unavailable}
+    end
+  end
+
+  @doc """
   Read a pending session's stored request object (the signed OID4VP request
   object the interface serves at its `request_uri`), if one was persisted at
   `create/3` via the optional `:request_object` attr. Returns `:error` for an

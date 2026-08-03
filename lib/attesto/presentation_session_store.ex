@@ -34,5 +34,14 @@ defmodule Attesto.PresentationSessionStore do
   @doc "Atomically fetch and clear an unexpired completed session."
   @callback take(id :: String.t()) :: {:ok, entry()} | :error
 
-  @optional_callbacks take: 1
+  @doc """
+  Atomically attach the signed request object to an unexpired pending session.
+
+  Called once at creation time (before the session id is published), so it
+  guards on `pending` like `complete/2`. Returns `:error` when the session is
+  unknown, expired, or no longer pending.
+  """
+  @callback attach_request_object(id :: String.t(), request_object :: String.t()) :: :ok | :error
+
+  @optional_callbacks take: 1, attach_request_object: 2
 end

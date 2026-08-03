@@ -64,6 +64,11 @@ defmodule Attesto.PresentationSessionStore.ETS do
     GenServer.call(__MODULE__, {:take, id})
   end
 
+  @impl Attesto.PresentationSessionStore
+  def attach_request_object(id, request_object) when is_binary(id) and is_binary(request_object) do
+    GenServer.call(__MODULE__, {:attach_request_object, id, request_object})
+  end
+
   @doc "Clear every entry. Test-facing."
   @spec reset() :: :ok
   def reset, do: GenServer.call(__MODULE__, :reset)
@@ -98,6 +103,23 @@ defmodule Attesto.PresentationSessionStore.ETS do
           completed_data = data |> Map.put(:status, :completed) |> Map.put(:result, result)
           completed = Map.put(entry, :data, completed_data)
           true = :ets.insert(@table, {id, expires_at, completed})
+          :ok
+
+        _other ->
+          :error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:attach_request_object, id, request_object}, _from, state) do
+    now = System.system_time(:second)
+
+    reply =
+      case :ets.lookup(@table, id) do
+        [{^id, expires_at, %{data: %{status: :pending} = data} = entry}] when expires_at > now ->
+          updated = Map.put(entry, :data, Map.put(data, :request_object, request_object))
+          true = :ets.insert(@table, {id, expires_at, updated})
           :ok
 
         _other ->

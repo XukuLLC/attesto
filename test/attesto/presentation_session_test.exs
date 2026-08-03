@@ -57,6 +57,25 @@ defmodule Attesto.PresentationSessionTest do
     assert :error = PresentationSession.request_object(Store, "unknown")
   end
 
+  test "attach_request_object/3 sets the request object on a pending session", ctx do
+    assert {:ok, %{id: id}} = create_session(ctx)
+    assert :error = PresentationSession.request_object(Store, id)
+
+    assert :ok = PresentationSession.attach_request_object(Store, id, "eyJ.attached.jar")
+    assert {:ok, "eyJ.attached.jar"} = PresentationSession.request_object(Store, id)
+
+    assert {:error, :unavailable} = PresentationSession.attach_request_object(Store, "unknown", "x.y.z")
+  end
+
+  test "attach_request_object/3 refuses a completed session", ctx do
+    {:ok, session} = create_session(ctx)
+    vp_token = valid_vp_token(ctx, session.nonce)
+    assert {:ok, _} = PresentationSession.verify_response(Store, {:state, session.id}, vp_token, now: ctx.now)
+
+    assert {:error, :unavailable} =
+             PresentationSession.attach_request_object(Store, session.id, "x.y.z")
+  end
+
   test "a valid response completes the session and makes its result readable", ctx do
     {:ok, session} = create_session(ctx)
     vp_token = valid_vp_token(ctx, session.nonce)
