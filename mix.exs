@@ -145,7 +145,7 @@ defmodule Attesto.MixProject do
         "Sender-constraint": [Attesto.DPoP, ReplayCache, Attesto.MTLS],
         Scopes: [Attesto.Scope],
         Metadata: [Attesto.JWKS, Attesto.Discovery],
-        Keys: [Attesto.Keystore, Static, Attesto.Key],
+        Keys: [Attesto.Keystore, Static, Attesto.Key, Attesto.Did],
         Observability: [Attesto.Telemetry],
         Shared: [
           Attesto.Thumbprint,
