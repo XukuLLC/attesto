@@ -101,6 +101,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
   - [Authorization request and response JWTs](#authorization-request-and-response-jwts)
   - [Token introspection](#token-introspection)
   - [Match scopes](#match-scopes)
+- [Verifiable credentials & EU digital identity (OID4VC)](#verifiable-credentials--eu-digital-identity-oid4vc)
 - [What you supply / what's in the box](#what-you-supply--whats-in-the-box)
 - [RFC coverage](#rfc-coverage)
 - [Plug integration (optional)](#plug-integration-optional)
@@ -278,6 +279,60 @@ Attesto.Scope.grants_all?(catalog, ["documents.read"], ["documents.write"])
 # => false
 ```
 
+## Verifiable credentials & EU digital identity (OID4VC)
+
+Attesto implements the conn-free core of the OpenID for Verifiable Credentials
+stack — the issuer and verifier roles behind an EUDI-wallet-facing service —
+targeting the [OpenID4VC High Assurance Interoperability Profile
+(HAIP)](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0.html).
+As with the rest of the library, these are pure functions and behaviours; the
+HTTP endpoints live in `attesto_phoenix`.
+
+Both HAIP credential formats are supported: **IETF SD-JWT VC** and **ISO 18013-5
+mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
+
+**Selective disclosure**
+
+- `Attesto.SdJwt` — SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`): issue
+  with per-claim disclosures, recursive verify (nested `_sd` + array element
+  digests, unused/duplicate-disclosure rejection), and Key Binding JWT
+  verification (nonce / audience / `sd_hash`).
+- `Attesto.SdJwtVc` — the IETF SD-JWT VC profile (`vc+sd-jwt` / `dc+sd-jwt`):
+  `vct`/`iss`/temporal rules, holder `cnf`, and an optional Token Status List
+  reference on issued credentials.
+
+**OID4VCI — credential issuance (issuer role)**
+
+- `Attesto.CredentialIssuerMetadata` (§11.2), `Attesto.CredentialOffer` (§4.1,
+  pre-authorized_code grant keyed by its URN + `tx_code`),
+  `Attesto.CredentialRequest` (§8.2 parse), `Attesto.CredentialResponse` (§8.3
+  build, immediate + deferred), `Attesto.CredentialProof`
+  (`openid4vci-proof+jwt` holder key proof → `cnf`).
+
+**OID4VP — credential presentation (verifier role)**
+
+- `Attesto.PresentationRequest` (§5, **DCQL** query language),
+  `Attesto.VpToken` (§7 verify — mandatory holder binding, nonce/audience
+  binding; dispatches SD-JWT VC and mdoc presentations), and
+  `Attesto.PresentationSession` (the verifier state machine: single-use
+  nonce↔response correlation).
+
+**ISO mdoc / COSE** (optional `:cbor` dependency)
+
+- `Attesto.Mdoc` — issue an IssuerSigned mdoc (MSO, tag-24 `IssuerSignedItemBytes`,
+  `deviceKey` holder binding) and verify both IssuerSigned and full OID4VP
+  DeviceResponse presentations (device authentication over the OID4VP 1.0
+  SessionTranscript). `Attesto.Cose` — minimal COSE_Sign1 (ES256) + COSE_Key.
+  These modules compile only when `{:cbor, "~> 1.0"}` is present; without it they
+  degrade to a clear "add the optional dependency" error (the same optional-dep
+  pattern as [Plug integration](#plug-integration-optional)).
+
+**Revocation**
+
+- `Attesto.StatusList` — IETF Token Status List (`statuslist+jwt`): build, sign,
+  verify, and resolve a referenced token's status. `Attesto.StatusListStore` — a
+  per-URI index-allocation + status store for issuers.
+
 ## What you supply / what's in the box
 
 | What you supply | What's in the box |
@@ -289,6 +344,7 @@ Attesto.Scope.grants_all?(catalog, ["documents.read"], ["documents.write"])
 | Persistence, sessions, IdP integration | Scope grant-form matching (`Attesto.Scope`) |
 | Issuer / audience values (`Attesto.Config`) | JAR, JARM, and introspection primitives |
 | Client stores, PAR stores, endpoint rendering | Canonical SHA-256 thumbprints (`Attesto.Thumbprint`) |
+| Credential claim values, issuer keys, revocation policy | SD-JWT VC + mdoc issue/verify, OID4VCI/OID4VP primitives, Token Status List ([OID4VC](#verifiable-credentials--eu-digital-identity-oid4vc)) |
 
 If a decision depends on your business rules, it is yours. If it is a wire-format or cryptographic check defined by an RFC, it is Attesto's.
 
@@ -328,6 +384,14 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 7662 | OAuth 2.0 Token Introspection | Core primitive |
 | RFC 9701 | JWT Response for OAuth Token Introspection | Core primitive |
 | FAPI 2.0 Message Signing | JAR/JARM/signed introspection primitives | Core primitives |
+| SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`) | Selective Disclosure JWT (issue + recursive verify + KB-JWT) | Supported (`Attesto.SdJwt`) |
+| SD-JWT VC (`draft-ietf-oauth-sd-jwt-vc`) | SD-JWT-based Verifiable Credentials (`vc+sd-jwt`/`dc+sd-jwt`) | Supported (`Attesto.SdJwtVc`) |
+| OpenID4VCI 1.0 | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
+| OpenID4VP 1.0 | Verifiable Presentations (verifier role: DCQL, `vp_token` verify, `direct_post`/`direct_post.jwt`, x509 client-id) | Supported (core primitives; endpoints in `attesto_phoenix`) |
+| ISO/IEC 18013-5 | Mobile documents (mdoc / `mso_mdoc`: IssuerSigned + MSO + device auth) | Supported (`Attesto.Mdoc`, optional `:cbor`) |
+| RFC 8152 (COSE) | COSE_Sign1 (ES256) + COSE_Key, as used by mdoc | Supported (`Attesto.Cose`, optional `:cbor`) |
+| Token Status List (`draft-ietf-oauth-status-list`) | `statuslist+jwt` revocation | Supported (`Attesto.StatusList`) |
+| OID4VC HAIP 1.0 | High Assurance Interoperability Profile (SD-JWT VC + mdoc, DCQL, encrypted responses) | Targeted |
 
 ## Plug integration (optional)
 
