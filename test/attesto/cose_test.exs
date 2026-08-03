@@ -64,5 +64,39 @@ defmodule Attesto.CoseTest do
     assert {:error, :invalid_signature} = Cose.verify1(signed, wrong_public, [])
   end
 
+  test "sign1_detached/3 and verify1_detached/4 round-trip an ES256 payload with a null payload on the wire" do
+    {pem, public} = keypair()
+    external_payload = <<0, 1, 2, 3, 255>>
+    signed = Cose.sign1_detached(pem, external_payload, [])
+
+    assert [protected, %{}, nil, signature] = decode!(signed)
+    assert %{1 => -7} = protected |> unwrap_bytes() |> decode!()
+    assert byte_size(unwrap_bytes(signature)) == 64
+    assert :ok = Cose.verify1_detached(signed, external_payload, public, [])
+  end
+
+  test "verify1_detached/4 rejects a tampered signature, a tampered external payload, and a wrong key" do
+    {pem, public} = keypair()
+    {_wrong_pem, wrong_public} = keypair()
+    external_payload = "device authentication bytes"
+    signed = Cose.sign1_detached(pem, external_payload, [])
+    [protected, unprotected, nil, signature_value] = decode!(signed)
+
+    signature = unwrap_bytes(signature_value)
+    <<prefix::binary-size(63), last>> = signature
+    tampered_signature = CBOR.encode([protected, unprotected, nil, bytes(prefix <> <<bxor(last, 1)>>)])
+
+    assert {:error, :invalid_signature} = Cose.verify1_detached(tampered_signature, external_payload, public, [])
+    assert {:error, :invalid_signature} = Cose.verify1_detached(signed, external_payload <> "!", public, [])
+    assert {:error, :invalid_signature} = Cose.verify1_detached(signed, external_payload, wrong_public, [])
+  end
+
+  test "verify1_detached/4 rejects a COSE_Sign1 with an embedded (non-detached) payload" do
+    {pem, public} = keypair()
+    embedded = Cose.sign1(pem, "not detached", [])
+
+    assert {:error, :invalid_cose} = Cose.verify1_detached(embedded, "not detached", public, [])
+  end
+
   defp bxor(left, right), do: :erlang.bxor(left, right)
 end

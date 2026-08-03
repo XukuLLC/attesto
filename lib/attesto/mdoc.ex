@@ -1,15 +1,25 @@
 if Code.ensure_loaded?(CBOR) do
   defmodule Attesto.Mdoc do
     @moduledoc """
-    Issue and verify ISO 18013-5 IssuerSigned mdoc credentials.
+    Issue and verify ISO 18013-5 mdoc credentials and OID4VP mdoc
+    presentations.
 
-    This core slice builds the MobileSecurityObject (MSO), binds the holder's
-    device key, signs issuer authentication with ES256 `COSE_Sign1`, and
-    verifies issuer signatures, item digests, document type, and validity.
-    Device authentication and OID4VP mdoc presentation are outside this slice.
+    Issuance builds the MobileSecurityObject (MSO), binds the holder's device
+    key, and signs issuer authentication with ES256 `COSE_Sign1`. `verify/3`
+    checks issuer signatures, item digests, document type, and validity for a
+    bare `IssuerSigned` structure.
+
+    `verify_device_response/4` additionally verifies an OID4VP presentation: a
+    full ISO 18013-5 `DeviceResponse` whose `DeviceSigned.deviceAuth` is an
+    ES256 `COSE_Sign1` (detached payload) over `DeviceAuthentication =
+    ["DeviceAuthentication", SessionTranscript, DocType,
+    DeviceNameSpacesBytes]`, where `SessionTranscript`'s `Handover` is OID4VP's
+    `OpenID4VPHandover` (redirect-flow form, per the OID4VP 1.0 "Handover and
+    SessionTranscript Definitions"). `COSE_Mac0` device authentication is not
+    supported.
     """
 
-    alias Attesto.{Cose, JWS, NumericDate, SecureCompare}
+    alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint}
 
     @clock_skew_seconds 60
     @digest_algorithm "SHA-256"
@@ -25,6 +35,13 @@ if Code.ensure_loaded?(CBOR) do
             doc_type: String.t(),
             namespaces: %{String.t() => %{String.t() => term()}},
             device_key: map(),
+            validity: validity()
+          }
+
+    @type verified_presentation :: %{
+            doc_type: String.t(),
+            namespaces: %{String.t() => %{String.t() => term()}},
+            device_namespaces: %{String.t() => %{String.t() => term()}},
             validity: validity()
           }
 
@@ -70,8 +87,58 @@ if Code.ensure_loaded?(CBOR) do
 
     def verify(input, trusted, opts) when is_binary(input) and is_list(opts) do
       with {:ok, issuer_signed_bytes} <- issuer_signed_bytes(input),
-           {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes),
-           {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
+           {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes) do
+        verify_issuer_signed(issuer_signed, trusted, opts)
+      end
+    rescue
+      _error -> {:error, :invalid_mdoc}
+    catch
+      _kind, _reason -> {:error, :invalid_mdoc}
+    end
+
+    def verify(_input, _trusted, _opts), do: {:error, :invalid_mdoc}
+
+    @doc """
+    Verify an OID4VP mdoc presentation: a full ISO 18013-5 `DeviceResponse`
+    supplied as base64url or raw CBOR bytes.
+
+    `context` supplies the OID4VP request values needed to reconstruct the
+    `OpenID4VPHandover` and `SessionTranscript`: `:client_id`, `:nonce`, and
+    `:response_uri` are required. `:response_encryption_jwk` is the
+    Verifier's public response-encryption key (present only for the
+    `direct_post.jwt` Response Mode) and is folded in as the handover's JWK
+    thumbprint; omit it for unencrypted `direct_post`.
+
+    `trusted` and `opts` verify each document's `IssuerSigned` structure
+    exactly as in `verify/3` (`:expected_doc_type` and `:now` included).
+    Each document's `DeviceSigned.deviceAuth` is additionally verified as an
+    ES256 `COSE_Sign1` with a detached payload, signed by the device key
+    bound in that document's MSO.
+
+    Returns one verified result per document in the `DeviceResponse`.
+    """
+    @spec verify_device_response(binary(), keyword(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
+            {:ok, [verified_presentation()]} | {:error, verify_error()}
+    def verify_device_response(device_response, context, trusted, opts \\ [])
+
+    def verify_device_response(device_response, context, trusted, opts)
+        when is_binary(device_response) and is_list(context) and is_list(opts) do
+      with {:ok, session_transcript} <- session_transcript(context),
+           {:ok, response_bytes} <- issuer_signed_bytes(device_response),
+           {:ok, response} <- decode_complete(response_bytes),
+           {:ok, documents} <- device_response_documents(response) do
+        verify_documents(documents, session_transcript, trusted, opts)
+      end
+    rescue
+      _error -> {:error, :invalid_mdoc}
+    catch
+      _kind, _reason -> {:error, :invalid_mdoc}
+    end
+
+    def verify_device_response(_device_response, _context, _trusted, _opts), do: {:error, :invalid_mdoc}
+
+    defp verify_issuer_signed(issuer_signed, trusted, opts) do
+      with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
            {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, trusted, []),
            {:ok, mso} <- decode_embedded(mso_payload),
            {:ok, mso_parts} <- validate_mso(mso),
@@ -87,13 +154,129 @@ if Code.ensure_loaded?(CBOR) do
            validity: mso_parts.validity
          }}
       end
-    rescue
-      _error -> {:error, :invalid_mdoc}
-    catch
-      _kind, _reason -> {:error, :invalid_mdoc}
     end
 
-    def verify(_input, _trusted, _opts), do: {:error, :invalid_mdoc}
+    defp device_response_documents(%{"documents" => documents, "status" => 0})
+         when is_list(documents) and documents != [] do
+      {:ok, documents}
+    end
+
+    defp device_response_documents(_response), do: {:error, :invalid_mdoc}
+
+    defp verify_documents(documents, session_transcript, trusted, opts) do
+      documents
+      |> Enum.reduce_while({:ok, []}, fn document, {:ok, verified} ->
+        case verify_document(document, session_transcript, trusted, opts) do
+          {:ok, result} -> {:cont, {:ok, [result | verified]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> reverse_documents()
+    end
+
+    defp reverse_documents({:ok, verified}), do: {:ok, Enum.reverse(verified)}
+    defp reverse_documents({:error, _reason} = error), do: error
+
+    defp verify_document(
+           %{"docType" => doc_type, "issuerSigned" => issuer_signed, "deviceSigned" => device_signed},
+           session_transcript,
+           trusted,
+           opts
+         )
+         when is_binary(doc_type) and doc_type != "" and is_map(issuer_signed) and is_map(device_signed) do
+      with {:ok, issuer_result} <- verify_issuer_signed(issuer_signed, trusted, opts),
+           true <- doc_type == issuer_result.doc_type,
+           {:ok, device_namespaces_bytes} <- device_namespaces_bytes(device_signed),
+           {:ok, device_namespaces} <- decode_device_namespaces(device_namespaces_bytes),
+           {:ok, device_signature_bytes} <- device_signature_bytes(device_signed),
+           :ok <-
+             Cose.verify1_detached(
+               device_signature_bytes,
+               device_authentication_bytes(session_transcript, doc_type, device_namespaces_bytes),
+               issuer_result.device_key,
+               []
+             ) do
+        {:ok,
+         %{
+           device_namespaces: device_namespaces,
+           doc_type: doc_type,
+           namespaces: issuer_result.namespaces,
+           validity: issuer_result.validity
+         }}
+      else
+        false -> {:error, :unexpected_doc_type}
+        {:error, _reason} = error -> error
+      end
+    end
+
+    defp verify_document(_document, _session_transcript, _trusted, _opts), do: {:error, :invalid_mdoc}
+
+    defp device_namespaces_bytes(%{"nameSpaces" => %CBOR.Tag{tag: 24} = tagged}), do: {:ok, tagged}
+    defp device_namespaces_bytes(_device_signed), do: {:error, :invalid_mdoc}
+
+    defp decode_device_namespaces(tagged) do
+      with {:ok, bytes} <- embedded_bytes(tagged),
+           {:ok, namespaces} <- decode_complete(bytes),
+           true <- is_map(namespaces) do
+        {:ok, namespaces}
+      else
+        _other -> {:error, :invalid_mdoc}
+      end
+    end
+
+    defp device_signature_bytes(%{"deviceAuth" => %{"deviceSignature" => parts}}) when is_list(parts) do
+      {:ok, CBOR.encode(parts)}
+    end
+
+    defp device_signature_bytes(%{"deviceAuth" => %{"deviceMac" => _mac}}), do: {:error, :unsupported_algorithm}
+    defp device_signature_bytes(_device_signed), do: {:error, :invalid_mdoc}
+
+    defp device_authentication_bytes(session_transcript, doc_type, device_namespaces_bytes) do
+      ["DeviceAuthentication", session_transcript, doc_type, device_namespaces_bytes]
+      |> embedded_cbor()
+      |> CBOR.encode()
+    end
+
+    # OID4VP 1.0 "Handover and SessionTranscript Definitions" (redirect flow):
+    # SessionTranscript = [null, null, OpenID4VPHandover], where
+    # OpenID4VPHandover = ["OpenID4VPHandover", sha256(OpenID4VPHandoverInfo)]
+    # and OpenID4VPHandoverInfo = [client_id, nonce, jwkThumbprint, response_uri].
+    # `jwkThumbprint` is the JWK SHA-256 thumbprint of the Verifier's response-
+    # encryption key for `direct_post.jwt`, or `null` for unencrypted `direct_post`.
+    defp session_transcript(context) do
+      with {:ok, client_id} <- required_context_value(context, :client_id),
+           {:ok, nonce} <- required_context_value(context, :nonce),
+           {:ok, response_uri} <- required_context_value(context, :response_uri),
+           {:ok, jwk_thumbprint} <- handover_jwk_thumbprint(context) do
+        handover_info_hash =
+          [client_id, nonce, jwk_thumbprint, response_uri]
+          |> CBOR.encode()
+          |> then(&:crypto.hash(:sha256, &1))
+          |> bytes()
+
+        {:ok, [nil, nil, ["OpenID4VPHandover", handover_info_hash]]}
+      end
+    end
+
+    defp required_context_value(context, key) do
+      case Keyword.get(context, key) do
+        value when is_binary(value) and value != "" -> {:ok, value}
+        _other -> {:error, :invalid_mdoc}
+      end
+    end
+
+    defp handover_jwk_thumbprint(context) do
+      case Keyword.get(context, :response_encryption_jwk) do
+        nil ->
+          {:ok, nil}
+
+        jwk ->
+          case Thumbprint.of_jwk(jwk) do
+            {:ok, thumbprint} -> {:ok, thumbprint |> Base.url_decode64!(padding: false) |> bytes()}
+            {:error, _reason} -> {:error, :invalid_key}
+          end
+      end
+    end
 
     defp issue!(opts) do
       doc_type = opts |> Keyword.fetch!(:doc_type) |> validate_nonempty_string!(:doc_type)
@@ -416,5 +599,6 @@ else
 
     def issue(_opts), do: raise(@dep_error)
     def verify(_input, _trusted, _opts \\ []), do: raise(@dep_error)
+    def verify_device_response(_device_response, _context, _trusted, _opts \\ []), do: raise(@dep_error)
   end
 end

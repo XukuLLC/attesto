@@ -63,6 +63,59 @@ if Code.ensure_loaded?(CBOR) do
       _kind, _reason -> {:error, :invalid_cose}
     end
 
+    @doc """
+    Sign `external_payload` as an ES256 `COSE_Sign1` with a detached
+    (`null`) payload and return its CBOR bytes.
+
+    ISO 18013-5 `DeviceSignature` transmits its payload as `null`; the
+    actual signed content (e.g. `DeviceAuthenticationBytes`) is
+    reconstructed by both parties from context instead of being carried
+    on the wire.
+    """
+    @spec sign1_detached(String.t(), binary(), keyword()) :: binary()
+    def sign1_detached(pem, external_payload, opts)
+        when is_binary(pem) and is_binary(external_payload) and is_list(opts) do
+      protected = CBOR.encode(%{1 => @alg_es256})
+      signing_input = signature_structure(protected, external_payload)
+      jwk = Key.signing_jwk(pem)
+
+      ensure_es256!(jwk)
+
+      signature =
+        signing_input
+        |> :public_key.sign(:sha256, private_key(jwk))
+        |> der_to_raw()
+
+      [bytes(protected), unprotected_header(opts), nil, bytes(signature)]
+      |> CBOR.encode()
+    end
+
+    @doc """
+    Verify an ES256 `COSE_Sign1` with a detached (`null`) payload against
+    `external_payload`, supplied out of band by the caller.
+
+    Returns `:ok` on success, since (unlike `verify1/3`) there is no
+    embedded payload to hand back.
+    """
+    @spec verify1_detached(binary(), binary(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
+            :ok | {:error, verify_error()}
+    def verify1_detached(cose_sign1_bytes, external_payload, jwk_or_pem, opts)
+        when is_binary(cose_sign1_bytes) and is_binary(external_payload) and is_list(opts) do
+      with {:ok, protected, signature} <- decode_detached_sign1(cose_sign1_bytes),
+           :ok <- validate_protected(protected),
+           {:ok, jwk} <- verification_jwk(jwk_or_pem),
+           true <- verify_signature(jwk, protected, external_payload, signature) do
+        :ok
+      else
+        false -> {:error, :invalid_signature}
+        {:error, _reason} = error -> error
+      end
+    rescue
+      _error -> {:error, :invalid_cose}
+    catch
+      _kind, _reason -> {:error, :invalid_cose}
+    end
+
     @doc "Convert an EC P-256 public JWK to an EC2 P-256 `COSE_Key` map."
     @spec key_to_cose(JOSE.JWK.t() | map()) :: map()
     def key_to_cose(public_jwk) do
@@ -110,6 +163,18 @@ if Code.ensure_loaded?(CBOR) do
 
     defp certificate_bytes!(der) when is_binary(der) and byte_size(der) > 0, do: bytes(der)
     defp certificate_bytes!(_der), do: raise(ArgumentError, ":x5chain must contain non-empty DER binaries")
+
+    defp decode_detached_sign1(encoded) do
+      with {:ok, [protected_value, unprotected, nil, signature_value]} <- decode_complete(encoded),
+           true <- is_map(unprotected),
+           {:ok, protected} <- byte_string(protected_value),
+           {:ok, signature} <- byte_string(signature_value),
+           true <- byte_size(signature) == @ecdsa_signature_bytes do
+        {:ok, protected, signature}
+      else
+        _other -> {:error, :invalid_cose}
+      end
+    end
 
     defp decode_sign1(encoded) do
       with {:ok, [protected_value, unprotected, payload_value, signature_value]} <- decode_complete(encoded),
@@ -250,6 +315,8 @@ else
 
     def sign1(_pem, _payload_bstr, _opts), do: raise(@dep_error)
     def verify1(_cose_sign1_bytes, _jwk_or_pem, _opts), do: raise(@dep_error)
+    def sign1_detached(_pem, _external_payload, _opts), do: raise(@dep_error)
+    def verify1_detached(_cose_sign1_bytes, _external_payload, _jwk_or_pem, _opts), do: raise(@dep_error)
     def key_to_cose(_public_jwk), do: raise(@dep_error)
     def cose_to_key(_cose_key_map), do: raise(@dep_error)
   end
