@@ -24,7 +24,7 @@ defmodule Attesto.SdJwtVc do
   Conn-free and fail-closed, like the rest of attesto core.
   """
 
-  alias Attesto.{NumericDate, SdJwt}
+  alias Attesto.{MapParams, NumericDate, SdJwt}
 
   # RFC-registered media type for an SD-JWT VC; the newer draft additionally
   # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
@@ -83,11 +83,11 @@ defmodule Attesto.SdJwtVc do
         "vct" => vct,
         "iat" => Keyword.get(opts, :iat, NumericDate.now(opts, invalid_override: :fallback))
       }
-      |> put_present("exp", Keyword.get(opts, :exp))
-      |> put_present("nbf", Keyword.get(opts, :nbf))
-      |> put_present("sub", Keyword.get(opts, :sub))
-      |> put_present("cnf", Keyword.get(opts, :cnf))
-      |> put_present("status", status)
+      |> MapParams.put_optional("exp", Keyword.get(opts, :exp))
+      |> MapParams.put_optional("nbf", Keyword.get(opts, :nbf))
+      |> MapParams.put_optional("sub", Keyword.get(opts, :sub))
+      |> MapParams.put_optional("cnf", Keyword.get(opts, :cnf))
+      |> MapParams.put_optional("status", status)
 
     # Registered claims (iss/vct/cnf/status/temporal) are always visible; only
     # the subject claims may be selectively disclosed.
@@ -181,7 +181,4 @@ defmodule Attesto.SdJwtVc do
   defp validate_status!(status) do
     raise ArgumentError, ":status must be a map; got #{inspect(status)}"
   end
-
-  defp put_present(map, _key, nil), do: map
-  defp put_present(map, key, value), do: Map.put(map, key, value)
 end

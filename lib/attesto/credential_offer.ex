@@ -46,7 +46,7 @@ defmodule Attesto.CredentialOffer do
   @doc "Build a by-value `openid-credential-offer://` deep link."
   @spec deep_link(map(), keyword()) :: String.t()
   def deep_link(offer, opts \\ []) do
-    scheme = scheme!(opts, "deep_link")
+    scheme = scheme!(opts)
     value = offer |> to_query_value() |> URI.encode_www_form()
 
     "#{scheme}://?credential_offer=#{value}"
@@ -55,16 +55,14 @@ defmodule Attesto.CredentialOffer do
   @doc "Build a by-reference `openid-credential-offer://` deep link."
   @spec deep_link_by_reference(String.t(), keyword()) :: String.t()
   def deep_link_by_reference(uri, opts \\ []) do
-    scheme = scheme!(opts, "deep_link_by_reference")
+    scheme = scheme!(opts)
     value = uri |> MapParams.required_string!(:uri) |> URI.encode_www_form()
 
     "#{scheme}://?credential_offer_uri=#{value}"
   end
 
-  defp scheme!(opts, _function_name) do
-    if !Keyword.keyword?(opts) do
-      MapParams.ensure_keyword!(opts)
-    end
+  defp scheme!(opts) do
+    opts = MapParams.ensure_keyword!(opts)
 
     MapParams.optional_string!(Keyword.get(opts, :scheme, @default_scheme), :scheme)
   end

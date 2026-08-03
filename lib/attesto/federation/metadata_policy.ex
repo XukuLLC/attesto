@@ -225,47 +225,35 @@ defmodule Attesto.Federation.MetadataPolicy do
 
   defp normalize_federation_policy(policy) do
     if policy_level(policy) in [:federation, :empty] do
-      Enum.reduce_while(policy, {:ok, %{}}, &normalize_federation_entry/2)
+      normalize_entries(policy, &normalize_entity_type_policy/1)
     else
       {:error, :policy_error}
     end
   end
-
-  defp normalize_federation_entry({entity_type, policy}, {:ok, acc}) do
-    policy
-    |> normalize_entity_type_policy()
-    |> normalized_federation_entry(entity_type, acc)
-  end
-
-  defp normalized_federation_entry({:ok, normalized}, _entity_type, acc) when map_size(normalized) == 0,
-    do: {:cont, {:ok, acc}}
-
-  defp normalized_federation_entry({:ok, normalized}, entity_type, acc),
-    do: {:cont, {:ok, Map.put(acc, entity_type, normalized)}}
-
-  defp normalized_federation_entry({:error, :policy_error} = error, _entity_type, _acc), do: {:halt, error}
 
   defp normalize_entity_type_policy(policy) do
     if policy_level(policy) in [:entity_type, :empty] do
-      Enum.reduce_while(policy, {:ok, %{}}, &normalize_parameter_entry/2)
+      normalize_entries(policy, &normalize_parameter_policy/1)
     else
       {:error, :policy_error}
     end
   end
 
-  defp normalize_parameter_entry({parameter, policy}, {:ok, acc}) do
-    policy
-    |> normalize_parameter_policy()
-    |> normalized_parameter_entry(parameter, acc)
+  defp normalize_entries(policy, entry_normalizer) do
+    Enum.reduce_while(policy, {:ok, %{}}, &normalize_entry(&1, &2, entry_normalizer))
   end
 
-  defp normalized_parameter_entry({:ok, normalized}, _parameter, acc) when map_size(normalized) == 0,
-    do: {:cont, {:ok, acc}}
+  defp normalize_entry({key, policy}, {:ok, acc}, entry_normalizer) do
+    policy
+    |> entry_normalizer.()
+    |> normalized_entry(key, acc)
+  end
 
-  defp normalized_parameter_entry({:ok, normalized}, parameter, acc),
-    do: {:cont, {:ok, Map.put(acc, parameter, normalized)}}
+  defp normalized_entry({:ok, normalized}, _key, acc) when map_size(normalized) == 0, do: {:cont, {:ok, acc}}
 
-  defp normalized_parameter_entry({:error, :policy_error} = error, _parameter, _acc), do: {:halt, error}
+  defp normalized_entry({:ok, normalized}, key, acc), do: {:cont, {:ok, Map.put(acc, key, normalized)}}
+
+  defp normalized_entry({:error, :policy_error} = error, _key, _acc), do: {:halt, error}
 
   defp normalize_parameter_policy(policy) when is_map(policy) and map_size(policy) > 0 do
     normalized = Map.take(policy, @operators)
@@ -368,14 +356,18 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp merge_federation_policy(higher, lower) do
     with {:ok, higher} <- normalize_federation_policy(higher),
          {:ok, lower} <- normalize_federation_policy(lower) do
-      merge_maps(higher, lower, &merge_entity_type_policy/2)
+      merge_maps(higher, lower, fn _key, higher_value, lower_value ->
+        merge_entity_type_policy(higher_value, lower_value)
+      end)
     end
   end
 
   defp merge_entity_type_policy(higher, lower) do
     with {:ok, higher} <- normalize_entity_type_policy(higher),
          {:ok, lower} <- normalize_entity_type_policy(lower) do
-      merge_maps(higher, lower, &merge_parameter_policy/2)
+      merge_maps(higher, lower, fn _key, higher_value, lower_value ->
+        merge_parameter_policy(higher_value, lower_value)
+      end)
     end
   end
 
@@ -386,7 +378,7 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp merge_map_entry({key, lower_value}, {:ok, acc}, merge_value) do
     case Map.fetch(acc, key) do
       :error -> {:cont, {:ok, Map.put(acc, key, lower_value)}}
-      {:ok, higher_value} -> merge_value.(higher_value, lower_value) |> merged_entry(key, acc)
+      {:ok, higher_value} -> merge_value.(key, higher_value, lower_value) |> merged_entry(key, acc)
     end
   end
 
@@ -396,19 +388,8 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp merge_parameter_policy(higher, lower) do
     with {:ok, higher} <- normalize_parameter_policy(higher),
          {:ok, lower} <- normalize_parameter_policy(lower),
-         {:ok, merged} <- merge_operators(higher, lower) do
+         {:ok, merged} <- merge_maps(higher, lower, &merge_operator/3) do
       normalize_parameter_policy(merged)
-    end
-  end
-
-  defp merge_operators(higher, lower) do
-    Enum.reduce_while(lower, {:ok, higher}, &merge_operator_entry/2)
-  end
-
-  defp merge_operator_entry({operator, lower_value}, {:ok, acc}) do
-    case Map.fetch(acc, operator) do
-      :error -> {:cont, {:ok, Map.put(acc, operator, lower_value)}}
-      {:ok, higher_value} -> merge_operator(operator, higher_value, lower_value) |> merged_entry(operator, acc)
     end
   end
 

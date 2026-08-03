@@ -94,14 +94,12 @@ defmodule Attesto.Did do
   end
 
   defp decode_jwk(json) do
-    case JSON.decode(json) do
-      {:ok, %{} = jwk} -> {:ok, jwk}
-      _other -> {:error, :invalid_jwk}
-    end
-  rescue
-    _error -> {:error, :invalid_jwk}
-  catch
-    _kind, _reason -> {:error, :invalid_jwk}
+    safe(:invalid_jwk, fn ->
+      case JSON.decode(json) do
+        {:ok, %{} = jwk} -> {:ok, jwk}
+        _other -> {:error, :invalid_jwk}
+      end
+    end)
   end
 
   defp validate_public_jwk(jwk) do
@@ -113,17 +111,15 @@ defmodule Attesto.Did do
   end
 
   defp parse_public_jwk(jwk) do
-    jwk
-    |> JOSE.JWK.from_map()
-    |> JOSE.JWK.to_public_map()
-    |> case do
-      {_metadata, %{} = _public_jwk} -> :ok
-      _other -> {:error, :invalid_jwk}
-    end
-  rescue
-    _error -> {:error, :invalid_jwk}
-  catch
-    _kind, _reason -> {:error, :invalid_jwk}
+    safe(:invalid_jwk, fn ->
+      jwk
+      |> JOSE.JWK.from_map()
+      |> JOSE.JWK.to_public_map()
+      |> case do
+        {_metadata, %{} = _public_jwk} -> :ok
+        _other -> {:error, :invalid_jwk}
+      end
+    end)
   end
 
   defp resolve_key(multibase) do
@@ -307,22 +303,24 @@ defmodule Attesto.Did do
   end
 
   defp invoke_resolver(resolver, url) do
-    case resolver.(url) do
-      {:ok, %{} = jwk} ->
-        case validate_public_jwk(jwk) do
-          :ok -> {:ok, jwk}
-          {:error, _reason} = error -> error
-        end
+    safe(:resolver_failed, fn -> resolver.(url) |> normalize_resolver_response() end)
+  end
 
-      {:error, _reason} = error ->
-        error
-
-      _other ->
-        {:error, :invalid_resolver_response}
+  defp normalize_resolver_response({:ok, %{} = jwk}) do
+    case validate_public_jwk(jwk) do
+      :ok -> {:ok, jwk}
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp normalize_resolver_response({:error, _reason} = error), do: error
+  defp normalize_resolver_response(_other), do: {:error, :invalid_resolver_response}
+
+  defp safe(error, fun) do
+    fun.()
   rescue
-    _error -> {:error, :resolver_failed}
+    _error -> {:error, error}
   catch
-    _kind, _reason -> {:error, :resolver_failed}
+    _kind, _reason -> {:error, error}
   end
 end

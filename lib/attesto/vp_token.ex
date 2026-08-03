@@ -126,8 +126,6 @@ defmodule Attesto.VpToken do
     verify_mdoc_value(presentation, issuer_source, mdoc_context, verify_opts)
   end
 
-  defp verify_value(presentation, issuer_source, verify_opts, binding_opts)
-
   defp verify_value(presentation, issuer_source, verify_opts, binding_opts) when is_binary(presentation) do
     with {:ok, verified} <- verify_one(presentation, issuer_source, verify_opts, binding_opts) do
       {:ok, safe_result(verified)}

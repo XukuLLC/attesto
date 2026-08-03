@@ -242,7 +242,7 @@ defmodule Attesto.JwtVc do
         "iat" => iat,
         "jti" => jti
       }
-      |> put_present("cnf", cnf)
+      |> MapParams.put_optional("cnf", cnf)
 
     sign(claims, opts)
   end
@@ -531,7 +531,4 @@ defmodule Attesto.JwtVc do
     <<p1::binary-size(8), p2::binary-size(4), p3::binary-size(4), p4::binary-size(4), p5::binary-size(12)>> = hex
     "urn:uuid:#{p1}-#{p2}-#{p3}-#{p4}-#{p5}"
   end
-
-  defp put_present(map, _key, nil), do: map
-  defp put_present(map, key, value), do: Map.put(map, key, value)
 end

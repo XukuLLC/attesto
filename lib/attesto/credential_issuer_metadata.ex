@@ -197,22 +197,20 @@ defmodule Attesto.CredentialIssuerMetadata do
   end
 
   defp normalize_response_encryption!(value, _key) when is_map(value) do
-    value
-    |> MapParams.fetch(:alg_values_supported)
-    |> then(fn alg_values_supported ->
-      %{}
-      |> MapParams.put_optional("alg_values_supported", alg_values_supported, &MapParams.string_list!/2)
-      |> MapParams.put_optional(
-        "enc_values_supported",
-        MapParams.fetch(value, :enc_values_supported),
-        &MapParams.string_list!/2
-      )
-      |> MapParams.put_optional(
-        "encryption_required",
-        MapParams.fetch(value, :encryption_required),
-        &boolean!/2
-      )
-    end)
+    alg_values_supported = MapParams.fetch(value, :alg_values_supported)
+
+    %{}
+    |> MapParams.put_optional("alg_values_supported", alg_values_supported, &MapParams.string_list!/2)
+    |> MapParams.put_optional(
+      "enc_values_supported",
+      MapParams.fetch(value, :enc_values_supported),
+      &MapParams.string_list!/2
+    )
+    |> MapParams.put_optional(
+      "encryption_required",
+      MapParams.fetch(value, :encryption_required),
+      &boolean!/2
+    )
   end
 
   defp normalize_response_encryption!(value, key) do

@@ -39,7 +39,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, NumericDate, Secret, SecureCompare, SigningAlg}
+  alias Attesto.{JWS, MapParams, NumericDate, Secret, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -338,16 +338,19 @@ defmodule Attesto.SdJwt do
   end
 
   defp resolve_value(list, by_digest, used) when is_list(list) do
-    Enum.reduce(list, {[], used}, fn element, {acc, used} ->
-      case element do
-        %{"..." => d} when map_size(element) == 1 ->
-          resolve_array_digest(d, by_digest, acc, used)
+    {resolved, used} =
+      Enum.reduce(list, {[], used}, fn element, {acc, used} ->
+        case element do
+          %{"..." => d} when map_size(element) == 1 ->
+            resolve_array_digest(d, by_digest, acc, used)
 
-        other ->
-          {rv, used} = resolve_value(other, by_digest, used)
-          {acc ++ [rv], used}
-      end
-    end)
+          other ->
+            {rv, used} = resolve_value(other, by_digest, used)
+            {[rv | acc], used}
+        end
+      end)
+
+    {Enum.reverse(resolved), used}
   end
 
   defp resolve_value(scalar, _by_digest, used), do: {scalar, used}
@@ -385,7 +388,7 @@ defmodule Attesto.SdJwt do
       %{value: [_salt, value]} ->
         if MapSet.member?(used, d), do: throw({:sd_error, :duplicate_digest})
         {rv, used} = resolve_value(value, by_digest, MapSet.put(used, d))
-        {acc ++ [rv], used}
+        {[rv | acc], used}
 
       %{value: [_salt, _name, _value]} ->
         # An object-property Disclosure referenced from an array is malformed.
@@ -540,8 +543,8 @@ defmodule Attesto.SdJwt do
 
   defp build_header(opts) do
     %{"alg" => header_alg(opts)}
-    |> put_unless_nil("typ", Keyword.get(opts, :typ))
-    |> put_unless_nil("kid", Keyword.get(opts, :kid))
+    |> MapParams.put_optional("typ", Keyword.get(opts, :typ))
+    |> MapParams.put_optional("kid", Keyword.get(opts, :kid))
   end
 
   defp header_alg(opts) do
@@ -550,9 +553,6 @@ defmodule Attesto.SdJwt do
       _ -> opts |> Keyword.fetch!(:pem) |> JOSE.JWK.from_pem() |> SigningAlg.infer()
     end
   end
-
-  defp put_unless_nil(map, _key, nil), do: map
-  defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
 
   defp keys(%{"keys" => keys}) when is_list(keys), do: keys
   defp keys(list) when is_list(list), do: list

@@ -22,7 +22,7 @@ defmodule Attesto.PresentationSession do
   primitive).
   """
 
-  alias Attesto.{NumericDate, Secret, VpToken}
+  alias Attesto.{MapParams, NumericDate, Secret, VpToken}
 
   @default_ttl_seconds 300
 
@@ -158,15 +158,12 @@ defmodule Attesto.PresentationSession do
          expected_query_ids: expected_query_ids,
          issuer_trust: issuer_trust
        }
-       |> put_optional(:request_object, request_object)
-       |> put_optional(:response_uri, response_uri)}
+       |> MapParams.put_optional(:request_object, request_object)
+       |> MapParams.put_optional(:response_uri, response_uri)}
     else
       {:error, :invalid_attrs}
     end
   end
-
-  defp put_optional(map, _key, nil), do: map
-  defp put_optional(map, key, value), do: Map.put(map, key, value)
 
   defp valid_request_object?(nil), do: true
   defp valid_request_object?(value), do: non_empty_string?(value)

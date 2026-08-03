@@ -68,11 +68,7 @@ if Code.ensure_loaded?(CBOR) do
     """
     @spec issue(keyword()) :: {:ok, String.t()} | {:error, :invalid_options}
     def issue(opts) when is_list(opts) do
-      {:ok, issue!(opts)}
-    rescue
-      _error -> {:error, :invalid_options}
-    catch
-      _kind, _reason -> {:error, :invalid_options}
+      safe(:invalid_options, fn -> {:ok, issue!(opts)} end)
     end
 
     def issue(_opts), do: {:error, :invalid_options}
@@ -89,14 +85,12 @@ if Code.ensure_loaded?(CBOR) do
     def verify(input, trusted, opts \\ [])
 
     def verify(input, trusted, opts) when is_binary(input) and is_list(opts) do
-      with {:ok, issuer_signed_bytes} <- issuer_signed_bytes(input),
-           {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes) do
-        verify_issuer_signed(issuer_signed, trusted, opts)
-      end
-    rescue
-      _error -> {:error, :invalid_mdoc}
-    catch
-      _kind, _reason -> {:error, :invalid_mdoc}
+      safe(:invalid_mdoc, fn ->
+        with {:ok, issuer_signed_bytes} <- issuer_signed_bytes(input),
+             {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes) do
+          verify_issuer_signed(issuer_signed, trusted, opts)
+        end
+      end)
     end
 
     def verify(_input, _trusted, _opts), do: {:error, :invalid_mdoc}
@@ -126,16 +120,14 @@ if Code.ensure_loaded?(CBOR) do
 
     def verify_device_response(device_response, context, trusted, opts)
         when is_binary(device_response) and is_list(context) and is_list(opts) do
-      with {:ok, session_transcript} <- session_transcript(context),
-           {:ok, response_bytes} <- issuer_signed_bytes(device_response),
-           {:ok, response} <- decode_complete(response_bytes),
-           {:ok, documents} <- device_response_documents(response) do
-        verify_documents(documents, session_transcript, trusted, opts)
-      end
-    rescue
-      _error -> {:error, :invalid_mdoc}
-    catch
-      _kind, _reason -> {:error, :invalid_mdoc}
+      safe(:invalid_mdoc, fn ->
+        with {:ok, session_transcript} <- session_transcript(context),
+             {:ok, response_bytes} <- issuer_signed_bytes(device_response),
+             {:ok, response} <- decode_complete(response_bytes),
+             {:ok, documents} <- device_response_documents(response) do
+          verify_documents(documents, session_transcript, trusted, opts)
+        end
+      end)
     end
 
     def verify_device_response(_device_response, _context, _trusted, _opts), do: {:error, :invalid_mdoc}
@@ -152,21 +144,27 @@ if Code.ensure_loaded?(CBOR) do
     """
     @spec peek_doc_type(binary()) :: {:ok, String.t()} | {:error, :invalid_mdoc}
     def peek_doc_type(device_response) when is_binary(device_response) do
-      with {:ok, response_bytes} <- issuer_signed_bytes(device_response),
-           {:ok, response} <- decode_complete(response_bytes),
-           {:ok, [%{"docType" => doc_type} | _rest]} <- device_response_documents(response),
-           true <- is_binary(doc_type) and doc_type != "" do
-        {:ok, doc_type}
-      else
-        _other -> {:error, :invalid_mdoc}
-      end
-    rescue
-      _error -> {:error, :invalid_mdoc}
-    catch
-      _kind, _reason -> {:error, :invalid_mdoc}
+      safe(:invalid_mdoc, fn ->
+        with {:ok, response_bytes} <- issuer_signed_bytes(device_response),
+             {:ok, response} <- decode_complete(response_bytes),
+             {:ok, [%{"docType" => doc_type} | _rest]} <- device_response_documents(response),
+             true <- is_binary(doc_type) and doc_type != "" do
+          {:ok, doc_type}
+        else
+          _other -> {:error, :invalid_mdoc}
+        end
+      end)
     end
 
     def peek_doc_type(_device_response), do: {:error, :invalid_mdoc}
+
+    defp safe(error, fun) do
+      fun.()
+    rescue
+      _error -> {:error, error}
+    catch
+      _kind, _reason -> {:error, error}
+    end
 
     defp verify_issuer_signed(issuer_signed, trusted, opts) do
       with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
@@ -341,21 +339,24 @@ if Code.ensure_loaded?(CBOR) do
     end
 
     defp build_namespace_items(elements) do
-      elements
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.with_index()
-      |> Enum.reduce({[], %{}}, fn {{element_id, value}, digest_id}, {items, digests} ->
-        item =
-          embedded_cbor(%{
-            "digestID" => digest_id,
-            "elementIdentifier" => element_id,
-            "elementValue" => value,
-            "random" => bytes(:crypto.strong_rand_bytes(@minimum_random_bytes))
-          })
+      {items, digests} =
+        elements
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.with_index()
+        |> Enum.reduce({[], %{}}, fn {{element_id, value}, digest_id}, {items, digests} ->
+          item =
+            embedded_cbor(%{
+              "digestID" => digest_id,
+              "elementIdentifier" => element_id,
+              "elementValue" => value,
+              "random" => bytes(:crypto.strong_rand_bytes(@minimum_random_bytes))
+            })
 
-        digest = item |> CBOR.encode() |> then(&:crypto.hash(:sha256, &1)) |> bytes()
-        {items ++ [item], Map.put(digests, digest_id, digest)}
-      end)
+          digest = item |> CBOR.encode() |> then(&:crypto.hash(:sha256, &1)) |> bytes()
+          {[item | items], Map.put(digests, digest_id, digest)}
+        end)
+
+      {Enum.reverse(items), digests}
     end
 
     defp build_mso(doc_type, value_digests, device_key, validity) do
