@@ -1,0 +1,102 @@
+defmodule Attesto.PreAuthorizedCodeStore.ETS do
+  @moduledoc """
+  Single-node ETS implementation of `Attesto.PreAuthorizedCodeStore`.
+
+  Pre-authorized codes live in a public ETS table owned by a `GenServer` that
+  sweeps expired rows on a fixed interval. `take/1` uses `:ets.take/2`, which
+  fetches and deletes a row in one atomic step, so the single-use guarantee
+  holds against concurrent redemptions on a node. This is a per-node store: a
+  multi-node deployment MUST back `Attesto.PreAuthorizedCodeStore` with a
+  shared store so a code issued on one node can be redeemed once on another.
+
+  ## Start options
+
+    * `:sweep_interval_ms` (default `30_000`) - how often expired rows are
+      bulk-deleted. Correctness does not depend on sweeping;
+      `Attesto.PreAuthorizedCode` re-checks expiry after `take/1`.
+
+  ## Wiring
+
+      children = [Attesto.PreAuthorizedCodeStore.ETS]
+
+  then pass the module as the store:
+
+      Attesto.PreAuthorizedCode.issue(Attesto.PreAuthorizedCodeStore.ETS, attrs)
+  """
+
+  @behaviour Attesto.PreAuthorizedCodeStore
+
+  use GenServer
+
+  @table __MODULE__
+  @default_sweep_interval_ms 30_000
+
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc false
+  def child_spec(opts) do
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
+  end
+
+  @impl Attesto.PreAuthorizedCodeStore
+  def put(%{code_hash: code_hash, expires_at: expires_at} = record)
+      when is_binary(code_hash) and is_integer(expires_at) do
+    # expires_at is hoisted into its own tuple element so the sweep
+    # match spec is a plain guard, never a map pattern.
+    true = :ets.insert(@table, {code_hash, expires_at, record})
+    :ok
+  end
+
+  @impl Attesto.PreAuthorizedCodeStore
+  def take(code_hash) when is_binary(code_hash) do
+    case :ets.take(@table, code_hash) do
+      [{^code_hash, _expires_at, record}] -> {:ok, record}
+      [] -> :error
+    end
+  end
+
+  @impl Attesto.PreAuthorizedCodeStore
+  def get(code_hash) when is_binary(code_hash) do
+    case :ets.lookup(@table, code_hash) do
+      [{^code_hash, _expires_at, record}] -> {:ok, record}
+      [] -> :error
+    end
+  end
+
+  @doc "Clear every entry. Test-facing."
+  @spec reset() :: :ok
+  def reset do
+    if :ets.whereis(@table) != :undefined, do: :ets.delete_all_objects(@table)
+    :ok
+  end
+
+  @impl GenServer
+  def init(opts) do
+    Attesto.ClusterGuard.assert_single_node!(
+      __MODULE__,
+      Keyword.get(opts, :multi_node_acknowledged?, false)
+    )
+
+    sweep_interval_ms = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
+
+    :ets.new(@table, [:set, :public, :named_table, read_concurrency: true, write_concurrency: true])
+
+    schedule_sweep(sweep_interval_ms)
+    {:ok, %{sweep_interval_ms: sweep_interval_ms}}
+  end
+
+  @impl GenServer
+  def handle_info(:sweep, state) do
+    now = System.system_time(:second)
+    # Delete every row whose expiry is strictly in the past.
+    :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [true]}])
+
+    schedule_sweep(state.sweep_interval_ms)
+    {:noreply, state}
+  end
+
+  defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
+end

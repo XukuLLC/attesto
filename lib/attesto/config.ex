@@ -47,6 +47,7 @@ defmodule Attesto.Config do
     :audience,
     :keystore,
     :principal_kinds,
+    pre_authorized_code_store: nil,
     principal_kind_claim: "principal_kind",
     default_lifetime_seconds: 900,
     token_endpoint_path: "/oauth/token",
@@ -57,6 +58,7 @@ defmodule Attesto.Config do
           issuer: String.t(),
           audience: String.t(),
           keystore: module(),
+          pre_authorized_code_store: module() | nil,
           principal_kinds: [PrincipalKind.t(), ...],
           principal_kind_claim: String.t(),
           default_lifetime_seconds: pos_integer(),
@@ -122,6 +124,10 @@ defmodule Attesto.Config do
   def principal_kind(%__MODULE__{principal_kinds: kinds}, claim_value) do
     Enum.find(kinds, fn %PrincipalKind{claim_value: v} -> v == claim_value end)
   end
+
+  @doc "Return the configured pre-authorized-code store, if any."
+  @spec pre_authorized_code_store(t()) :: module() | nil
+  def pre_authorized_code_store(%__MODULE__{pre_authorized_code_store: store}), do: store
 
   @doc """
   The canonical external URL of the token endpoint: the configured issuer
