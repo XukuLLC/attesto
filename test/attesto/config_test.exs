@@ -2,6 +2,7 @@ defmodule Attesto.ConfigTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
+  alias Attesto.CNonceStore.ETS
   alias Attesto.Config
   alias Attesto.PrincipalKind
 
@@ -47,6 +48,8 @@ defmodule Attesto.ConfigTest do
       assert config.issuer == "https://api.example.com/"
       assert config.audience == "https://api.example.com/"
       assert config.keystore == DummyKeystore
+      assert config.c_nonce_store == nil
+      assert config.credential_offer_store == nil
       assert config.principal_kind_claim == "principal_kind"
       assert config.default_lifetime_seconds == 900
       assert config.token_endpoint_path == "/oauth/token"
@@ -65,6 +68,19 @@ defmodule Attesto.ConfigTest do
       assert config.principal_kind_claim == "https://example.com/pk"
       assert config.default_lifetime_seconds == 300
       assert config.token_endpoint_path == "/auth/token"
+    end
+
+    test "accepts and exposes the OID4VCI store modules" do
+      config =
+        Config.new(
+          base_opts(
+            c_nonce_store: ETS,
+            credential_offer_store: Attesto.CredentialOfferStore.ETS
+          )
+        )
+
+      assert Config.c_nonce_store(config) == ETS
+      assert Config.credential_offer_store(config) == Attesto.CredentialOfferStore.ETS
     end
   end
 

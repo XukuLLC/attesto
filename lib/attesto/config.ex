@@ -47,6 +47,8 @@ defmodule Attesto.Config do
     :audience,
     :keystore,
     :principal_kinds,
+    c_nonce_store: nil,
+    credential_offer_store: nil,
     pre_authorized_code_store: nil,
     principal_kind_claim: "principal_kind",
     default_lifetime_seconds: 900,
@@ -58,6 +60,8 @@ defmodule Attesto.Config do
           issuer: String.t(),
           audience: String.t(),
           keystore: module(),
+          c_nonce_store: module() | nil,
+          credential_offer_store: module() | nil,
           pre_authorized_code_store: module() | nil,
           principal_kinds: [PrincipalKind.t(), ...],
           principal_kind_claim: String.t(),
@@ -124,6 +128,14 @@ defmodule Attesto.Config do
   def principal_kind(%__MODULE__{principal_kinds: kinds}, claim_value) do
     Enum.find(kinds, fn %PrincipalKind{claim_value: v} -> v == claim_value end)
   end
+
+  @doc "Return the configured c_nonce store, if any."
+  @spec c_nonce_store(t()) :: module() | nil
+  def c_nonce_store(%__MODULE__{c_nonce_store: store}), do: store
+
+  @doc "Return the configured credential-offer store, if any."
+  @spec credential_offer_store(t()) :: module() | nil
+  def credential_offer_store(%__MODULE__{credential_offer_store: store}), do: store
 
   @doc "Return the configured pre-authorized-code store, if any."
   @spec pre_authorized_code_store(t()) :: module() | nil
