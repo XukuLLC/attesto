@@ -18,6 +18,8 @@ defmodule Attesto.CredentialIssuerMetadata do
   intentionally not implemented in this slice; it is a future addition.
   """
 
+  alias Attesto.MapParams
+
   @sd_jwt_vc_formats ["vc+sd-jwt", "dc+sd-jwt"]
 
   @doc """
@@ -42,53 +44,45 @@ defmodule Attesto.CredentialIssuerMetadata do
   """
   @spec build(keyword()) :: %{required(String.t()) => term()}
   def build(opts) when is_list(opts) do
-    opts = ensure_keyword!(opts)
+    opts = MapParams.ensure_keyword!(opts)
 
     %{
-      "credential_issuer" => required_string!(opts, :credential_issuer),
-      "credential_endpoint" => required_string!(opts, :credential_endpoint),
+      "credential_issuer" => MapParams.required_string!(Keyword.get(opts, :credential_issuer), :credential_issuer),
+      "credential_endpoint" =>
+        MapParams.required_string!(Keyword.get(opts, :credential_endpoint), :credential_endpoint),
       "credential_configurations_supported" => required_configurations!(opts, :credential_configurations_supported)
     }
-    |> put_optional("authorization_servers", Keyword.get(opts, :authorization_servers), &string_list!/2)
-    |> put_optional("nonce_endpoint", Keyword.get(opts, :nonce_endpoint), &optional_string!/2)
-    |> put_optional(
+    |> MapParams.put_optional(
+      "authorization_servers",
+      Keyword.get(opts, :authorization_servers),
+      &MapParams.string_list!/2
+    )
+    |> MapParams.put_optional("nonce_endpoint", Keyword.get(opts, :nonce_endpoint), &MapParams.optional_string!/2)
+    |> MapParams.put_optional(
       "deferred_credential_endpoint",
       Keyword.get(opts, :deferred_credential_endpoint),
-      &optional_string!/2
+      &MapParams.optional_string!/2
     )
-    |> put_optional("notification_endpoint", Keyword.get(opts, :notification_endpoint), &optional_string!/2)
-    |> put_optional(
+    |> MapParams.put_optional(
+      "notification_endpoint",
+      Keyword.get(opts, :notification_endpoint),
+      &MapParams.optional_string!/2
+    )
+    |> MapParams.put_optional(
       "credential_response_encryption",
       Keyword.get(opts, :credential_response_encryption),
       &normalize_response_encryption!/2
     )
-    |> put_optional(
+    |> MapParams.put_optional(
       "batch_credential_issuance",
       Keyword.get(opts, :batch_credential_issuance),
       &normalize_batch_issuance!/2
     )
-    |> put_optional("display", Keyword.get(opts, :display), &display_list!/2)
+    |> MapParams.put_optional("display", Keyword.get(opts, :display), &display_list!/2)
   end
 
-  def build(opts) do
-    raise ArgumentError,
-          "Attesto.CredentialIssuerMetadata.build/1 expects a keyword list; got #{inspect(opts)}"
-  end
-
-  defp ensure_keyword!(opts) do
-    if Keyword.keyword?(opts) do
-      opts
-    else
-      raise ArgumentError,
-            "Attesto.CredentialIssuerMetadata.build/1 expects a keyword list; got #{inspect(opts)}"
-    end
-  end
-
-  defp required_string!(opts, key) do
-    case Keyword.get(opts, key) do
-      value when is_binary(value) and value != "" -> value
-      value -> raise ArgumentError, required_string_message(key, value)
-    end
+  def build(opts) when not is_list(opts) do
+    raise ArgumentError, "expects a keyword list; got #{inspect(opts)}"
   end
 
   defp required_configurations!(opts, key) do
@@ -188,31 +182,6 @@ defmodule Attesto.CredentialIssuerMetadata do
     end
   end
 
-  defp put_optional(map, _key, nil, _normalizer), do: map
-
-  defp put_optional(map, key, value, normalizer), do: Map.put(map, key, normalizer.(value, key))
-
-  defp optional_string!(value, _key) when is_binary(value) and value != "", do: value
-
-  defp optional_string!(value, key) do
-    raise ArgumentError,
-          "Attesto.CredentialIssuerMetadata :#{key} must be a non-empty string; got #{inspect(value)}"
-  end
-
-  defp string_list!(value, key) when is_list(value) do
-    if !Enum.all?(value, &is_binary/1) do
-      raise ArgumentError,
-            "Attesto.CredentialIssuerMetadata :#{key} must be a list of strings; got #{inspect(value)}"
-    end
-
-    value
-  end
-
-  defp string_list!(value, key) do
-    raise ArgumentError,
-          "Attesto.CredentialIssuerMetadata :#{key} must be a list of strings; got #{inspect(value)}"
-  end
-
   defp display_list!(value, key) when is_list(value) do
     if !Enum.all?(value, &is_map/1) do
       raise ArgumentError,
@@ -229,18 +198,18 @@ defmodule Attesto.CredentialIssuerMetadata do
 
   defp normalize_response_encryption!(value, _key) when is_map(value) do
     value
-    |> normalized_map_value(:alg_values_supported)
+    |> MapParams.fetch(:alg_values_supported)
     |> then(fn alg_values_supported ->
       %{}
-      |> put_optional("alg_values_supported", alg_values_supported, &string_list!/2)
-      |> put_optional(
+      |> MapParams.put_optional("alg_values_supported", alg_values_supported, &MapParams.string_list!/2)
+      |> MapParams.put_optional(
         "enc_values_supported",
-        normalized_map_value(value, :enc_values_supported),
-        &string_list!/2
+        MapParams.fetch(value, :enc_values_supported),
+        &MapParams.string_list!/2
       )
-      |> put_optional(
+      |> MapParams.put_optional(
         "encryption_required",
-        normalized_map_value(value, :encryption_required),
+        MapParams.fetch(value, :encryption_required),
         &boolean!/2
       )
     end)
@@ -252,7 +221,7 @@ defmodule Attesto.CredentialIssuerMetadata do
   end
 
   defp normalize_batch_issuance!(value, key) when is_map(value) do
-    case normalized_map_value(value, :batch_size) do
+    case MapParams.fetch(value, :batch_size) do
       batch_size when is_integer(batch_size) and batch_size > 0 ->
         %{"batch_size" => batch_size}
 
@@ -315,16 +284,5 @@ defmodule Attesto.CredentialIssuerMetadata do
 
   defp configuration_passthrough!(value, _configuration_id, _field), do: value
 
-  defp configuration_value(map, key), do: normalized_map_value(map, key)
-
-  defp normalized_map_value(map, key) do
-    case Map.fetch(map, key) do
-      {:ok, value} -> value
-      :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
-
-  defp required_string_message(key, value) do
-    "Attesto.CredentialIssuerMetadata :#{key} must be a non-empty string; got #{inspect(value)}"
-  end
+  defp configuration_value(map, key), do: MapParams.fetch(map, key)
 end

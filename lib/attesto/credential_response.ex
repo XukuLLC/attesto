@@ -6,6 +6,8 @@ defmodule Attesto.CredentialResponse do
   module is pure and conn-free; credential issuance is the caller's concern.
   """
 
+  alias Attesto.MapParams
+
   @doc """
   Build an immediate issuance response.
 
@@ -14,29 +16,20 @@ defmodule Attesto.CredentialResponse do
   """
   @spec build(term(), keyword()) :: %{required(String.t()) => term()}
   def build(credentials, opts \\ []) do
-    opts = ensure_keyword!(opts)
+    opts = MapParams.ensure_keyword!(opts)
     credentials = normalize_credentials!(credentials)
 
     %{"credentials" => Enum.map(credentials, &%{"credential" => &1})}
-    |> put_optional("notification_id", Keyword.get(opts, :notification_id))
+    |> MapParams.put_optional("notification_id", Keyword.get(opts, :notification_id), &MapParams.optional_string!/2)
   end
 
   @doc "Build a deferred issuance response."
   @spec deferred(term(), keyword()) :: %{required(String.t()) => term()}
   def deferred(transaction_id, opts \\ []) do
-    opts = ensure_keyword!(opts)
+    opts = MapParams.ensure_keyword!(opts)
 
-    %{"transaction_id" => required_string!(transaction_id, :transaction_id)}
-    |> put_optional("notification_id", Keyword.get(opts, :notification_id))
-  end
-
-  defp ensure_keyword!(opts) do
-    if Keyword.keyword?(opts) do
-      opts
-    else
-      raise ArgumentError,
-            "Attesto.CredentialResponse options must be a keyword list; got #{inspect(opts)}"
-    end
+    %{"transaction_id" => MapParams.required_string!(transaction_id, :transaction_id)}
+    |> MapParams.put_optional("notification_id", Keyword.get(opts, :notification_id), &MapParams.optional_string!/2)
   end
 
   defp normalize_credentials!(credentials) when is_list(credentials) and credentials != [], do: credentials
@@ -46,22 +39,4 @@ defmodule Attesto.CredentialResponse do
   end
 
   defp normalize_credentials!(credential), do: [credential]
-
-  defp required_string!(value, _key) when is_binary(value) and value != "", do: value
-
-  defp required_string!(value, key) do
-    raise ArgumentError,
-          "Attesto.CredentialResponse :#{key} must be a non-empty string; got #{inspect(value)}"
-  end
-
-  defp put_optional(map, _key, nil), do: map
-
-  defp put_optional(map, key, value), do: Map.put(map, key, optional_string!(value, key))
-
-  defp optional_string!(value, _key) when is_binary(value) and value != "", do: value
-
-  defp optional_string!(value, key) do
-    raise ArgumentError,
-          "Attesto.CredentialResponse :#{key} must be a non-empty string; got #{inspect(value)}"
-  end
 end

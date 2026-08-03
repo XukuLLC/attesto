@@ -7,6 +7,8 @@ defmodule Attesto.CredentialOffer do
   pure and conn-free; fetching a referenced offer is the wallet's concern.
   """
 
+  alias Attesto.MapParams
+
   @default_scheme "openid-credential-offer"
 
   # OID4VCI §4.1.1: the pre-authorized_code grant is keyed in `grants` by its
@@ -24,18 +26,17 @@ defmodule Attesto.CredentialOffer do
   """
   @spec build(keyword()) :: %{required(String.t()) => term()}
   def build(opts) when is_list(opts) do
-    opts = ensure_keyword!(opts)
+    opts = MapParams.ensure_keyword!(opts)
 
     %{
-      "credential_issuer" => required_string!(opts, :credential_issuer),
+      "credential_issuer" => MapParams.required_string!(Keyword.get(opts, :credential_issuer), :credential_issuer),
       "credential_configuration_ids" => required_string_list!(opts, :credential_configuration_ids)
     }
-    |> put_optional("grants", Keyword.get(opts, :grants), &normalize_grants!/2)
+    |> MapParams.put_optional("grants", Keyword.get(opts, :grants), &normalize_grants!/2)
   end
 
-  def build(opts) do
-    raise ArgumentError,
-          "Attesto.CredentialOffer.build/1 expects a keyword list; got #{inspect(opts)}"
+  def build(opts) when not is_list(opts) do
+    raise ArgumentError, "expects a keyword list; got #{inspect(opts)}"
   end
 
   @doc "JSON-encode an offer for the `credential_offer` query parameter."
@@ -55,30 +56,18 @@ defmodule Attesto.CredentialOffer do
   @spec deep_link_by_reference(String.t(), keyword()) :: String.t()
   def deep_link_by_reference(uri, opts \\ []) do
     scheme = scheme!(opts, "deep_link_by_reference")
-    value = uri |> required_string_value!(:uri) |> URI.encode_www_form()
+    value = uri |> MapParams.required_string!(:uri) |> URI.encode_www_form()
 
     "#{scheme}://?credential_offer_uri=#{value}"
   end
 
-  defp ensure_keyword!(opts) do
-    if Keyword.keyword?(opts) do
-      opts
-    else
-      raise ArgumentError,
-            "Attesto.CredentialOffer.build/1 expects a keyword list; got #{inspect(opts)}"
-    end
-  end
-
-  defp scheme!(opts, function_name) do
+  defp scheme!(opts, _function_name) do
     if !Keyword.keyword?(opts) do
-      raise ArgumentError,
-            "Attesto.CredentialOffer.#{function_name}/2 expects a keyword list; got #{inspect(opts)}"
+      MapParams.ensure_keyword!(opts)
     end
 
-    optional_string!(Keyword.get(opts, :scheme, @default_scheme), :scheme)
+    MapParams.optional_string!(Keyword.get(opts, :scheme, @default_scheme), :scheme)
   end
-
-  defp required_string!(opts, key), do: required_string_value!(Keyword.get(opts, key), key)
 
   defp required_string_list!(opts, key) do
     values = Keyword.get(opts, key)
@@ -94,23 +83,6 @@ defmodule Attesto.CredentialOffer do
     do: Enum.all?(values, fn value -> is_binary(value) and value != "" end)
 
   defp valid_string_list?(_values), do: false
-
-  defp required_string_value!(value, _key) when is_binary(value) and value != "", do: value
-
-  defp required_string_value!(value, key) do
-    raise ArgumentError, required_string_message(key, value)
-  end
-
-  defp optional_string!(value, _key) when is_binary(value) and value != "", do: value
-
-  defp optional_string!(value, key) do
-    raise ArgumentError,
-          "Attesto.CredentialOffer :#{key} must be a non-empty string; got #{inspect(value)}"
-  end
-
-  defp put_optional(map, _key, nil, _normalizer), do: map
-
-  defp put_optional(map, key, value, normalizer), do: Map.put(map, key, normalizer.(value, key))
 
   defp normalize_grants!(value, key) when is_map(value) do
     grants =
@@ -137,7 +109,7 @@ defmodule Attesto.CredentialOffer do
       Map.put(
         grants,
         "authorization_code",
-        normalize_authorization_code!(normalized_map_value(value, :authorization_code))
+        normalize_authorization_code!(MapParams.fetch(value, :authorization_code))
       )
     else
       grants
@@ -158,15 +130,15 @@ defmodule Attesto.CredentialOffer do
 
   defp normalize_authorization_code!(value) when is_map(value) do
     %{}
-    |> put_optional(
+    |> MapParams.put_optional(
       "issuer_state",
-      normalized_map_value(value, :issuer_state),
-      &optional_string!/2
+      MapParams.fetch(value, :issuer_state),
+      &MapParams.optional_string!/2
     )
-    |> put_optional(
+    |> MapParams.put_optional(
       "authorization_server",
-      normalized_map_value(value, :authorization_server),
-      &optional_string!/2
+      MapParams.fetch(value, :authorization_server),
+      &MapParams.optional_string!/2
     )
   end
 
@@ -179,14 +151,14 @@ defmodule Attesto.CredentialOffer do
     %{}
     |> Map.put(
       "pre-authorized_code",
-      required_string_value!(pre_authorized_code_value(value), "pre-authorized_code")
+      MapParams.required_string!(pre_authorized_code_value(value), "pre-authorized_code")
     )
-    |> put_optional(
+    |> MapParams.put_optional(
       "authorization_server",
-      normalized_map_value(value, :authorization_server),
-      &optional_string!/2
+      MapParams.fetch(value, :authorization_server),
+      &MapParams.optional_string!/2
     )
-    |> put_optional("tx_code", normalized_map_value(value, :tx_code), &normalize_tx_code!/2)
+    |> MapParams.put_optional("tx_code", MapParams.fetch(value, :tx_code), &normalize_tx_code!/2)
   end
 
   defp normalize_pre_authorized_code!(value) do
@@ -196,11 +168,11 @@ defmodule Attesto.CredentialOffer do
 
   defp normalize_tx_code!(value, _key) when is_map(value) do
     %{}
-    |> put_optional("input_mode", normalized_map_value(value, :input_mode), &input_mode!/2)
-    |> put_optional("length", normalized_map_value(value, :length), &positive_integer!/2)
-    |> put_optional(
+    |> MapParams.put_optional("input_mode", MapParams.fetch(value, :input_mode), &input_mode!/2)
+    |> MapParams.put_optional("length", MapParams.fetch(value, :length), &positive_integer!/2)
+    |> MapParams.put_optional(
       "description",
-      normalized_map_value(value, :description),
+      MapParams.fetch(value, :description),
       &description!/2
     )
   end
@@ -263,18 +235,7 @@ defmodule Attesto.CredentialOffer do
   # The inner code member is always spelled `pre-authorized_code`; accept the
   # atom, string, and underscore spellings on input.
   defp pre_authorized_code_value(map) do
-    normalized_map_value(map, :"pre-authorized_code") || Map.get(map, :pre_authorized_code)
-  end
-
-  defp normalized_map_value(map, key) do
-    case Map.fetch(map, key) do
-      {:ok, value} -> value
-      :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
-
-  defp required_string_message(key, value) do
-    "Attesto.CredentialOffer :#{key} must be a non-empty string; got #{inspect(value)}"
+    MapParams.fetch(map, :"pre-authorized_code") || Map.get(map, :pre_authorized_code)
   end
 
   defp required_string_list_message(key, value) do

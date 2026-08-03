@@ -11,7 +11,7 @@ defmodule Attesto.VpToken do
   valid Key Binding JWT cannot satisfy an OID4VP request.
   """
 
-  alias Attesto.{JWS, SdJwt, SdJwtVc}
+  alias Attesto.{JWS, MapParams, SdJwt, SdJwtVc}
 
   @separator "~"
 
@@ -49,7 +49,7 @@ defmodule Attesto.VpToken do
   @spec verify(term(), keyword()) :: verify_result()
   def verify(vp_token, opts \\ []) do
     validate_vp_token!(vp_token)
-    opts = ensure_keyword!(opts)
+    opts = MapParams.ensure_keyword!(opts)
     nonce = required_option!(opts, :nonce)
     audience = required_option!(opts, :audience)
     issuer_source = issuer_source!(opts)
@@ -153,20 +153,6 @@ defmodule Attesto.VpToken do
   defp validate_vp_token!(vp_token) do
     raise ArgumentError,
           "Attesto.VpToken.verify/2 expects a map; got #{inspect(vp_token)}"
-  end
-
-  defp ensure_keyword!(opts) when is_list(opts) do
-    if Keyword.keyword?(opts) do
-      opts
-    else
-      raise ArgumentError,
-            "Attesto.VpToken.verify/2 expects options as a keyword list; got #{inspect(opts)}"
-    end
-  end
-
-  defp ensure_keyword!(opts) do
-    raise ArgumentError,
-          "Attesto.VpToken.verify/2 expects options as a keyword list; got #{inspect(opts)}"
   end
 
   defp required_option!(opts, key) do

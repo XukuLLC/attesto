@@ -7,6 +7,8 @@ defmodule Attesto.CredentialRequest do
   credential issuance are the caller's concern.
   """
 
+  alias Attesto.MapParams
+
   @type selector :: {:configuration_id, String.t()} | {:credential_identifier, String.t()}
   @type proof :: {String.t(), term()}
   @type parsed :: %{
@@ -61,7 +63,7 @@ defmodule Attesto.CredentialRequest do
   end
 
   defp selector_value(request, key, selector_tag) do
-    case normalized_map_value(request, key) do
+    case MapParams.fetch(request, key) do
       value when is_binary(value) and value != "" -> {:ok, {selector_tag, value}}
       _value -> {:error, :invalid_credential_selector}
     end
@@ -79,15 +81,15 @@ defmodule Attesto.CredentialRequest do
         {:ok, []}
 
       {true, false} ->
-        parse_single_proof(normalized_map_value(request, :proof))
+        parse_single_proof(MapParams.fetch(request, :proof))
 
       {false, true} ->
-        parse_batch_proofs(normalized_map_value(request, :proofs))
+        parse_batch_proofs(MapParams.fetch(request, :proofs))
     end
   end
 
   defp parse_single_proof(proof) when is_map(proof) do
-    with {:ok, proof_type} <- proof_type(normalized_map_value(proof, :proof_type)) do
+    with {:ok, proof_type} <- proof_type(MapParams.fetch(proof, :proof_type)) do
       parse_single_proof_value(proof_type, proof)
     end
   end
@@ -95,13 +97,13 @@ defmodule Attesto.CredentialRequest do
   defp parse_single_proof(_proof), do: {:error, :invalid_proof}
 
   defp parse_single_proof_value("jwt", proof) do
-    case normalized_map_value(proof, :jwt) do
+    case MapParams.fetch(proof, :jwt) do
       jwt when is_binary(jwt) and jwt != "" -> {:ok, [{"jwt", jwt}]}
       _value -> {:error, :invalid_jwt_proof}
     end
   end
 
-  defp parse_single_proof_value(proof_type, proof), do: {:ok, [{proof_type, string_keyed_map(proof)}]}
+  defp parse_single_proof_value(proof_type, proof), do: {:ok, [{proof_type, MapParams.string_keyed_map(proof)}]}
 
   defp parse_batch_proofs(proofs) when is_map(proofs) do
     case map_size(proofs) do
@@ -144,21 +146,21 @@ defmodule Attesto.CredentialRequest do
 
   defp parse_response_encryption(request) do
     if key_present?(request, :credential_response_encryption) do
-      normalize_response_encryption(normalized_map_value(request, :credential_response_encryption))
+      normalize_response_encryption(MapParams.fetch(request, :credential_response_encryption))
     else
       {:ok, nil}
     end
   end
 
   defp normalize_response_encryption(value) when is_map(value) do
-    jwk = normalized_map_value(value, :jwk)
-    alg = normalized_map_value(value, :alg)
-    enc = normalized_map_value(value, :enc)
+    jwk = MapParams.fetch(value, :jwk)
+    alg = MapParams.fetch(value, :alg)
+    enc = MapParams.fetch(value, :enc)
 
     if is_map(jwk) and non_empty_string?(alg) and non_empty_string?(enc) do
       {:ok,
        %{
-         "jwk" => string_keyed_map(jwk),
+         "jwk" => MapParams.string_keyed_map(jwk),
          "alg" => alg,
          "enc" => enc
        }}
@@ -181,15 +183,4 @@ defmodule Attesto.CredentialRequest do
   defp non_empty_string?(value), do: is_binary(value) and value != ""
 
   defp key_present?(map, key), do: Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
-
-  defp string_keyed_map(value) do
-    Map.new(value, fn {key, item} -> {if(is_atom(key), do: Atom.to_string(key), else: key), item} end)
-  end
-
-  defp normalized_map_value(map, key) do
-    case Map.fetch(map, key) do
-      {:ok, value} -> value
-      :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
 end
