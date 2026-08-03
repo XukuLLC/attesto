@@ -31,6 +31,8 @@ defmodule Attesto.Config do
       Defaults to `"/oauth/token"`.
     * `:presentation_session_store` - the verifier-side OID4VP session store,
       or `nil` when presentation sessions are not configured.
+    * `:status_list_store` - the issuer-side Token Status List store, or `nil`
+      when credential status tracking is not configured.
 
   ## Reserved claims
 
@@ -50,6 +52,7 @@ defmodule Attesto.Config do
     :keystore,
     :principal_kinds,
     c_nonce_store: nil,
+    status_list_store: nil,
     credential_offer_store: nil,
     pre_authorized_code_store: nil,
     presentation_session_store: nil,
@@ -64,6 +67,7 @@ defmodule Attesto.Config do
           audience: String.t(),
           keystore: module(),
           c_nonce_store: module() | nil,
+          status_list_store: module() | nil,
           credential_offer_store: module() | nil,
           pre_authorized_code_store: module() | nil,
           presentation_session_store: module() | nil,
@@ -136,6 +140,10 @@ defmodule Attesto.Config do
   @doc "Return the configured c_nonce store, if any."
   @spec c_nonce_store(t()) :: module() | nil
   def c_nonce_store(%__MODULE__{c_nonce_store: store}), do: store
+
+  @doc "Return the configured Token Status List store, if any."
+  @spec status_list_store(t()) :: module() | nil
+  def status_list_store(%__MODULE__{status_list_store: store}), do: store
 
   @doc "Return the configured credential-offer store, if any."
   @spec credential_offer_store(t()) :: module() | nil

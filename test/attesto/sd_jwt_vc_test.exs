@@ -2,7 +2,7 @@ defmodule Attesto.SdJwtVcTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
-  alias Attesto.{SdJwt, SdJwtVc}
+  alias Attesto.{SdJwt, SdJwtVc, StatusList}
 
   defp keypair(spec \\ {:ec, "P-256"}) do
     jwk = JOSE.JWK.generate_key(spec)
@@ -43,6 +43,35 @@ defmodule Attesto.SdJwtVcTest do
       assert verified.claims["iss"] == "iss"
       refute Map.has_key?(verified.claims, "a")
       refute Map.has_key?(verified.claims, "b")
+    end
+
+    test "carries an always-visible Token Status List reference" do
+      {pem, jwk} = keypair()
+      uri = "https://issuer/statuslists/1"
+
+      vc =
+        SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: pem],
+          claims: %{"given_name" => "Alice"},
+          status: StatusList.reference(uri, 42)
+        )
+
+      [jwt | _disclosures] = String.split(vc, "~")
+
+      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk)
+
+      assert verified.claims["status"] == %{
+               "status_list" => %{"idx" => 42, "uri" => uri}
+             }
+
+      refute Map.has_key?(verified.claims, "given_name")
+    end
+
+    test "rejects a non-map status option" do
+      {pem, _jwk} = keypair()
+
+      assert_raise ArgumentError, ":status must be a map; got \"invalid\"", fn ->
+        SdJwtVc.issue([iss: "i", vct: "t", pem: pem], status: "invalid")
+      end
     end
   end
 

@@ -5,16 +5,16 @@ defmodule Attesto.SdJwtVc do
   The IETF profile of `Attesto.SdJwt` used by the EUDI wallet stack (and its
   High-Assurance Interoperability Profile, HAIP): an SD-JWT whose Issuer-signed
   JWT carries a credential *type* (`vct`), an issuer (`iss`), an optional holder
-  key binding (`cnf`), and the usual temporal claims, typed `vc+sd-jwt` in the
-  JOSE `typ` header.
+  key binding (`cnf`), an optional Token Status List reference (`status`), and
+  the usual temporal claims, typed `vc+sd-jwt` in the JOSE `typ` header.
 
   This module adds the VC-specific claim rules on top of the base SD-JWT
   mechanism; the selective-disclosure machinery, recursive verification, and Key
   Binding JWT handling all come from `Attesto.SdJwt`.
 
     * `issue/2` — assemble and sign an SD-JWT VC: sets `iss`/`vct`/`iat` (and
-      optional `exp`/`nbf`/`cnf`/`sub`), makes the chosen credential claims
-      selectively disclosable, and stamps `typ: vc+sd-jwt`.
+      optional `exp`/`nbf`/`cnf`/`status`/`sub`), makes the chosen credential
+      claims selectively disclosable, and stamps `typ: vc+sd-jwt`.
     * `verify/3` — verify the issuer signature (typed `vc+sd-jwt`), reconstruct
       the disclosed claims, and enforce the VC claim rules: `iss` and `vct`
       REQUIRED and non-empty, `exp` (if present) not passed, `nbf` (if present)
@@ -60,6 +60,8 @@ defmodule Attesto.SdJwtVc do
       disclosable. Defaults to all of `:claims`.
     * `:cnf` - the holder key-binding confirmation (RFC 7800), e.g.
       `%{"jwk" => holder_public_jwk}`. Included for later Key Binding.
+    * `:status` - a Token Status List reference map, typically built with
+      `Attesto.StatusList.reference/2`. Always visible when present.
     * `:iat` / `:exp` / `:nbf` / `:sub` - standard claims (unix seconds / string).
     * `:now` - clock reference for a defaulted `:iat`.
     * `:kid` - JOSE `kid` header. `:sd_alg` - SD hashing algorithm.
@@ -73,6 +75,7 @@ defmodule Attesto.SdJwtVc do
     vct = Keyword.fetch!(opts, :vct)
     subject_claims = Keyword.get(opts, :claims, %{})
     disclosable = Keyword.get(opts, :disclosable, Map.keys(subject_claims))
+    status = validate_status!(Keyword.get(opts, :status))
 
     registered =
       %{
@@ -84,9 +87,10 @@ defmodule Attesto.SdJwtVc do
       |> put_present("nbf", Keyword.get(opts, :nbf))
       |> put_present("sub", Keyword.get(opts, :sub))
       |> put_present("cnf", Keyword.get(opts, :cnf))
+      |> put_present("status", status)
 
-    # Registered claims (iss/vct/cnf/temporal) are always visible; only the
-    # subject claims may be selectively disclosed.
+    # Registered claims (iss/vct/cnf/status/temporal) are always visible; only
+    # the subject claims may be selectively disclosed.
     claims = Map.merge(subject_claims, registered)
 
     SdJwt.issue(claims,
@@ -170,6 +174,13 @@ defmodule Attesto.SdJwtVc do
 
   defp check_nbf(%{"nbf" => _}, _opts), do: {:error, :not_yet_valid}
   defp check_nbf(_claims, _opts), do: :ok
+
+  defp validate_status!(nil), do: nil
+  defp validate_status!(status) when is_map(status), do: status
+
+  defp validate_status!(status) do
+    raise ArgumentError, ":status must be a map; got #{inspect(status)}"
+  end
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
