@@ -50,6 +50,8 @@ defmodule Attesto.ConfigTest do
       assert config.keystore == DummyKeystore
       assert config.c_nonce_store == nil
       assert config.credential_offer_store == nil
+      assert config.pre_authorized_code_store == nil
+      assert config.presentation_session_store == nil
       assert config.principal_kind_claim == "principal_kind"
       assert config.default_lifetime_seconds == 900
       assert config.token_endpoint_path == "/oauth/token"
@@ -75,12 +77,16 @@ defmodule Attesto.ConfigTest do
         Config.new(
           base_opts(
             c_nonce_store: ETS,
-            credential_offer_store: Attesto.CredentialOfferStore.ETS
+            credential_offer_store: Attesto.CredentialOfferStore.ETS,
+            pre_authorized_code_store: Attesto.PreAuthorizedCodeStore.ETS,
+            presentation_session_store: Attesto.PresentationSessionStore.ETS
           )
         )
 
       assert Config.c_nonce_store(config) == ETS
       assert Config.credential_offer_store(config) == Attesto.CredentialOfferStore.ETS
+      assert Config.pre_authorized_code_store(config) == Attesto.PreAuthorizedCodeStore.ETS
+      assert Config.presentation_session_store(config) == Attesto.PresentationSessionStore.ETS
     end
   end
 

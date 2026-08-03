@@ -29,6 +29,8 @@ defmodule Attesto.Config do
       mounted at, used to derive `token_endpoint_url/1` (the URL a DPoP
       proof's `htu` must sign, and the URL OAuth metadata would publish).
       Defaults to `"/oauth/token"`.
+    * `:presentation_session_store` - the verifier-side OID4VP session store,
+      or `nil` when presentation sessions are not configured.
 
   ## Reserved claims
 
@@ -50,6 +52,7 @@ defmodule Attesto.Config do
     c_nonce_store: nil,
     credential_offer_store: nil,
     pre_authorized_code_store: nil,
+    presentation_session_store: nil,
     principal_kind_claim: "principal_kind",
     default_lifetime_seconds: 900,
     token_endpoint_path: "/oauth/token",
@@ -63,6 +66,7 @@ defmodule Attesto.Config do
           c_nonce_store: module() | nil,
           credential_offer_store: module() | nil,
           pre_authorized_code_store: module() | nil,
+          presentation_session_store: module() | nil,
           principal_kinds: [PrincipalKind.t(), ...],
           principal_kind_claim: String.t(),
           default_lifetime_seconds: pos_integer(),
@@ -140,6 +144,10 @@ defmodule Attesto.Config do
   @doc "Return the configured pre-authorized-code store, if any."
   @spec pre_authorized_code_store(t()) :: module() | nil
   def pre_authorized_code_store(%__MODULE__{pre_authorized_code_store: store}), do: store
+
+  @doc "Return the configured presentation-session store, if any."
+  @spec presentation_session_store(t()) :: module() | nil
+  def presentation_session_store(%__MODULE__{presentation_session_store: store}), do: store
 
   @doc """
   The canonical external URL of the token endpoint: the configured issuer
