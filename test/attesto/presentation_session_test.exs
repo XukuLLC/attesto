@@ -47,6 +47,16 @@ defmodule Attesto.PresentationSessionTest do
     refute Map.has_key?(entry.data, :result)
   end
 
+  test "persists and serves an optional signed request object", ctx do
+    assert {:ok, %{id: id}} = create_session(ctx, request_object: "eyJ.signed.jar")
+    assert {:ok, "eyJ.signed.jar"} = PresentationSession.request_object(Store, id)
+
+    # A session created without one has no request object to serve.
+    assert {:ok, %{id: bare_id}} = create_session(ctx)
+    assert :error = PresentationSession.request_object(Store, bare_id)
+    assert :error = PresentationSession.request_object(Store, "unknown")
+  end
+
   test "a valid response completes the session and makes its result readable", ctx do
     {:ok, session} = create_session(ctx)
     vp_token = valid_vp_token(ctx, session.nonce)

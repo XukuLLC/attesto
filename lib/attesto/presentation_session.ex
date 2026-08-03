@@ -100,23 +100,51 @@ defmodule Attesto.PresentationSession do
     end
   end
 
+  @doc """
+  Read a pending session's stored request object (the signed OID4VP request
+  object the interface serves at its `request_uri`), if one was persisted at
+  `create/3` via the optional `:request_object` attr. Returns `:error` for an
+  unknown, expired, or request-object-less session.
+  """
+  @spec request_object(module(), String.t()) :: {:ok, String.t()} | :error
+  def request_object(store, id) when is_atom(store) and is_binary(id) do
+    now = NumericDate.now([])
+
+    case store.get(id) do
+      {:ok, %{expires_at: expires_at, data: %{request_object: request_object}}}
+      when expires_at > now and is_binary(request_object) ->
+        {:ok, request_object}
+
+      _other ->
+        :error
+    end
+  end
+
   defp normalize_attrs(attrs) do
     audience = Map.get(attrs, :audience)
     expected_query_ids = Map.get(attrs, :expected_query_ids)
     issuer_trust = Map.get(attrs, :issuer_trust)
+    request_object = Map.get(attrs, :request_object)
 
     if non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
-         valid_issuer_trust?(issuer_trust) do
+         valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) do
       {:ok,
        %{
          audience: audience,
          expected_query_ids: expected_query_ids,
          issuer_trust: issuer_trust
-       }}
+       }
+       |> put_optional(:request_object, request_object)}
     else
       {:error, :invalid_attrs}
     end
   end
+
+  defp put_optional(map, _key, nil), do: map
+  defp put_optional(map, key, value), do: Map.put(map, key, value)
+
+  defp valid_request_object?(nil), do: true
+  defp valid_request_object?(value), do: non_empty_string?(value)
 
   defp valid_query_ids?(ids) when is_list(ids), do: Enum.all?(ids, &non_empty_string?/1)
   defp valid_query_ids?(_ids), do: false
