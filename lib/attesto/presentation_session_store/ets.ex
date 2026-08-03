@@ -25,20 +25,9 @@ defmodule Attesto.PresentationSessionStore.ETS do
 
   @behaviour Attesto.PresentationSessionStore
 
-  use GenServer
+  use Attesto.Store.ETS, default_sweep_interval_ms: 30_000, reset: :server
 
   @table __MODULE__
-  @default_sweep_interval_ms 30_000
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
-  end
 
   @impl Attesto.PresentationSessionStore
   def put(%{id: id, data: data, expires_at: expires_at} = entry)
@@ -67,25 +56,6 @@ defmodule Attesto.PresentationSessionStore.ETS do
   @impl Attesto.PresentationSessionStore
   def attach_request_object(id, request_object) when is_binary(id) and is_binary(request_object) do
     GenServer.call(__MODULE__, {:attach_request_object, id, request_object})
-  end
-
-  @doc "Clear every entry. Test-facing."
-  @spec reset() :: :ok
-  def reset, do: GenServer.call(__MODULE__, :reset)
-
-  @impl GenServer
-  def init(opts) do
-    Attesto.ClusterGuard.assert_single_node!(
-      __MODULE__,
-      Keyword.get(opts, :multi_node_acknowledged?, false)
-    )
-
-    sweep_interval_ms = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
-
-    :ets.new(@table, [:set, :public, :named_table, read_concurrency: true, write_concurrency: true])
-
-    schedule_sweep(sweep_interval_ms)
-    {:ok, %{sweep_interval_ms: sweep_interval_ms}}
   end
 
   @impl GenServer
@@ -147,19 +117,7 @@ defmodule Attesto.PresentationSessionStore.ETS do
     {:reply, reply, state}
   end
 
-  def handle_call(:reset, _from, state) do
-    :ets.delete_all_objects(@table)
-    {:reply, :ok, state}
-  end
-
-  @impl GenServer
-  def handle_info(:sweep, state) do
-    now = System.system_time(:second)
+  defp delete_expired(now) do
     :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [true]}])
-
-    schedule_sweep(state.sweep_interval_ms)
-    {:noreply, state}
   end
-
-  defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
 end

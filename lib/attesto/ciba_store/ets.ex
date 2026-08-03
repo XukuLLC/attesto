@@ -24,20 +24,16 @@ defmodule Attesto.CIBAStore.ETS do
 
   @behaviour Attesto.CIBAStore
 
-  use GenServer
+  use Attesto.Store.ETS,
+    default_sweep_interval_ms: 30_000,
+    table_options: [:named_table, :public, :set, read_concurrency: true],
+    cluster_guard?: false,
+    interval_before_tables?: false,
+    reset: :server,
+    reset_doc: false,
+    reset_spec?: false
 
   @table __MODULE__
-  @default_sweep_interval_ms 30_000
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
-  end
 
   @impl Attesto.CIBAStore
   def put(%{auth_req_id_hash: hash} = record) when is_binary(hash) do
@@ -72,18 +68,7 @@ defmodule Attesto.CIBAStore.ETS do
     GenServer.call(__MODULE__, {:consume, hash, opts})
   end
 
-  @doc false
-  def reset, do: GenServer.call(__MODULE__, :reset)
-
   # ----- server -----
-
-  @impl GenServer
-  def init(opts) do
-    :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-    interval = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
-    schedule_sweep(interval)
-    {:ok, %{sweep_interval_ms: interval}}
-  end
 
   @impl GenServer
   def handle_call({:put, record}, _from, state) do
@@ -159,17 +144,8 @@ defmodule Attesto.CIBAStore.ETS do
     {:reply, reply, state}
   end
 
-  def handle_call(:reset, _from, state) do
-    :ets.delete_all_objects(@table)
-    {:reply, :ok, state}
-  end
-
-  @impl GenServer
-  def handle_info(:sweep, state) do
-    now = System.system_time(:second)
+  defp delete_expired(now) do
     :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [true]}])
-    schedule_sweep(state.sweep_interval_ms)
-    {:noreply, state}
   end
 
   # ----- helpers -----
@@ -192,6 +168,4 @@ defmodule Attesto.CIBAStore.ETS do
   defp poll_allowed?(%{last_polled_at: nil}, _opts), do: true
   defp poll_allowed?(%{interval: 0}, _opts), do: true
   defp poll_allowed?(%{interval: interval, last_polled_at: last}, %{now: now}), do: last <= now - interval
-
-  defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
 end

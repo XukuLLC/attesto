@@ -24,21 +24,18 @@ defmodule Attesto.DeviceCodeStore.ETS do
 
   @behaviour Attesto.DeviceCodeStore
 
-  use GenServer
+  use Attesto.Store.ETS,
+    default_sweep_interval_ms: 30_000,
+    table_options: [:named_table, :public, :set, read_concurrency: true],
+    extra_tables: [{__MODULE__.UserIndex, [:named_table, :public, :set, read_concurrency: true]}],
+    cluster_guard?: false,
+    interval_before_tables?: false,
+    reset: :server,
+    reset_doc: false,
+    reset_spec?: false
 
   @table __MODULE__
   @user_index __MODULE__.UserIndex
-  @default_sweep_interval_ms 30_000
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
-  end
 
   @impl Attesto.DeviceCodeStore
   def put(%{device_code_hash: hash, user_code: user_code} = record) when is_binary(hash) and is_binary(user_code) do
@@ -79,19 +76,7 @@ defmodule Attesto.DeviceCodeStore.ETS do
     GenServer.call(__MODULE__, {:consume, hash, opts})
   end
 
-  @doc false
-  def reset, do: GenServer.call(__MODULE__, :reset)
-
   # ----- server -----
-
-  @impl GenServer
-  def init(opts) do
-    :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-    :ets.new(@user_index, [:named_table, :public, :set, read_concurrency: true])
-    interval = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
-    schedule_sweep(interval)
-    {:ok, %{sweep_interval_ms: interval}}
-  end
 
   @impl GenServer
   def handle_call({:put, record}, _from, state) do
@@ -160,19 +145,9 @@ defmodule Attesto.DeviceCodeStore.ETS do
     {:reply, reply, state}
   end
 
-  def handle_call(:reset, _from, state) do
-    :ets.delete_all_objects(@table)
-    :ets.delete_all_objects(@user_index)
-    {:reply, :ok, state}
-  end
-
-  @impl GenServer
-  def handle_info(:sweep, state) do
-    now = System.system_time(:second)
+  defp delete_expired(now) do
     expired = :ets.select(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [:"$3"]}])
     Enum.each(expired, fn record -> drop(record.device_code_hash, record.user_code) end)
-    schedule_sweep(state.sweep_interval_ms)
-    {:noreply, state}
   end
 
   # ----- helpers -----
@@ -225,6 +200,4 @@ defmodule Attesto.DeviceCodeStore.ETS do
     :ets.delete(@table, hash)
     :ets.delete(@user_index, user_code)
   end
-
-  defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
 end

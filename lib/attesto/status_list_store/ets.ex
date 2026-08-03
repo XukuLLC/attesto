@@ -15,21 +15,16 @@ defmodule Attesto.StatusListStore.ETS do
 
   @behaviour Attesto.StatusListStore
 
-  use GenServer
+  use Attesto.Store.ETS,
+    sweep?: false,
+    table_options: [:set, :protected, :named_table, read_concurrency: true],
+    reset: :server,
+    reset_doc: "Clear every status list. Test-facing.",
+    reset_match?: true
 
   alias Attesto.StatusListStore
 
   @table __MODULE__
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
-  end
 
   @impl StatusListStore
   def allocate(uri) when is_binary(uri) and uri != "" do
@@ -72,21 +67,6 @@ defmodule Attesto.StatusListStore.ETS do
 
   def get_status(_uri, _idx), do: :error
 
-  @doc "Clear every status list. Test-facing."
-  @spec reset() :: :ok
-  def reset, do: GenServer.call(__MODULE__, :reset)
-
-  @impl GenServer
-  def init(opts) do
-    Attesto.ClusterGuard.assert_single_node!(
-      __MODULE__,
-      Keyword.get(opts, :multi_node_acknowledged?, false)
-    )
-
-    :ets.new(@table, [:set, :protected, :named_table, read_concurrency: true])
-    {:ok, %{}}
-  end
-
   @impl GenServer
   def handle_call({:allocate, uri}, _from, state) do
     index =
@@ -115,10 +95,5 @@ defmodule Attesto.StatusListStore.ETS do
       end
 
     {:reply, reply, state}
-  end
-
-  def handle_call(:reset, _from, state) do
-    true = :ets.delete_all_objects(@table)
-    {:reply, :ok, state}
   end
 end

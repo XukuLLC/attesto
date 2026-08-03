@@ -24,25 +24,18 @@ defmodule Attesto.RefreshStore.ETS do
 
   @behaviour Attesto.RefreshStore
 
-  use GenServer
+  use Attesto.Store.ETS,
+    default_sweep_interval_ms: 60_000,
+    table_options: [:set, :named_table, read_concurrency: true],
+    extra_tables: [{__MODULE__.Revoked, [:set, :named_table, read_concurrency: true]}],
+    reset: :server
 
   @table __MODULE__
   @revoked :"#{__MODULE__}.Revoked"
-  @default_sweep_interval_ms 60_000
   # How long a revoked-family marker is retained: long enough to outlive
   # any in-flight successor insert racing a concurrent revocation (and any
   # token that could still be presented). Generous; the sweeper prunes it.
   @revoked_retention_seconds 30 * 24 * 60 * 60
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
-  end
 
   @impl Attesto.RefreshStore
   def insert(
@@ -77,24 +70,6 @@ defmodule Attesto.RefreshStore.ETS do
 
   @impl Attesto.RefreshStore
   def revoke_family(family_id) when is_binary(family_id), do: GenServer.call(__MODULE__, {:revoke_family, family_id})
-
-  @doc "Clear every entry. Test-facing."
-  @spec reset() :: :ok
-  def reset, do: GenServer.call(__MODULE__, :reset)
-
-  @impl GenServer
-  def init(opts) do
-    Attesto.ClusterGuard.assert_single_node!(
-      __MODULE__,
-      Keyword.get(opts, :multi_node_acknowledged?, false)
-    )
-
-    sweep_interval_ms = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
-    :ets.new(@table, [:set, :named_table, read_concurrency: true])
-    :ets.new(@revoked, [:set, :named_table, read_concurrency: true])
-    schedule_sweep(sweep_interval_ms)
-    {:ok, %{sweep_interval_ms: sweep_interval_ms}}
-  end
 
   @impl GenServer
   def handle_call({:insert, record}, _from, state) do
@@ -155,19 +130,9 @@ defmodule Attesto.RefreshStore.ETS do
     {:reply, :ok, state}
   end
 
-  def handle_call(:reset, _from, state) do
-    :ets.delete_all_objects(@table)
-    :ets.delete_all_objects(@revoked)
-    {:reply, :ok, state}
-  end
-
-  @impl GenServer
-  def handle_info(:sweep, state) do
-    now = System.system_time(:second)
+  defp delete_expired(now) do
     :ets.select_delete(@table, [{{:_, :_, :"$1", :_}, [{:<, :"$1", now}], [true]}])
     :ets.select_delete(@revoked, [{{:_, :"$1"}, [{:<, :"$1", now}], [true]}])
-    schedule_sweep(state.sweep_interval_ms)
-    {:noreply, state}
   end
 
   defp family_revoked?(family_id) do
@@ -176,6 +141,4 @@ defmodule Attesto.RefreshStore.ETS do
       [] -> false
     end
   end
-
-  defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
 end
