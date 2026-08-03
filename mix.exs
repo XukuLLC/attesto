@@ -55,6 +55,9 @@ defmodule Attesto.MixProject do
   defp deps do
     [
       {:jose, ">= 1.11.12 and < 2.0.0"},
+      # Optional: ISO 18013-5 mdoc / mso_mdoc issuance and verification.
+      # Consumers that use Attesto without mdoc support do not pull in CBOR.
+      {:cbor, "~> 1.0", optional: true},
       # `Attesto.Telemetry` emits security-relevant refusals (refresh-token
       # reuse, DPoP replay, sender-constraint mismatch) so a host can alert on
       # them without wrapping every call site. A hard dependency rather than an
