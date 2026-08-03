@@ -291,6 +291,12 @@ HTTP endpoints live in `attesto_phoenix`.
 Both HAIP credential formats are supported: **IETF SD-JWT VC** and **ISO 18013-5
 mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 
+**JWT credentials**
+
+- `Attesto.JwtVc` — W3C VC Data Model 1.1 credentials signed as compact JWTs,
+  the OID4VCI `jwt_vc_json` format: nested `vc` data, registered JWT claim
+  mapping, issuer-key verification, and optional RFC 7800 holder `cnf`.
+
 **Selective disclosure**
 
 - `Attesto.SdJwt` — SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`): issue
@@ -346,7 +352,7 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 | Persistence, sessions, IdP integration | Scope grant-form matching (`Attesto.Scope`) |
 | Issuer / audience values (`Attesto.Config`) | JAR, JARM, and introspection primitives |
 | Client stores, PAR stores, endpoint rendering | Canonical SHA-256 thumbprints (`Attesto.Thumbprint`) |
-| Credential claim values, issuer keys, revocation policy | SD-JWT VC + mdoc issue/verify, OID4VCI/OID4VP primitives, Token Status List ([OID4VC](#verifiable-credentials--eu-digital-identity-oid4vc)) |
+| Credential claim values, issuer keys, revocation policy | JWT VC + SD-JWT VC + mdoc issue/verify, OID4VCI/OID4VP primitives, Token Status List ([OID4VC](#verifiable-credentials--eu-digital-identity-oid4vc)) |
 
 If a decision depends on your business rules, it is yours. If it is a wire-format or cryptographic check defined by an RFC, it is Attesto's.
 
@@ -388,6 +394,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | FAPI 2.0 Message Signing | JAR/JARM/signed introspection primitives | Core primitives |
 | SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`) | Selective Disclosure JWT (issue + recursive verify + KB-JWT) | Supported (`Attesto.SdJwt`) |
 | SD-JWT VC (`draft-ietf-oauth-sd-jwt-vc`) | SD-JWT-based Verifiable Credentials (`vc+sd-jwt`/`dc+sd-jwt`) | Supported (`Attesto.SdJwtVc`) |
+| W3C VC Data Model 1.1 / OID4VCI `jwt_vc_json` | W3C Verifiable Credentials signed as compact JWTs | Supported (`Attesto.JwtVc`) |
 | OpenID4VCI 1.0 | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
 | OpenID4VP 1.0 | Verifiable Presentations (verifier role: DCQL, `vp_token` verify, `direct_post`/`direct_post.jwt`, x509 client-id) | Supported (core primitives; endpoints in `attesto_phoenix`) |
 | ISO/IEC 18013-5 | Mobile documents (mdoc / `mso_mdoc`: IssuerSigned + MSO + device auth) | Supported (`Attesto.Mdoc`, optional `:cbor`) |
