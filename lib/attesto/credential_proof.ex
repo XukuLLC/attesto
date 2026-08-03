@@ -20,15 +20,27 @@ defmodule Attesto.CredentialProof do
   This is the issuance-time sibling of `Attesto.DPoP` / `Attesto.SdJwt`'s Key
   Binding JWT: same "prove you hold this key" shape, different claim set.
   Conn-free and fail-closed.
+
+  ## Optional key attestation cross-check
+
+  A Wallet MAY additionally carry a key attestation (`Attesto.KeyAttestation`)
+  in the proof's `key_attestation` JOSE header, vouching that the proof's
+  `jwk` is held in attested secure storage (OID4VCI Appendix D). This is
+  off by default - passing neither `:key_attestation_trusted_jwks` nor
+  `:require_key_attestation` reproduces the exact behavior of every prior
+  release. Supplying `:key_attestation_trusted_jwks` opts a caller into
+  verifying a present `key_attestation` header and rejecting a proof whose
+  key is not among its `attested_keys`; `:require_key_attestation` additionally
+  rejects a proof that carries no `key_attestation` header at all.
   """
 
-  alias Attesto.{JWS, Key, NumericDate, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SigningAlg, Thumbprint}
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
   @future_skew_seconds 60
 
-  @type verified :: %{jwk: map(), jkt: String.t()}
+  @type verified :: %{jwk: map(), jkt: String.t(), key_attestation: KeyAttestation.verified() | nil}
 
   @type verify_error ::
           :invalid_proof
@@ -41,6 +53,9 @@ defmodule Attesto.CredentialProof do
           | :invalid_nonce
           | :invalid_iat
           | :invalid_issuer
+          | :missing_key_attestation
+          | :invalid_key_attestation
+          | :key_not_attested
 
   @doc """
   Verify a `jwt` credential-request key proof.
@@ -60,8 +75,19 @@ defmodule Attesto.CredentialProof do
       #{@default_max_age_seconds}.
     * `:accepted_algs` - JWS algorithms accepted. Defaults to
       `Attesto.SigningAlg.fapi_algs/0`.
+    * `:key_attestation_trusted_jwks` - opts into verifying a `key_attestation`
+      JOSE header (see "Optional key attestation cross-check" above) against
+      these trusted keys and rejecting a proof whose key is not among the
+      attestation's `attested_keys`. Omitted (the default), no such header is
+      looked at.
+    * `:require_key_attestation` - when true, a proof with no `key_attestation`
+      header is rejected. Only meaningful alongside
+      `:key_attestation_trusted_jwks`; defaults to `false`.
 
-  Returns `{:ok, %{jwk: holder_public_jwk, jkt: thumbprint}}`.
+  Returns `{:ok, %{jwk: holder_public_jwk, jkt: thumbprint, key_attestation:
+  verified_attestation_or_nil}}`. `key_attestation` is `nil` unless
+  `:key_attestation_trusted_jwks` was supplied and a `key_attestation` header
+  was present and verified.
   """
   @spec verify_jwt(String.t(), keyword()) :: {:ok, verified()} | {:error, verify_error()}
   def verify_jwt(proof, opts) when is_binary(proof) and is_list(opts) do
@@ -75,8 +101,9 @@ defmodule Attesto.CredentialProof do
          :ok <- check_nonce(claims, opts),
          :ok <- check_issuer(claims, opts),
          :ok <- check_iat(claims, opts),
-         {:ok, jkt} <- jwk_thumbprint(jwk) do
-      {:ok, %{jwk: jwk_map, jkt: jkt}}
+         {:ok, jkt} <- jwk_thumbprint(jwk),
+         {:ok, key_attestation} <- check_key_attestation(header, jwk_map, opts) do
+      {:ok, %{jwk: jwk_map, jkt: jkt, key_attestation: key_attestation}}
     end
   end
 
@@ -176,4 +203,53 @@ defmodule Attesto.CredentialProof do
   end
 
   defp check_iat(_claims, _opts), do: {:error, :invalid_iat}
+
+  # ── key attestation cross-check (opt-in) ────────────────────────────────
+
+  defp check_key_attestation(header, jwk_map, opts) do
+    case Keyword.get(opts, :key_attestation_trusted_jwks) do
+      nil -> {:ok, nil}
+      trusted_jwks -> check_key_attestation_header(header, jwk_map, trusted_jwks, opts)
+    end
+  end
+
+  defp check_key_attestation_header(header, jwk_map, trusted_jwks, opts) do
+    case Map.get(header, "key_attestation") do
+      nil ->
+        if Keyword.get(opts, :require_key_attestation, false),
+          do: {:error, :missing_key_attestation},
+          else: {:ok, nil}
+
+      attestation when is_binary(attestation) ->
+        verify_key_attestation(attestation, jwk_map, trusted_jwks, opts)
+
+      _other ->
+        {:error, :invalid_key_attestation}
+    end
+  end
+
+  # The Issuer's own `c_nonce` (`opts[:nonce]`) doubles as the key
+  # attestation's freshness nonce per OID4VCI Appendix D.1: "If the
+  # Credential Issuer provided a `c_nonce`, the `nonce` claim in the key
+  # attestation MUST be set to a server-provided `c_nonce`." Reusing the same
+  # `:now` keeps both checks on one clock reference.
+  defp verify_key_attestation(attestation, jwk_map, trusted_jwks, opts) do
+    key_attestation_opts =
+      [trusted_jwks: trusted_jwks]
+      |> put_if_present(:nonce, Keyword.get(opts, :nonce))
+      |> put_if_present(:now, Keyword.get(opts, :now))
+
+    case KeyAttestation.verify(attestation, key_attestation_opts) do
+      {:ok, %{attested_keys: attested_keys} = result} ->
+        if KeyAttestation.covers_key?(attested_keys, jwk_map),
+          do: {:ok, result},
+          else: {:error, :key_not_attested}
+
+      {:error, _reason} ->
+        {:error, :invalid_key_attestation}
+    end
+  end
+
+  defp put_if_present(kw, _key, nil), do: kw
+  defp put_if_present(kw, key, value), do: Keyword.put(kw, key, value)
 end
