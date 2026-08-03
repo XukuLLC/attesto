@@ -253,4 +253,17 @@ if Code.ensure_loaded?(Plug.Conn) do
       |> String.replace("\"", "\\\"")
     end
   end
+else
+  defmodule Attesto.Plug.OAuthError do
+    @moduledoc "Requires the optional `:plug` dependency."
+
+    @dep_error "Attesto.Plug.OAuthError requires the optional :plug dependency. " <>
+                 "Add {:plug, \"~> 1.16\"} to your deps."
+
+    def unauthorized(_conn, _scheme, _error, _opts \\ []), do: raise(@dep_error)
+
+    def insufficient_user_authentication(_conn, _scheme, _challenge, _opts \\ []), do: raise(@dep_error)
+
+    def insufficient_scope(_conn, _required, _scheme \\ :bearer, _opts \\ []), do: raise(@dep_error)
+  end
 end

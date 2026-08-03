@@ -131,4 +131,14 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
   end
+else
+  defmodule Attesto.Plug.RequireScopes do
+    @moduledoc "Requires the optional `:plug` dependency."
+
+    @dep_error "Attesto.Plug.RequireScopes requires the optional :plug dependency. " <>
+                 "Add {:plug, \"~> 1.16\"} to your deps."
+
+    def init(_scopes), do: raise(@dep_error)
+    def call(_conn, _opts), do: raise(@dep_error)
+  end
 end

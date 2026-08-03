@@ -561,4 +561,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp step_up_scheme(%{"cnf" => %{"jkt" => jkt}}) when is_binary(jkt), do: :dpop
     defp step_up_scheme(_claims), do: :bearer
   end
+else
+  defmodule Attesto.Plug.Authenticate do
+    @moduledoc "Requires the optional `:plug` dependency."
+
+    @dep_error "Attesto.Plug.Authenticate requires the optional :plug dependency. " <>
+                 "Add {:plug, \"~> 1.16\"} to your deps."
+
+    def init(_opts), do: raise(@dep_error)
+    def call(_conn, _opts), do: raise(@dep_error)
+  end
 end
