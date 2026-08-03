@@ -118,7 +118,7 @@ token, DPoP, and scope checks as Plug modules and adds the MCP-facing
 - **Short-lived and locally verifiable.** Access tokens are signed JWTs that resource servers can verify without a shared token database. Refresh-token rotation, reuse detection, and revocation hooks cover the stateful parts that should stay stateful.
 - **Protocol, not policy.** Attesto selects keys by key ID ([`kid`](https://datatracker.ietf.org/doc/html/rfc7515#section-4.1.4)), verifies the configured signing algorithms, canonicalises thumbprints, compares in constant time, and rejects replay. Whether a given principal may hold a given scope stays in your application.
 - **Pluggable keys.** Use the bundled static keystore (which derives the public half from the private key so the two can never drift), or implement the `Attesto.Keystore` behaviour against your own KMS or rotation story.
-- **Cross-language parity.** The test suite verifies Attesto-issued tokens and proofs against a reference implementation in another language, so the wire format is exactly what other ecosystems expect.
+- **Cross-language parity.** The test suite verifies Attesto-issued tokens and proofs against reference implementations in other languages, so the wire format is exactly what other ecosystems expect. The wallet leg covers SD-JWT VC, mdoc, `jwt_vc_json`, and Token Status List artifacts against `sd-jwt-js`, `@auth0/mdl`, and `jose`.
 
 ## Installation
 
@@ -310,20 +310,27 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 **OID4VCI — credential issuance (issuer role)**
 
 - `Attesto.CredentialIssuerMetadata` (§11.2), `Attesto.CredentialOffer` (§4.1,
-  pre-authorized_code grant keyed by its URN + `tx_code`),
+  by-value/by-reference deep links, authorization_code and pre-authorized_code
+  grants keyed by their standard names + `tx_code`),
   `Attesto.CredentialRequest` (§8.2 parse), `Attesto.CredentialResponse` (§8.3
   build, immediate + deferred), `Attesto.CredentialProof`
   (`openid4vci-proof+jwt` holder key proof → `cnf`).
 
 **OID4VP — credential presentation (verifier role)**
 
-- `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against their embedded
-  holder JWK, RFC 7638 subject binding, RP Client ID, nonce, and temporal claims.
 - `Attesto.PresentationRequest` (§5, **DCQL** query language),
   `Attesto.VpToken` (§7 verify — mandatory holder binding, nonce/audience
   binding; dispatches SD-JWT VC and mdoc presentations), and
   `Attesto.PresentationSession` (the verifier state machine: single-use
   nonce↔response correlation).
+
+**Self-issued identity & DID resolution**
+
+- `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against their embedded
+  holder JWK, RFC 7638 subject binding, RP Client ID, nonce, and temporal claims.
+- `Attesto.Did` — connection-free `did:key` (Ed25519 + P-256) and `did:jwk`
+  resolution to public JWKs, plus safe `did:web` parsing. HTTP, TLS, caching,
+  and DID-document key selection stay with the host-supplied resolver.
 
 **ISO mdoc / COSE** (optional `:cbor` dependency)
 
@@ -341,6 +348,21 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
   verify, and resolve a referenced token's status. `Attesto.StatusListStore` — a
   per-URI index-allocation + status store for issuers.
 
+**Federation & wallet trust**
+
+- `Attesto.Federation.EntityStatement` — build and verify OpenID Federation
+  1.0 Entity Statements and self-issued Entity Configurations.
+  `Attesto.Federation.TrustChain` validates an already-resolved chain from leaf
+  to pinned Trust Anchor; `Attesto.Federation.MetadataPolicy` merges and applies
+  the standard policy operators. Fetching and candidate-chain selection stay
+  with the host.
+- `Attesto.WalletAttestation` — verify the Client Attestation JWT + Client
+  Attestation PoP JWT pair used by OAuth Attestation-Based Client
+  Authentication against host-trusted Wallet Provider keys.
+- `Attesto.KeyAttestation` — verify OID4VCI key-attestation JWTs, their attested
+  public keys, nonce/expiry, and optional key-storage, user-authentication, and
+  certification assurance claims.
+
 ## What you supply / what's in the box
 
 | What you supply | What's in the box |
@@ -352,7 +374,7 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 | Persistence, sessions, IdP integration | Scope grant-form matching (`Attesto.Scope`) |
 | Issuer / audience values (`Attesto.Config`) | JAR, JARM, and introspection primitives |
 | Client stores, PAR stores, endpoint rendering | Canonical SHA-256 thumbprints (`Attesto.Thumbprint`) |
-| Credential claim values, issuer keys, revocation policy | JWT VC + SD-JWT VC + mdoc issue/verify, OID4VCI/OID4VP primitives, Token Status List ([OID4VC](#verifiable-credentials--eu-digital-identity-oid4vc)) |
+| Credential claim values, issuer and trust keys, revocation policy | JWT VC + SD-JWT VC + mdoc issue/verify, OID4VCI/OID4VP, SIOPv2, DID, Federation, wallet/key attestation, and Token Status List primitives ([OID4VC](#verifiable-credentials--eu-digital-identity-oid4vc)) |
 
 If a decision depends on your business rules, it is yours. If it is a wire-format or cryptographic check defined by an RFC, it is Attesto's.
 
@@ -397,6 +419,10 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | W3C VC Data Model 1.1 / OID4VCI `jwt_vc_json` | W3C Verifiable Credentials signed as compact JWTs | Supported (`Attesto.JwtVc`) |
 | OpenID4VCI 1.0 | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
 | OpenID4VP 1.0 | Verifiable Presentations (verifier role: DCQL, `vp_token` verify, `direct_post`/`direct_post.jwt`, x509 client-id) | Supported (core primitives; endpoints in `attesto_phoenix`) |
+| SIOPv2 | Self-Issued OpenID Provider v2 ID Token verification | Supported (`Attesto.Siop`) |
+| OpenID Federation 1.0 | Entity Statements, Entity Configurations, Trust Chains, and metadata policies | Supported (`Attesto.Federation.{EntityStatement, TrustChain, MetadataPolicy}`) |
+| W3C DID Core (`did:key` / `did:jwk` / `did:web`) | Connection-free DID resolution and host-mediated `did:web` resolution | Supported (`Attesto.Did`) |
+| OAuth Attestation-Based Client Authentication (`draft-ietf-oauth-attestation-based-client-auth`) | Wallet/Client Attestation JWT + proof-of-possession JWT verification | Supported (`Attesto.WalletAttestation`) |
 | ISO/IEC 18013-5 | Mobile documents (mdoc / `mso_mdoc`: IssuerSigned + MSO + device auth) | Supported (`Attesto.Mdoc`, optional `:cbor`) |
 | RFC 8152 (COSE) | COSE_Sign1 (ES256) + COSE_Key, as used by mdoc | Supported (`Attesto.Cose`, optional `:cbor`) |
 | Token Status List (`draft-ietf-oauth-status-list`) | `statuslist+jwt` revocation | Supported (`Attesto.StatusList`) |
@@ -519,7 +545,9 @@ The cross-language parity tests drive a reference `joserfc` / `cryptography`
 stack in-process via `erlang_python` and run as part of `mix test` (they
 self-skip when that Python stack is not installed). Install it with
 `pip install joserfc cryptography` against the interpreter `erlang_python`
-loads.
+loads. The JavaScript parity leg covers the wallet formats with `sd-jwt-js`,
+`@auth0/mdl`, and `jose`; install its test-only dependencies with
+`npm install --no-audit --no-fund --prefix test/support/js`.
 
 ## License
 
