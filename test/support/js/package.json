@@ -4,6 +4,9 @@
   "private": true,
   "description": "JS JOSE reference for attesto cross-language parity tests (test-support only).",
   "dependencies": {
+    "@auth0/mdl": "^3.0.1",
+    "@sd-jwt/core": "^0.20.0",
+    "@sd-jwt/sd-jwt-vc": "^0.20.0",
     "jose": "^5.9.6"
   }
 }

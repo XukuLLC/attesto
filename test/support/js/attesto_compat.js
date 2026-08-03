@@ -5,6 +5,259 @@ async function jose() {
   return await import("jose");
 }
 
+async function sdJwtLibraries() {
+  const [vc, core] = await Promise.all([
+    import("@sd-jwt/sd-jwt-vc"),
+    import("@sd-jwt/core"),
+  ]);
+  return { vc, core };
+}
+
+function sdHasher(data, alg) {
+  const nodeAlg = { "sha-256": "sha256", "sha-384": "sha384", "sha-512": "sha512" }[alg];
+  if (!nodeAlg) throw new TypeError(`unsupported SD-JWT hash algorithm ${alg}`);
+  return new Uint8Array(crypto.createHash(nodeAlg).update(Buffer.from(data)).digest());
+}
+
+async function es256Verifier(publicJwk) {
+  const j = await jose();
+  const key = await j.importJWK(publicJwk, "ES256");
+
+  return async (data, signature) => {
+    try {
+      await j.compactVerify(`${data}.${signature}`, key, {
+        algorithms: ["ES256"],
+      });
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  };
+}
+
+// Verify an SD-JWT VC presentation, including issuer signature, Disclosures,
+// and its holder-signed KB-JWT. sd-jwt-js reconstructs the disclosed payload;
+// its KB verifier receives the reconstructed cnf key and jose verifies ES256.
+async function verifySdJwtVc(
+  presentation,
+  issuerPublicJwk,
+  nonce,
+  audience,
+  currentDate,
+) {
+  const j = await jose();
+  const { vc, core } = await sdJwtLibraries();
+  if (typeof core.decodeSdJwt !== "function")
+    throw new Error("@sd-jwt/core did not load");
+
+  const verifier = await es256Verifier(issuerPublicJwk);
+  const kbVerifier = async (data, signature, payload) => {
+    const holderJwk = payload && payload.cnf && payload.cnf.jwk;
+    if (!holderJwk) throw new Error("SD-JWT VC is missing cnf.jwk");
+    const holderKey = await j.importJWK(holderJwk, "ES256");
+
+    try {
+      await j.compactVerify(`${data}.${signature}`, holderKey, {
+        algorithms: ["ES256"],
+      });
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  };
+
+  const instance = new vc.SDJwtVcInstance({
+    verifier,
+    kbVerifier,
+    hasher: sdHasher,
+    hashAlg: "sha-256",
+  });
+
+  const verified = await instance.verify(presentation, {
+    currentDate,
+    skewSeconds: 60,
+    keyBindingNonce: nonce,
+    disableStatusVerification: true,
+  });
+
+  if (!verified.header || !["vc+sd-jwt", "dc+sd-jwt"].includes(verified.header.typ))
+    throw new Error("unexpected SD-JWT VC typ");
+  if (verified.header.alg !== "ES256")
+    throw new Error("unexpected SD-JWT VC algorithm");
+  if (!verified.payload.iss || !verified.payload.vct)
+    throw new Error("SD-JWT VC is missing iss or vct");
+  if (!verified.kb || verified.kb.payload.aud !== audience)
+    throw new Error("KB-JWT audience mismatch");
+
+  return {
+    claims: verified.payload,
+    header: verified.header,
+    keyBinding: verified.kb.payload,
+  };
+}
+module.exports.verifySdJwtVc = verifySdJwtVc;
+
+// Reverse leg: sd-jwt-js issues a dc+sd-jwt credential and Attesto verifies
+// it. The library owns the Disclosure construction; Node crypto supplies the
+// ES256 signer callback expected by @sd-jwt/core.
+async function issueSdJwtVc(claims, disclosable, issuerPrivateJwk) {
+  const j = await jose();
+  const { vc, core } = await sdJwtLibraries();
+  if (typeof core.decodeSdJwt !== "function")
+    throw new Error("@sd-jwt/core did not load");
+
+  const privateKey = await j.importJWK(issuerPrivateJwk, "ES256");
+  const signer = (data) =>
+    crypto
+      .sign("sha256", Buffer.from(data), {
+        key: privateKey,
+        dsaEncoding: "ieee-p1363",
+      })
+      .toString("base64url");
+
+  const instance = new vc.SDJwtVcInstance({
+    signer,
+    signAlg: "ES256",
+    hasher: sdHasher,
+    hashAlg: "sha-256",
+    saltGenerator: (length) => crypto.randomBytes(length).toString("base64url"),
+  });
+
+  return await instance.issue(claims, { _sd: disclosable });
+}
+module.exports.issueSdJwtVc = issueSdJwtVc;
+
+// @auth0/mdl's public parser consumes a DeviceResponse. Attesto issues the
+// contained bare IssuerSigned structure, so wrap its decoded contents in that
+// reference form, then use mdl's IssuerAuth and IssuerSignedItem
+// verifiers against the caller-supplied issuer public key.
+async function verifyMdoc(issuerSignedBase64url, issuerPublicJwk) {
+  const mdl = require("@auth0/mdl");
+  const { cborDecode, cborEncode } = require("@auth0/mdl/lib/cbor");
+  const IssuerAuth = require("@auth0/mdl/lib/mdoc/model/IssuerAuth").default;
+  const issuerSigned = cborDecode(Buffer.from(issuerSignedBase64url, "base64url"));
+
+  if (!(issuerSigned instanceof Map))
+    throw new TypeError("IssuerSigned must decode to a CBOR map");
+  const rawIssuerAuth = issuerSigned.get("issuerAuth");
+  if (!Array.isArray(rawIssuerAuth))
+    throw new TypeError("IssuerSigned is missing issuerAuth");
+
+  const docType = new IssuerAuth(...rawIssuerAuth).decodedPayload.docType;
+  const deviceResponse = cborEncode(
+    new Map([
+      ["version", "1.0"],
+      [
+        "documents",
+        [
+          new Map([
+            ["docType", docType],
+            ["issuerSigned", issuerSigned],
+          ]),
+        ],
+      ],
+      ["status", 0],
+    ]),
+  );
+
+  const parsed = mdl.parse(deviceResponse);
+  const document = parsed.documents[0];
+  const issuerAuth = document.issuerSigned.issuerAuth;
+  const j = await jose();
+  const issuerKey = await j.importJWK(issuerPublicJwk, issuerAuth.algName);
+
+  if (!(await issuerAuth.verify(issuerKey)))
+    throw new Error("mdoc issuer signature verification failed");
+
+  const namespaces = {};
+  for (const namespace of document.issuerSignedNameSpaces) {
+    const items = document.issuerSigned.nameSpaces[namespace];
+    const checks = await Promise.all(
+      items.map((item) => item.isValid(namespace, issuerAuth)),
+    );
+    if (checks.some((valid) => !valid))
+      throw new Error(`mdoc digest verification failed for ${namespace}`);
+    namespaces[namespace] = document.getIssuerNameSpace(namespace);
+  }
+
+  return { docType: document.docType, namespaces };
+}
+module.exports.verifyMdoc = verifyMdoc;
+
+// Verify OID4VCI jwt_vc_json and return exactly the issuer-signed vc claim.
+async function verifyJwtVc(token, issuerPublicJwk) {
+  const j = await jose();
+  const key = await j.importJWK(issuerPublicJwk, "ES256");
+  const { payload, protectedHeader } = await j.jwtVerify(token, key, {
+    algorithms: ["ES256"],
+    typ: "JWT",
+  });
+  if (!payload.vc || typeof payload.vc !== "object")
+    throw new Error("jwt_vc_json is missing vc");
+  return { header: protectedHeader, vc: payload.vc };
+}
+module.exports.verifyJwtVc = verifyJwtVc;
+
+// Verify a statuslist+jwt, inflate its zlib-compressed list, and read the
+// least-significant-first status field at idx (draft Token Status List wire).
+async function verifyStatusList(token, issuerPublicJwk, idx) {
+  const j = await jose();
+  const key = await j.importJWK(issuerPublicJwk, "ES256");
+  const { payload, protectedHeader } = await j.jwtVerify(token, key, {
+    algorithms: ["ES256"],
+    typ: "statuslist+jwt",
+  });
+  const statusList = payload.status_list;
+  if (!statusList || ![1, 2, 4, 8].includes(statusList.bits))
+    throw new Error("invalid status_list claim");
+
+  const packed = require("zlib").inflateSync(
+    Buffer.from(statusList.lst, "base64url"),
+  );
+  const perByte = 8 / statusList.bits;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= packed.length * perByte)
+    throw new RangeError("status index is out of range");
+  const offset = (idx % perByte) * statusList.bits;
+  const status = (packed[Math.floor(idx / perByte)] >> offset) &
+    ((1 << statusList.bits) - 1);
+
+  return {
+    bits: statusList.bits,
+    header: protectedHeader,
+    status,
+    sub: payload.sub,
+  };
+}
+module.exports.verifyStatusList = verifyStatusList;
+
+// Verify a holder-signed OID4VCI proof or KB-JWT with jose and return its
+// claims. When the proof embeds a jwk, also prove it names the supplied key.
+async function verifyHolderProof(token, holderPublicJwk, typ, expectedClaims) {
+  const j = await jose();
+  const key = await j.importJWK(holderPublicJwk, "ES256");
+  const { payload, protectedHeader } = await j.jwtVerify(token, key, {
+    algorithms: ["ES256"],
+    typ,
+  });
+
+  if (protectedHeader.jwk) {
+    const [embeddedJkt, expectedJkt] = await Promise.all([
+      j.calculateJwkThumbprint(protectedHeader.jwk, "sha256"),
+      j.calculateJwkThumbprint(holderPublicJwk, "sha256"),
+    ]);
+    if (embeddedJkt !== expectedJkt)
+      throw new Error("holder proof embedded jwk mismatch");
+  }
+
+  for (const [claim, expected] of Object.entries(expectedClaims || {})) {
+    if (JSON.stringify(payload[claim]) !== JSON.stringify(expected))
+      throw new Error(`holder proof ${claim} mismatch`);
+  }
+
+  return { header: protectedHeader, payload };
+}
+module.exports.verifyHolderProof = verifyHolderProof;
+
 // Verify a compact JWT with a PEM public key + alg. Returns {header, payload}.
 async function verifyJwt(token, publicPem, alg) {
   const j = await jose();
@@ -52,13 +305,22 @@ async function signJwt(claims, privatePem, alg, typ) {
     .sign(key);
 }
 
-module.exports = { verifyJwt, jwkThumbprint, signJwt };
+Object.assign(module.exports, { verifyJwt, jwkThumbprint, signJwt });
 module.exports.verifyEdwardsJwt = verifyEdwardsJwt;
 
-// Availability probe: resolves to "pong" iff jose loaded.
+// Availability probe: resolves to "pong" iff jose and every wallet reference
+// dependency load. This keeps parity tests skipped, rather than failed, when a
+// checkout has not run npm install after package.json changes.
 async function ping() {
   const j = await jose();
-  return typeof j.jwtVerify === "function" ? "pong" : "no-jose";
+  const { vc, core } = await sdJwtLibraries();
+  const mdl = require("@auth0/mdl");
+  return typeof j.jwtVerify === "function" &&
+    typeof vc.SDJwtVcInstance === "function" &&
+    typeof core.decodeSdJwt === "function" &&
+    typeof mdl.parse === "function"
+    ? "pong"
+    : "missing-wallet-dependency";
 }
 module.exports.ping = ping;
 
