@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Attesto.Siop` verifies SIOPv2 Self-Issued ID Tokens for the RP role: strict
+  self-signature verification with the embedded public `sub_jwk`, RFC 7638
+  subject binding, static-or-sub self-issued issuer validation, RP Client ID
+  and mandatory nonce binding, and fail-closed `exp`/`iat`/`nbf` checks.
+
 ## [1.7.0] - 2026-08-02
 
 ### Security

@@ -311,6 +311,8 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 
 **OID4VP — credential presentation (verifier role)**
 
+- `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against their embedded
+  holder JWK, RFC 7638 subject binding, RP Client ID, nonce, and temporal claims.
 - `Attesto.PresentationRequest` (§5, **DCQL** query language),
   `Attesto.VpToken` (§7 verify — mandatory holder binding, nonce/audience
   binding; dispatches SD-JWT VC and mdoc presentations), and

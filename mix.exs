@@ -120,7 +120,7 @@ defmodule Attesto.MixProject do
         License: ~r/LICENSE/
       ],
       groups_for_modules: [
-        Core: [Attesto.Token, Attesto.IDToken, Attesto.Config, Attesto.PrincipalKind],
+        Core: [Attesto.Token, Attesto.IDToken, Attesto.Siop, Attesto.Config, Attesto.PrincipalKind],
         Grants: [
           Attesto.PKCE,
           Attesto.AuthorizationCode,
