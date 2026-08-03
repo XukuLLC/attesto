@@ -17,6 +17,9 @@ if Code.ensure_loaded?(CBOR) do
     `OpenID4VPHandover` (redirect-flow form, per the OID4VP 1.0 "Handover and
     SessionTranscript Definitions"). `COSE_Mac0` device authentication is not
     supported.
+
+    `peek_doc_type/1` reads an unverified `docType` out of a `DeviceResponse`
+    for issuer-key resolution ahead of verification; see `Attesto.VpToken`.
     """
 
     alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint}
@@ -136,6 +139,34 @@ if Code.ensure_loaded?(CBOR) do
     end
 
     def verify_device_response(_device_response, _context, _trusted, _opts), do: {:error, :invalid_mdoc}
+
+    @doc """
+    Peek an OID4VP `DeviceResponse`'s first document `docType`, supplied as
+    base64url or raw CBOR bytes, without verifying any signature.
+
+    Mirrors `Attesto.JWS.peek_json/3` peeking an SD-JWT's unverified `iss`:
+    the result is UNVERIFIED input and exists only to select candidate issuer
+    keys ahead of verification (e.g. for `Attesto.VpToken`'s `:resolve_issuer`
+    callback). It MUST NOT be used to make a network request — the presenter
+    controls this value.
+    """
+    @spec peek_doc_type(binary()) :: {:ok, String.t()} | {:error, :invalid_mdoc}
+    def peek_doc_type(device_response) when is_binary(device_response) do
+      with {:ok, response_bytes} <- issuer_signed_bytes(device_response),
+           {:ok, response} <- decode_complete(response_bytes),
+           {:ok, [%{"docType" => doc_type} | _rest]} <- device_response_documents(response),
+           true <- is_binary(doc_type) and doc_type != "" do
+        {:ok, doc_type}
+      else
+        _other -> {:error, :invalid_mdoc}
+      end
+    rescue
+      _error -> {:error, :invalid_mdoc}
+    catch
+      _kind, _reason -> {:error, :invalid_mdoc}
+    end
+
+    def peek_doc_type(_device_response), do: {:error, :invalid_mdoc}
 
     defp verify_issuer_signed(issuer_signed, trusted, opts) do
       with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
@@ -600,5 +631,6 @@ else
     def issue(_opts), do: raise(@dep_error)
     def verify(_input, _trusted, _opts \\ []), do: raise(@dep_error)
     def verify_device_response(_device_response, _context, _trusted, _opts \\ []), do: raise(@dep_error)
+    def peek_doc_type(_device_response), do: raise(@dep_error)
   end
 end

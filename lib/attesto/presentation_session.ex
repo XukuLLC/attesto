@@ -5,10 +5,13 @@ defmodule Attesto.PresentationSession do
   `create/3` persists the nonce, audience, requested DCQL IDs, and issuer trust
   needed to verify a later `direct_post` response. The opaque session `id` is
   also the OID4VP `state` value, so a wallet response can be correlated without
-  a second index or identifier.
+  a second index or identifier. An optional `:response_uri` attr is also
+  stored and forwarded to `Attesto.VpToken.verify/2`; it is required only if
+  the session expects an `mso_mdoc` presentation (see `Attesto.VpToken`'s
+  moduledoc) and may be omitted for SD-JWT-VC-only sessions exactly as before.
 
-  Verification delegates all SD-JWT VC and holder-binding cryptography to
-  `Attesto.VpToken.verify/2`. A malformed or invalid presentation leaves the
+  Verification delegates all SD-JWT VC / mdoc and holder-binding cryptography
+  to `Attesto.VpToken.verify/2`. A malformed or invalid presentation leaves the
   session pending, allowing a valid response to arrive before expiry. Only a
   successfully verified response attempts the store's atomic completion.
 
@@ -28,7 +31,9 @@ defmodule Attesto.PresentationSession do
   @type create_attrs :: %{
           required(:audience) => String.t(),
           required(:expected_query_ids) => [String.t()],
-          required(:issuer_trust) => issuer_trust()
+          required(:issuer_trust) => issuer_trust(),
+          optional(:request_object) => String.t(),
+          optional(:response_uri) => String.t()
         }
 
   @type correlation :: {:state, String.t()} | {:id, String.t()}
@@ -142,16 +147,19 @@ defmodule Attesto.PresentationSession do
     expected_query_ids = Map.get(attrs, :expected_query_ids)
     issuer_trust = Map.get(attrs, :issuer_trust)
     request_object = Map.get(attrs, :request_object)
+    response_uri = Map.get(attrs, :response_uri)
 
     if non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
-         valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) do
+         valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) and
+         valid_response_uri?(response_uri) do
       {:ok,
        %{
          audience: audience,
          expected_query_ids: expected_query_ids,
          issuer_trust: issuer_trust
        }
-       |> put_optional(:request_object, request_object)}
+       |> put_optional(:request_object, request_object)
+       |> put_optional(:response_uri, response_uri)}
     else
       {:error, :invalid_attrs}
     end
@@ -162,6 +170,9 @@ defmodule Attesto.PresentationSession do
 
   defp valid_request_object?(nil), do: true
   defp valid_request_object?(value), do: non_empty_string?(value)
+
+  defp valid_response_uri?(nil), do: true
+  defp valid_response_uri?(value), do: non_empty_string?(value)
 
   defp valid_query_ids?(ids) when is_list(ids), do: Enum.all?(ids, &non_empty_string?/1)
   defp valid_query_ids?(_ids), do: false
@@ -201,7 +212,8 @@ defmodule Attesto.PresentationSession do
         expected_query_ids: data.expected_query_ids
       ]
       |> Keyword.merge(issuer_trust_opts(data.issuer_trust))
-      |> Keyword.merge(Keyword.take(opts, [:now]))
+      |> Keyword.merge(response_uri_opts(data))
+      |> Keyword.merge(Keyword.take(opts, [:now, :formats]))
 
     case VpToken.verify(vp_token, verify_opts) do
       {:ok, results} -> {:ok, results}
@@ -211,6 +223,9 @@ defmodule Attesto.PresentationSession do
 
   defp issuer_trust_opts({:issuer_jwks, jwks}), do: [issuer_jwks: jwks]
   defp issuer_trust_opts({:resolve_issuer, resolver}), do: [resolve_issuer: resolver]
+
+  defp response_uri_opts(%{response_uri: response_uri}), do: [response_uri: response_uri]
+  defp response_uri_opts(_data), do: []
 
   defp complete(store, id, results) do
     case store.complete(id, %{results: results}) do

@@ -2,7 +2,10 @@ defmodule Attesto.VpTokenTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
-  alias Attesto.{JWS, SdJwtVc, VpToken}
+  alias Attesto.{Cose, JWS, Mdoc, SdJwtVc, VpToken}
+
+  @doc_type "org.iso.18013.5.1.mDL"
+  @mdl_namespace "org.iso.18013.5.1"
 
   defp keypair(spec \\ {:ec, "P-256"}) do
     jwk = JOSE.JWK.generate_key(spec)
@@ -256,6 +259,220 @@ defmodule Attesto.VpTokenTest do
 
       assert_raise ArgumentError, fn ->
         VpToken.verify(%{}, opts ++ [issuer_jwks: %{}, resolve_issuer: fn _iss -> {:ok, %{}} end])
+      end
+    end
+  end
+
+  describe "mso_mdoc presentations" do
+    defp mdoc_keypair, do: keypair()
+
+    defp mdoc_context(overrides \\ []) do
+      %{
+        client_id: "client-1",
+        response_uri: "https://verifier.example.com/response",
+        nonce: "nonce-1",
+        now: 1_700_000_000
+      }
+      |> Map.merge(Map.new(overrides))
+    end
+
+    defp issue_mdoc(issuer_pem, holder_public, now, namespaces) do
+      {:ok, issued} =
+        Mdoc.issue(
+          device_key: holder_public,
+          doc_type: @doc_type,
+          issuer_pem: issuer_pem,
+          namespaces: namespaces,
+          validity: %{signed: now - 10, valid_from: now - 5, valid_until: now + 3600}
+        )
+
+      {:ok, issuer_signed, ""} = issued |> Base.url_decode64!(padding: false) |> CBOR.decode()
+      issuer_signed
+    end
+
+    defp mdoc_device_response(issuer_signed, holder_pem, ctx) do
+      session_transcript = mdoc_session_transcript(ctx)
+      device_namespaces_tagged = mdoc_tagged(%{})
+
+      device_authentication_bytes =
+        ["DeviceAuthentication", session_transcript, @doc_type, device_namespaces_tagged]
+        |> mdoc_tagged()
+        |> CBOR.encode()
+
+      {:ok, device_auth_cose, ""} =
+        holder_pem |> Cose.sign1_detached(device_authentication_bytes, []) |> CBOR.decode()
+
+      document = %{
+        "docType" => @doc_type,
+        "issuerSigned" => issuer_signed,
+        "deviceSigned" => %{
+          "nameSpaces" => device_namespaces_tagged,
+          "deviceAuth" => %{"deviceSignature" => device_auth_cose}
+        }
+      }
+
+      %{"documents" => [document], "status" => 0, "version" => "1.0"}
+      |> CBOR.encode()
+      |> Base.url_encode64(padding: false)
+    end
+
+    defp mdoc_session_transcript(ctx) do
+      handover_info_hash =
+        [ctx.client_id, ctx.nonce, nil, ctx.response_uri]
+        |> CBOR.encode()
+        |> then(&:crypto.hash(:sha256, &1))
+        |> mdoc_bytes()
+
+      [nil, nil, ["OpenID4VPHandover", handover_info_hash]]
+    end
+
+    defp mdoc_tagged(value), do: %CBOR.Tag{tag: 24, value: mdoc_bytes(CBOR.encode(value))}
+    defp mdoc_bytes(value), do: %CBOR.Tag{tag: :bytes, value: value}
+
+    defp mdoc_valid_context(opts \\ []) do
+      {issuer_pem, issuer_jwk} = mdoc_keypair()
+      {holder_pem, holder_jwk} = mdoc_keypair()
+      ctx = mdoc_context()
+
+      namespaces = %{@mdl_namespace => %{"given_name" => "Jane", "family_name" => "Doe"}}
+      issuer_signed = issue_mdoc(issuer_pem, holder_jwk, ctx.now, namespaces)
+      device_response = mdoc_device_response(issuer_signed, holder_pem, ctx)
+
+      Map.merge(
+        %{
+          issuer_jwk: issuer_jwk,
+          device_response: device_response,
+          audience: ctx.client_id,
+          nonce: ctx.nonce,
+          response_uri: ctx.response_uri,
+          now: ctx.now
+        },
+        Map.new(opts)
+      )
+    end
+
+    test "verifies a DCQL entry declared as mso_mdoc via :formats" do
+      mctx = mdoc_valid_context()
+
+      assert {:ok, %{"mdl" => result}} =
+               VpToken.verify(%{"mdl" => mctx.device_response},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: mctx.issuer_jwk,
+                 response_uri: mctx.response_uri,
+                 formats: %{"mdl" => "mso_mdoc"},
+                 now: mctx.now
+               )
+
+      assert result.doc_type == @doc_type
+      assert result.namespaces == %{@mdl_namespace => %{"given_name" => "Jane", "family_name" => "Doe"}}
+      assert result.device_namespaces == %{}
+    end
+
+    test "detects mso_mdoc by shape when :formats is omitted" do
+      mctx = mdoc_valid_context()
+
+      assert {:ok, %{"mdl" => result}} =
+               VpToken.verify(%{"mdl" => mctx.device_response},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: mctx.issuer_jwk,
+                 response_uri: mctx.response_uri,
+                 now: mctx.now
+               )
+
+      assert result.doc_type == @doc_type
+    end
+
+    test "a mixed vp_token verifies both an SD-JWT VC and an mso_mdoc entry" do
+      sd_jwt_ctx = valid_context()
+      mctx = mdoc_valid_context()
+
+      vp_token = %{"identity" => sd_jwt_ctx.presentation, "mdl" => mctx.device_response}
+
+      assert {:ok, results} =
+               VpToken.verify(vp_token,
+                 nonce: sd_jwt_ctx.nonce,
+                 audience: sd_jwt_ctx.audience,
+                 issuer_jwks: [sd_jwt_ctx.issuer_jwk, mctx.issuer_jwk],
+                 response_uri: mctx.response_uri,
+                 now: sd_jwt_ctx.now
+               )
+
+      assert results["identity"].vct == "identity"
+      assert results["mdl"].doc_type == @doc_type
+    end
+
+    test "rejects a wrong nonce, client_id, and response_uri" do
+      mctx = mdoc_valid_context()
+      base_opts = [issuer_jwks: mctx.issuer_jwk, response_uri: mctx.response_uri, now: mctx.now]
+
+      assert {:error, {"mdl", _reason}} =
+               VpToken.verify(
+                 %{"mdl" => mctx.device_response},
+                 [nonce: "wrong-nonce", audience: mctx.audience] ++ base_opts
+               )
+
+      assert {:error, {"mdl", _reason}} =
+               VpToken.verify(
+                 %{"mdl" => mctx.device_response},
+                 [nonce: mctx.nonce, audience: "wrong-client"] ++ base_opts
+               )
+
+      assert {:error, {"mdl", _reason}} =
+               VpToken.verify(%{"mdl" => mctx.device_response},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: mctx.issuer_jwk,
+                 response_uri: "https://attacker.example.com/response",
+                 now: mctx.now
+               )
+    end
+
+    test "missing :response_uri fails a DCQL entry that needs it" do
+      mctx = mdoc_valid_context()
+
+      assert {:error, {"mdl", :missing_response_uri}} =
+               VpToken.verify(%{"mdl" => mctx.device_response},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: mctx.issuer_jwk,
+                 now: mctx.now
+               )
+    end
+
+    test "supports an issuer resolver keyed on the unverified docType" do
+      mctx = mdoc_valid_context()
+      caller = self()
+
+      assert {:ok, %{"mdl" => result}} =
+               VpToken.verify(%{"mdl" => mctx.device_response},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 response_uri: mctx.response_uri,
+                 resolve_issuer: fn doc_type ->
+                   send(caller, {:resolved_doc_type, doc_type})
+                   {:ok, mctx.issuer_jwk}
+                 end,
+                 now: mctx.now
+               )
+
+      assert result.doc_type == @doc_type
+      assert_receive {:resolved_doc_type, @doc_type}
+    end
+
+    test "programmer errors: :formats rejects unknown format strings" do
+      mctx = mdoc_valid_context()
+
+      assert_raise ArgumentError, fn ->
+        VpToken.verify(%{"mdl" => mctx.device_response},
+          nonce: mctx.nonce,
+          audience: mctx.audience,
+          issuer_jwks: mctx.issuer_jwk,
+          response_uri: mctx.response_uri,
+          formats: %{"mdl" => "not_a_format"},
+          now: mctx.now
+        )
       end
     end
   end

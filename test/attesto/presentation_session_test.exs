@@ -2,11 +2,15 @@ defmodule Attesto.PresentationSessionTest do
   @moduledoc false
   use ExUnit.Case, async: false
 
-  alias Attesto.{JWS, PresentationSession, SdJwtVc}
+  alias Attesto.{Cose, JWS, Mdoc, PresentationSession, SdJwtVc}
   alias Attesto.PresentationSessionStore.ETS, as: Store
 
   @audience "verifier-client-1"
   @query_id "identity"
+  @mdoc_query_id "mdl"
+  @doc_type "org.iso.18013.5.1.mDL"
+  @mdl_namespace "org.iso.18013.5.1"
+  @response_uri "https://verifier.example.com/response"
   @racers 20
 
   setup do
@@ -244,6 +248,141 @@ defmodule Attesto.PresentationSessionTest do
 
     assert {:error, :invalid_attrs} =
              PresentationSession.create(Store, %{valid | issuer_trust: {:resolve_issuer, :not_a_function}})
+  end
+
+  describe "mso_mdoc round trip" do
+    setup do
+      {issuer_pem, issuer_jwk} = keypair()
+      {holder_pem, holder_jwk} = keypair()
+      now = System.system_time(:second)
+
+      namespaces = %{@mdl_namespace => %{"given_name" => "Jane", "family_name" => "Doe"}}
+
+      {:ok, issued} =
+        Mdoc.issue(
+          device_key: holder_jwk,
+          doc_type: @doc_type,
+          issuer_pem: issuer_pem,
+          namespaces: namespaces,
+          validity: %{signed: now - 10, valid_from: now - 5, valid_until: now + 3600}
+        )
+
+      {:ok, issuer_signed, ""} = issued |> Base.url_decode64!(padding: false) |> CBOR.decode()
+
+      %{holder_pem: holder_pem, issuer_jwk: issuer_jwk, issuer_signed: issuer_signed, now: now}
+    end
+
+    defp mdoc_create_session(ctx, overrides \\ []) do
+      attrs =
+        Map.merge(
+          %{
+            audience: @audience,
+            expected_query_ids: [@mdoc_query_id],
+            issuer_trust: {:issuer_jwks, ctx.issuer_jwk},
+            response_uri: @response_uri
+          },
+          Map.new(overrides)
+        )
+
+      PresentationSession.create(Store, attrs, now: ctx.now)
+    end
+
+    defp mdoc_vp_token(ctx, nonce, audience \\ @audience, response_uri \\ @response_uri) do
+      session_transcript = mdoc_session_transcript(audience, nonce, response_uri)
+      device_namespaces_tagged = mdoc_tagged(%{})
+
+      device_authentication_bytes =
+        ["DeviceAuthentication", session_transcript, @doc_type, device_namespaces_tagged]
+        |> mdoc_tagged()
+        |> CBOR.encode()
+
+      {:ok, device_auth_cose, ""} =
+        ctx.holder_pem |> Cose.sign1_detached(device_authentication_bytes, []) |> CBOR.decode()
+
+      document = %{
+        "docType" => @doc_type,
+        "issuerSigned" => ctx.issuer_signed,
+        "deviceSigned" => %{
+          "nameSpaces" => device_namespaces_tagged,
+          "deviceAuth" => %{"deviceSignature" => device_auth_cose}
+        }
+      }
+
+      device_response =
+        %{"documents" => [document], "status" => 0, "version" => "1.0"}
+        |> CBOR.encode()
+        |> Base.url_encode64(padding: false)
+
+      %{@mdoc_query_id => device_response}
+    end
+
+    defp mdoc_session_transcript(client_id, nonce, response_uri) do
+      handover_info_hash =
+        [client_id, nonce, nil, response_uri]
+        |> CBOR.encode()
+        |> then(&:crypto.hash(:sha256, &1))
+        |> mdoc_bytes()
+
+      [nil, nil, ["OpenID4VPHandover", handover_info_hash]]
+    end
+
+    defp mdoc_tagged(value), do: %CBOR.Tag{tag: 24, value: mdoc_bytes(CBOR.encode(value))}
+    defp mdoc_bytes(value), do: %CBOR.Tag{tag: :bytes, value: value}
+
+    test "a session created with :response_uri verifies an mso_mdoc response end-to-end", ctx do
+      {:ok, session} = mdoc_create_session(ctx)
+      vp_token = mdoc_vp_token(ctx, session.nonce)
+
+      assert {:ok, %{@mdoc_query_id => verified}} =
+               PresentationSession.verify_response(Store, {:state, session.id}, vp_token, now: ctx.now)
+
+      assert verified.doc_type == @doc_type
+      assert verified.namespaces == %{@mdl_namespace => %{"given_name" => "Jane", "family_name" => "Doe"}}
+    end
+
+    test "a wrong nonce, client_id, or response_uri fails without completing the session", ctx do
+      {:ok, session} = mdoc_create_session(ctx)
+
+      assert {:error, {:invalid_presentation, {@mdoc_query_id, _reason}}} =
+               PresentationSession.verify_response(
+                 Store,
+                 {:state, session.id},
+                 mdoc_vp_token(ctx, "wrong-nonce"),
+                 now: ctx.now
+               )
+
+      assert_pending(session.id)
+
+      assert {:error, {:invalid_presentation, {@mdoc_query_id, _reason}}} =
+               PresentationSession.verify_response(
+                 Store,
+                 {:state, session.id},
+                 mdoc_vp_token(ctx, session.nonce, "wrong-client"),
+                 now: ctx.now
+               )
+
+      assert_pending(session.id)
+
+      assert {:error, {:invalid_presentation, {@mdoc_query_id, _reason}}} =
+               PresentationSession.verify_response(
+                 Store,
+                 {:state, session.id},
+                 mdoc_vp_token(ctx, session.nonce, @audience, "https://attacker.example.com/response"),
+                 now: ctx.now
+               )
+
+      assert_pending(session.id)
+    end
+
+    test "a session created without :response_uri cannot verify an mso_mdoc response", ctx do
+      {:ok, session} = mdoc_create_session(ctx, response_uri: nil)
+      vp_token = mdoc_vp_token(ctx, session.nonce)
+
+      assert {:error, {:invalid_presentation, {@mdoc_query_id, :missing_response_uri}}} =
+               PresentationSession.verify_response(Store, {:state, session.id}, vp_token, now: ctx.now)
+
+      assert_pending(session.id)
+    end
   end
 
   defp create_session(ctx, overrides \\ []) do
