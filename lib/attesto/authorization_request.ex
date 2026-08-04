@@ -188,8 +188,12 @@ defmodule Attesto.AuthorizationRequest do
       RFC 8252 §7.3 exception for native apps, under which a loopback redirect
       URI (`http://127.0.0.1/...` or `http://[::1]/...`, never
       `http://localhost/...` - §8.3) matches on any port while scheme, host,
-      path, and query still compare exactly; nothing else is relaxed. Enabling
-      it is a host decision, incompatible with profiles that mandate exact
+      path, and query still compare exactly; nothing else is relaxed.
+      `:exact_allow_loopback_port_including_localhost` extends that same port
+      flexibility to the bare `localhost` name, for native clients that
+      register a portless `localhost` callback and bind an ephemeral port; the
+      name stays a distinct host from the IP literals. Enabling either is a
+      host decision, incompatible with profiles that mandate exact
       redirect-URI matching. An unrecognized value raises `ArgumentError`.
 
     * `:require_nonce` (optional, default `false`) - the host's OP nonce policy.

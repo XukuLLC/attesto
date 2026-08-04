@@ -72,9 +72,44 @@ defmodule Attesto.RedirectURI do
       are all identical; only the port is ignored. IPv4 and IPv6 loopback are
       distinct hosts and never match each other.
 
-  Enabling the exception is a deliberate deployment decision: a profile that
-  mandates exact redirect-URI matching forbids it. It is off by default so the
-  matching behavior is unchanged unless a host asks for it.
+    * `:exact_allow_loopback_port_including_localhost` - everything
+      `:exact_allow_loopback_port` does, and additionally treats the bare
+      hostname `localhost` as a loopback authority, so
+      `http://localhost:<ephemeral>/cb` matches a registered
+      `http://localhost/cb`.
+
+      This exists for interoperability, not because §7.3 requires it. §7.3's
+      MUST is scoped to "loopback IP redirect URIs" and the paragraphs above
+      are the right default. But nothing forbids a server allowing the name,
+      and §8.3's case against `localhost` is stated entirely in terms of what
+      the *client* does - it "avoids inadvertently listening on network
+      interfaces other than the loopback interface" and is "less susceptible to
+      client-side firewalls and misconfigured host name resolution on the
+      user's device". Those are reasons for an app author to choose the IP
+      literal; refusing port flexibility at the authorization server does not
+      make any of them true, it only fails the request. Real native clients
+      exist that register a portless `localhost` callback and then bind an
+      ephemeral port, and they cannot authorize at all under the stricter rule.
+
+      The residual risk is bounded by two allowances this module already makes
+      independently: a registered `localhost` URI is already reachable by exact
+      match, so redirecting to a name the server cannot resolve is already
+      accepted; and §7.3 already mandates port flexibility, so a code landing
+      on an arbitrary local port is already accepted for `127.0.0.1`. This mode
+      permits their combination and nothing else, which is why it is a separate
+      opt-in rather than a relaxation of `:exact_allow_loopback_port`.
+
+      `localhost` is its own host identity, never folded onto `127.0.0.1`: the
+      name and the IP literals do not cross-match, exactly as IPv4 and IPv6
+      loopback do not. Every other constraint above is unchanged - byte-exact
+      `http://` scheme, anchored authority (so `localhost.evil.example`,
+      `sub.localhost`, `evil-localhost`, `localhost.` and any userinfo stay
+      outside), no fragment, exact path and query, and the same asymmetric port
+      rule between the request and registered sides.
+
+  Enabling either exception is a deliberate deployment decision: a profile that
+  mandates exact redirect-URI matching forbids them. Both are off by default so
+  the matching behavior is unchanged unless a host asks for it.
 
   ## Registration convention
 
@@ -108,9 +143,9 @@ defmodule Attesto.RedirectURI do
   """
 
   @typedoc "The redirect-URI matching mode (see the moduledoc)."
-  @type matching :: :exact | :exact_allow_loopback_port
+  @type matching :: :exact | :exact_allow_loopback_port | :exact_allow_loopback_port_including_localhost
 
-  @matching_modes [:exact, :exact_allow_loopback_port]
+  @matching_modes [:exact, :exact_allow_loopback_port, :exact_allow_loopback_port_including_localhost]
 
   # RFC 8252 §7.3 covers only `http` on the loopback interface: the connection
   # never leaves the device, so TLS is neither available nor required there.
@@ -127,6 +162,19 @@ defmodule Attesto.RedirectURI do
   # fall back to exact comparison. The port is captured rather than skipped so
   # `port_allowed?/2` can hold the request side to a usable range.
   @loopback_authority ~r/\A(127\.0\.0\.1|\[::1\])(?::([0-9]*))?\z/
+
+  # The same authority, plus the hostname `localhost`, for
+  # `:exact_allow_loopback_port_including_localhost` only. Anchored on the whole
+  # authority exactly as above, so `localhost.evil.example`, `sub.localhost`,
+  # `evil-localhost`, a trailing dot (`localhost.`) and userinfo
+  # (`evil.example@localhost`) all stay outside the exception - only the bare
+  # name, optionally followed by a port, is loopback. Byte-exact like every
+  # other comparison here, so `LOCALHOST` is not the same host as `localhost`.
+  #
+  # `localhost` is captured as itself rather than folded onto `127.0.0.1`, so
+  # the name and the IP literals remain distinct identities and never
+  # cross-match. A client that registers one does not thereby reach the other.
+  @loopback_authority_including_localhost ~r/\A(127\.0\.0\.1|\[::1\]|localhost)(?::([0-9]*))?\z/
 
   # A TCP port a client can actually bind and be redirected to. Port 0 is
   # excluded on the request side: it is the "pick one for me" placeholder, not
@@ -221,7 +269,12 @@ defmodule Attesto.RedirectURI do
     # RFC 8252 §7.3 is an exception applied only after the RFC 6749 §3.1.2.3
     # comparison has already failed, so enabling it can never change the outcome
     # of a request that matched exactly.
-    exact?(uri, registered) or loopback?(uri, registered)
+    exact?(uri, registered) or loopback?(uri, registered, @loopback_authority)
+  end
+
+  def registered?(uri, registered, :exact_allow_loopback_port_including_localhost)
+      when is_binary(uri) and is_list(registered) do
+    exact?(uri, registered) or loopback?(uri, registered, @loopback_authority_including_localhost)
   end
 
   # Exact string comparison (RFC 6749 §3.1.2.3 simple string match). No
@@ -237,14 +290,16 @@ defmodule Attesto.RedirectURI do
   # `loopback_identity/2` means "not a loopback redirect URI", which never
   # matches anything - including another non-loopback URI, since the request
   # side is checked first and short-circuits.
-  defp loopback?(uri, registered) do
-    case loopback_identity(uri, :request) do
+  # `authority` is the pattern defining which hosts count as loopback, so the
+  # mode - not this function - decides whether the `localhost` name is one.
+  defp loopback?(uri, registered, authority) do
+    case loopback_identity(uri, :request, authority) do
       nil ->
         false
 
       identity ->
         Enum.any?(registered, fn candidate ->
-          is_binary(candidate) and loopback_identity(candidate, :registered) == identity
+          is_binary(candidate) and loopback_identity(candidate, :registered, authority) == identity
         end)
     end
   end
@@ -267,21 +322,22 @@ defmodule Attesto.RedirectURI do
   # construction, so any port stands. That is deliberate - `:0` is the
   # conventional placeholder for "an ephemeral port chosen at runtime", and
   # rejecting it would break the natural way to register a loopback callback.
-  defp loopback_identity(uri, role) do
+  defp loopback_identity(uri, role, authority) do
     if String.starts_with?(uri, @http_scheme_prefix) do
-      uri |> URI.parse() |> identity(role)
+      uri |> URI.parse() |> identity(role, authority)
     end
   end
 
-  defp identity(%URI{authority: authority, path: path, query: query, fragment: nil}, role) when is_binary(authority) do
-    case Regex.run(@loopback_authority, authority) do
+  defp identity(%URI{authority: authority, path: path, query: query, fragment: nil}, role, pattern)
+       when is_binary(authority) do
+    case Regex.run(pattern, authority) do
       [_authority, host] -> {host, path, query}
       [_authority, host, port] -> if port_allowed?(port, role), do: {host, path, query}
       nil -> nil
     end
   end
 
-  defp identity(%URI{}, _role), do: nil
+  defp identity(%URI{}, _role, _pattern), do: nil
 
   defp port_allowed?(_port, :registered), do: true
 
