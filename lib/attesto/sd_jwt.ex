@@ -545,7 +545,14 @@ defmodule Attesto.SdJwt do
     %{"alg" => header_alg(opts)}
     |> MapParams.put_optional("typ", Keyword.get(opts, :typ))
     |> MapParams.put_optional("kid", Keyword.get(opts, :kid))
+    |> MapParams.put_optional("x5c", x5c_header(Keyword.get(opts, :x5c)))
   end
+
+  # The issuer X.509 certificate chain (RFC 7515 §4.1.6), a non-empty list of
+  # base64 (not base64url) DER certificate strings. HAIP requires it so the
+  # verifier can bind the credential to a trusted issuer certificate.
+  defp x5c_header([_ | _] = x5c), do: x5c
+  defp x5c_header(_x5c), do: nil
 
   defp header_alg(opts) do
     case Keyword.get(opts, :alg) do

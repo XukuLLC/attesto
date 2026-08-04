@@ -6,7 +6,8 @@ defmodule Attesto.SdJwtVc do
   High-Assurance Interoperability Profile, HAIP): an SD-JWT whose Issuer-signed
   JWT carries a credential *type* (`vct`), an issuer (`iss`), an optional holder
   key binding (`cnf`), an optional Token Status List reference (`status`), and
-  the usual temporal claims, typed `vc+sd-jwt` in the JOSE `typ` header.
+  the usual temporal claims, typed `vc+sd-jwt` or `dc+sd-jwt` in the JOSE `typ`
+  header.
 
   This module adds the VC-specific claim rules on top of the base SD-JWT
   mechanism; the selective-disclosure machinery, recursive verification, and Key
@@ -14,7 +15,8 @@ defmodule Attesto.SdJwtVc do
 
     * `issue/2` — assemble and sign an SD-JWT VC: sets `iss`/`vct`/`iat` (and
       optional `exp`/`nbf`/`cnf`/`status`/`sub`), makes the chosen credential
-      claims selectively disclosable, and stamps `typ: vc+sd-jwt`.
+      claims selectively disclosable, and stamps the JOSE `typ` from the optional
+      `:typ` (`vc+sd-jwt` or `dc+sd-jwt`; defaults to `vc+sd-jwt`).
     * `verify/3` — verify the issuer signature (typed `vc+sd-jwt`), reconstruct
       the disclosed claims, and enforce the VC claim rules: `iss` and `vct`
       REQUIRED and non-empty, `exp` (if present) not passed, `nbf` (if present)
@@ -65,6 +67,13 @@ defmodule Attesto.SdJwtVc do
     * `:iat` / `:exp` / `:nbf` / `:sub` - standard claims (unix seconds / string).
     * `:now` - clock reference for a defaulted `:iat`.
     * `:kid` - JOSE `kid` header. `:sd_alg` - SD hashing algorithm.
+    * `:typ` - the SD-JWT VC media type stamped in the JOSE `typ` header,
+      `"vc+sd-jwt"` or `"dc+sd-jwt"` (the credential configuration's `format`).
+      Defaults to `"vc+sd-jwt"`.
+    * `:x5c` - the issuer X.509 certificate chain (RFC 7515 §4.1.6): a non-empty
+      list of base64 DER certificate strings, stamped in the JOSE `x5c` header so
+      a verifier can bind the credential to a trusted issuer certificate (HAIP).
+      Omitted when nil.
 
   Returns the SD-JWT VC Issuance string (no Key Binding JWT).
   """
@@ -96,10 +105,23 @@ defmodule Attesto.SdJwtVc do
     SdJwt.issue(claims,
       pem: Keyword.fetch!(opts, :pem),
       disclosable: disclosable,
-      typ: @typ,
+      typ: issue_typ!(Keyword.get(opts, :typ)),
       kid: Keyword.get(opts, :kid),
+      x5c: Keyword.get(opts, :x5c),
       sd_alg: Keyword.get(opts, :sd_alg, "sha-256")
     )
+  end
+
+  # The JOSE `typ` header names the SD-JWT VC media type. OID4VCI moved the
+  # identifier from `vc+sd-jwt` to `dc+sd-jwt`; the issuer stamps whichever the
+  # credential configuration's `format` declares. Absent an explicit `:typ`, the
+  # historical `vc+sd-jwt` default is kept.
+  defp issue_typ!(nil), do: @typ
+  defp issue_typ!(typ) when typ in @accepted_typ, do: typ
+
+  defp issue_typ!(typ) do
+    raise ArgumentError,
+          "Attesto.SdJwtVc :typ must be one of #{inspect(@accepted_typ)}; got #{inspect(typ)}"
   end
 
   @doc """

@@ -14,13 +14,16 @@ defmodule Attesto.CredentialIssuerMetadata do
   only capabilities the host provides. Unknown options and unknown fields in
   credential configurations are ignored.
 
-  `signed_metadata`, the optional JWT representation of the document, is
-  intentionally not implemented in this slice; it is a future addition.
+  `signed/2` produces the optional signed JWT representation of the document
+  (OID4VCI §11.2.2), served when a wallet requests `Accept: application/jwt`.
   """
 
-  alias Attesto.MapParams
+  alias Attesto.{JWS, Key, MapParams, SigningAlg}
 
   @sd_jwt_vc_formats ["vc+sd-jwt", "dc+sd-jwt"]
+
+  # OID4VCI §11.2.2: the JOSE `typ` of the signed credential issuer metadata JWT.
+  @signed_metadata_typ "openidvci-issuer-metadata+jwt"
 
   @doc """
   Build the OID4VCI Credential Issuer Metadata document.
@@ -83,6 +86,36 @@ defmodule Attesto.CredentialIssuerMetadata do
 
   def build(opts) when not is_list(opts) do
     raise ArgumentError, "expects a keyword list; got #{inspect(opts)}"
+  end
+
+  @doc """
+  Represent a metadata document as a signed JWT (OID4VCI §11.2.2).
+
+  Served when a wallet requests signed metadata with `Accept: application/jwt`.
+  The header carries `typ: #{@signed_metadata_typ}` and the issuer's public
+  signing key as `jwk`, so the wallet verifies the signature without a separate
+  key lookup. The claims are the document's members plus `iss`/`sub` (the
+  Credential Issuer Identifier) and `iat`.
+
+  `metadata` is a document from `build/1`. Required option `:pem` is the issuer
+  signing key; optional `:now` overrides the `iat` clock (unix seconds).
+  """
+  @spec signed(%{required(String.t()) => term()}, keyword()) :: String.t()
+  def signed(metadata, opts) when is_map(metadata) and is_list(opts) do
+    pem = Keyword.fetch!(opts, :pem)
+    jwk = Key.signing_jwk(pem)
+    alg = SigningAlg.infer(jwk)
+    {_modules, public_jwk} = JOSE.JWK.to_public_map(jwk)
+    now = Keyword.get(opts, :now, System.system_time(:second))
+    issuer = Map.get(metadata, "credential_issuer")
+
+    claims =
+      metadata
+      |> Map.put("iss", issuer)
+      |> Map.put("sub", issuer)
+      |> Map.put("iat", now)
+
+    JWS.sign_compact(pem, %{"alg" => alg, "typ" => @signed_metadata_typ, "jwk" => public_jwk}, claims)
   end
 
   defp required_configurations!(opts, key) do

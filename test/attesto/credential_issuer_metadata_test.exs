@@ -3,6 +3,8 @@ defmodule Attesto.CredentialIssuerMetadataTest do
   use ExUnit.Case, async: true
 
   alias Attesto.CredentialIssuerMetadata
+  alias Attesto.JWS
+  alias Attesto.Test.Factory
 
   @issuer "https://issuer.example.com"
   @credential_endpoint "https://issuer.example.com/credential"
@@ -146,6 +148,31 @@ defmodule Attesto.CredentialIssuerMetadataTest do
       assert_raise ArgumentError, ~r/:format/, fn ->
         CredentialIssuerMetadata.build(required_opts(%{"bad" => %{format: format}}))
       end
+    end
+  end
+
+  describe "signed/2" do
+    test "produces a verifiable openidvci-issuer-metadata+jwt carrying the document" do
+      pem = Factory.ec_pem()
+      metadata = CredentialIssuerMetadata.build(required_opts())
+
+      jwt = CredentialIssuerMetadata.signed(metadata, pem: pem, now: 1_700_000_000)
+
+      assert {:ok, header} = JWS.peek_json(jwt, :protected)
+      assert header["typ"] == "openidvci-issuer-metadata+jwt"
+      assert header["alg"] == "ES256"
+      # The public signing key travels in the header so a wallet can verify
+      # without a separate key lookup, and the signature checks out against it.
+      assert %{"kty" => "EC"} = header["jwk"]
+      jwk = JOSE.JWK.from_map(header["jwk"])
+      assert {true, _payload, _jws} = JOSE.JWS.verify_strict(jwk, ["ES256"], jwt)
+
+      assert {:ok, claims} = JWS.peek_json(jwt, :payload)
+      assert claims["iss"] == @issuer
+      assert claims["sub"] == @issuer
+      assert claims["iat"] == 1_700_000_000
+      assert claims["credential_issuer"] == @issuer
+      assert claims["credential_endpoint"] == @credential_endpoint
     end
   end
 end

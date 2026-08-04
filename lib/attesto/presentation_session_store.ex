@@ -43,5 +43,11 @@ defmodule Attesto.PresentationSessionStore do
   """
   @callback attach_request_object(id :: String.t(), request_object :: String.t()) :: :ok | :error
 
-  @optional_callbacks take: 1, attach_request_object: 2
+  @doc """
+  Atomically attach the verifier's per-request (ephemeral) response-encryption
+  private JWK to an unexpired pending session, for `direct_post.jwt` decryption.
+  """
+  @callback attach_response_encryption_jwk(id :: String.t(), jwk :: map()) :: :ok | :error
+
+  @optional_callbacks take: 1, attach_request_object: 2, attach_response_encryption_jwk: 2
 end

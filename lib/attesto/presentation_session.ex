@@ -123,6 +123,37 @@ defmodule Attesto.PresentationSession do
   end
 
   @doc """
+  Attach the verifier's per-request response-encryption private JWK to a pending
+  session (its `kid` is the session id), so the direct-post endpoint can decrypt
+  a `direct_post.jwt` response with the ephemeral key it advertised.
+  """
+  @spec attach_response_encryption_jwk(module(), String.t(), map()) :: :ok | {:error, :unavailable}
+  def attach_response_encryption_jwk(store, id, jwk) when is_atom(store) and is_binary(id) and is_map(jwk) do
+    case store.attach_response_encryption_jwk(id, jwk) do
+      :ok -> :ok
+      :error -> {:error, :unavailable}
+    end
+  end
+
+  @doc """
+  Read a pending session's per-request response-encryption private JWK, if one
+  was attached. Returns `:error` for an unknown, expired, or key-less session.
+  """
+  @spec response_encryption_jwk(module(), String.t()) :: {:ok, map()} | :error
+  def response_encryption_jwk(store, id) when is_atom(store) and is_binary(id) do
+    now = NumericDate.now([])
+
+    case store.get(id) do
+      {:ok, %{expires_at: expires_at, data: %{response_encryption_jwk: jwk}}}
+      when expires_at > now and is_map(jwk) ->
+        {:ok, jwk}
+
+      _other ->
+        :error
+    end
+  end
+
+  @doc """
   Read a pending session's stored request object (the signed OID4VP request
   object the interface serves at its `request_uri`), if one was persisted at
   `create/3` via the optional `:request_object` attr. Returns `:error` for an
@@ -210,6 +241,7 @@ defmodule Attesto.PresentationSession do
       ]
       |> Keyword.merge(issuer_trust_opts(data.issuer_trust))
       |> Keyword.merge(response_uri_opts(data))
+      |> Keyword.merge(response_encryption_jwk_opts(data))
       |> Keyword.merge(Keyword.take(opts, [:now, :formats]))
 
     case VpToken.verify(vp_token, verify_opts) do
@@ -223,6 +255,14 @@ defmodule Attesto.PresentationSession do
 
   defp response_uri_opts(%{response_uri: response_uri}), do: [response_uri: response_uri]
   defp response_uri_opts(_data), do: []
+
+  # For an mdoc presentation over `direct_post.jwt`, the OpenID4VPHandover binds
+  # to the verifier's response-encryption public key thumbprint; pass the key so
+  # `Attesto.VpToken`/`Attesto.Mdoc` reconstruct the same SessionTranscript.
+  defp response_encryption_jwk_opts(%{response_encryption_jwk: jwk}) when is_map(jwk),
+    do: [response_encryption_jwk: jwk]
+
+  defp response_encryption_jwk_opts(_data), do: []
 
   defp complete(store, id, results) do
     case store.complete(id, %{results: results}) do

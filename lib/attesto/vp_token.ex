@@ -263,7 +263,17 @@ defmodule Attesto.VpToken do
   defp mdoc_context(nonce, audience, opts) do
     case Keyword.get(opts, :response_uri) do
       response_uri when is_binary(response_uri) and response_uri != "" ->
-        {:ok, [client_id: audience, nonce: nonce, response_uri: response_uri]}
+        context = [client_id: audience, nonce: nonce, response_uri: response_uri]
+
+        # For an encrypted (`direct_post.jwt`) mdoc response the handover binds to
+        # the verifier's response-encryption JWK thumbprint; unencrypted omits it.
+        context =
+          case Keyword.get(opts, :response_encryption_jwk) do
+            jwk when is_map(jwk) -> Keyword.put(context, :response_encryption_jwk, jwk)
+            _other -> context
+          end
+
+        {:ok, context}
 
       _other ->
         {:error, :missing_response_uri}

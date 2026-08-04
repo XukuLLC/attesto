@@ -58,6 +58,11 @@ defmodule Attesto.PresentationSessionStore.ETS do
     GenServer.call(__MODULE__, {:attach_request_object, id, request_object})
   end
 
+  @impl Attesto.PresentationSessionStore
+  def attach_response_encryption_jwk(id, jwk) when is_binary(id) and is_map(jwk) do
+    GenServer.call(__MODULE__, {:attach_response_encryption_jwk, id, jwk})
+  end
+
   @impl GenServer
   def handle_call({:put, entry}, _from, state) do
     true = :ets.insert_new(@table, {entry.id, entry.expires_at, entry})
@@ -89,6 +94,23 @@ defmodule Attesto.PresentationSessionStore.ETS do
       case :ets.lookup(@table, id) do
         [{^id, expires_at, %{data: %{status: :pending} = data} = entry}] when expires_at > now ->
           updated = Map.put(entry, :data, Map.put(data, :request_object, request_object))
+          true = :ets.insert(@table, {id, expires_at, updated})
+          :ok
+
+        _other ->
+          :error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:attach_response_encryption_jwk, id, jwk}, _from, state) do
+    now = System.system_time(:second)
+
+    reply =
+      case :ets.lookup(@table, id) do
+        [{^id, expires_at, %{data: %{status: :pending} = data} = entry}] when expires_at > now ->
+          updated = Map.put(entry, :data, Map.put(data, :response_encryption_jwk, jwk))
           true = :ets.insert(@table, {id, expires_at, updated})
           :ok
 

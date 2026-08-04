@@ -4,16 +4,29 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-08-03
 
 ### Added
 
-- `Attesto.Siop` verifies SIOPv2 Self-Issued ID Tokens for the RP role: strict
-  self-signature verification with the embedded public `sub_jwk`, RFC 7638
-  subject binding, static-or-sub self-issued issuer validation, RP Client ID
-  and mandatory nonce binding, and fail-closed `exp`/`iat`/`nbf` checks.
-
-## [1.7.0] - 2026-08-02
+- **OpenID for Verifiable Credentials (OID4VC / EU digital identity)** — the
+  conn-free core of the issuer and verifier roles, targeting the HAIP profile.
+  Issue and verify **IETF SD-JWT VC** (`Attesto.SdJwt` / `Attesto.SdJwtVc`),
+  **ISO 18013-5 mdoc** (`Attesto.Mdoc`, CBOR + COSE_Sign1), and W3C
+  `jwt_vc_json` (`Attesto.JwtVc`), all with holder key binding. OID4VCI issuance
+  primitives (`Attesto.CredentialOffer`, `CredentialRequest`, `CredentialResponse`,
+  `CredentialProof`, `CredentialIssuerMetadata`, `WalletAttestation`,
+  `KeyAttestation`) and OID4VP presentation primitives (`Attesto.PresentationRequest`,
+  `VpToken`, `PresentationSession` + store) including DCQL, `direct_post` /
+  encrypted `direct_post.jwt` with a per-request ephemeral response-encryption
+  key, and the x509 `client_id` schemes. Plus `Attesto.StatusList` (IETF Token
+  Status List), `Attesto.Siop` (SIOPv2 Self-Issued ID Token verification for the
+  RP role, with `sub_jwk` self-signature, RFC 7638 subject binding, and
+  fail-closed nonce/`exp`/`iat`/`nbf` checks), and OpenID Federation support.
+- Signed Credential Issuer Metadata (`CredentialIssuerMetadata.signed/2`), the
+  `x5c` header and `dc+sd-jwt` typ for SD-JWT VC issuance, and the response-
+  encryption-key binding threaded into mdoc `direct_post.jwt` verification —
+  the interoperability details exercised while driving the OIDF OID4VCI/OID4VP
+  conformance suites green.
 
 ### Security
 
