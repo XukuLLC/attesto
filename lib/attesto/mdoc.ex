@@ -136,7 +136,7 @@ if Code.ensure_loaded?(CBOR) do
     Peek an OID4VP `DeviceResponse`'s first document `docType`, supplied as
     base64url or raw CBOR bytes, without verifying any signature.
 
-    Mirrors `Attesto.JWS.peek_json/3` peeking an SD-JWT's unverified `iss`:
+    Mirrors `Attesto.JWS.peek_json` peeking an SD-JWT's unverified `iss`:
     the result is UNVERIFIED input and exists only to select candidate issuer
     keys ahead of verification (e.g. for `Attesto.VpToken`'s `:resolve_issuer`
     callback). It MUST NOT be used to make a network request — the presenter

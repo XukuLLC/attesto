@@ -106,7 +106,7 @@ defmodule Attesto.JwtVc do
 
   The first argument may be a keyword list containing all options, a keystore
   module, or a private signing-key PEM. When it is a keyword list, pass exactly
-  one of `:keystore` and `:pem`. A keystore uses `Attesto.JWS.sign_current/3`;
+  one of `:keystore` and `:pem`. A keystore uses `Attesto.JWS.sign_current`;
   a PEM derives its algorithm and default `kid` from the same parsed key.
 
   Required options are `:iss` and `:sub`. Subject claims can be supplied as

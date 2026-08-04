@@ -33,7 +33,9 @@ defmodule Attesto.VpToken do
   required only when the `vp_token` actually contains an `mso_mdoc` entry.
   """
 
-  alias Attesto.{JWS, MapParams, Mdoc, SdJwt, SdJwtVc}
+  # `Attesto.Mdoc` is referenced fully-qualified inside a `Code.ensure_loaded?/1`
+  # guard (mdoc needs the optional `:cbor` dep), so it is deliberately not aliased.
+  alias Attesto.{JWS, MapParams, SdJwt, SdJwtVc}
 
   @separator "~"
   @base64url ~r/\A[A-Za-z0-9_-]+\z/
@@ -197,67 +199,76 @@ defmodule Attesto.VpToken do
 
   # ── mso_mdoc ─────────────────────────────────────────────────────────────
 
-  defp verify_mdoc_value(presentation, issuer_source, mdoc_context, verify_opts) when is_binary(presentation) do
-    verify_mdoc_one(presentation, issuer_source, mdoc_context, verify_opts)
-  end
+  # mdoc (ISO 18013-5) verification needs the optional `:cbor` dependency. When
+  # it is absent `Attesto.Mdoc` is a raising stub (typed `none()`), so gate the
+  # whole mdoc verification path the same way: a build without `:cbor` fails an
+  # mdoc presentation closed with `:mdoc_unsupported` instead of crashing — and
+  # at compile time there are no unreachable-clause warnings against the stub.
+  if Code.ensure_loaded?(CBOR) do
+    defp verify_mdoc_value(presentation, issuer_source, mdoc_context, verify_opts) when is_binary(presentation) do
+      verify_mdoc_one(presentation, issuer_source, mdoc_context, verify_opts)
+    end
 
-  defp verify_mdoc_value(presentations, issuer_source, mdoc_context, verify_opts) when is_list(presentations) do
-    presentations
-    |> Enum.reduce_while({:ok, []}, fn presentation, {:ok, results} ->
-      case verify_mdoc_one(presentation, issuer_source, mdoc_context, verify_opts) do
-        {:ok, result} -> {:cont, {:ok, [result | results]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> reverse_list_result()
-  end
+    defp verify_mdoc_value(presentations, issuer_source, mdoc_context, verify_opts) when is_list(presentations) do
+      presentations
+      |> Enum.reduce_while({:ok, []}, fn presentation, {:ok, results} ->
+        case verify_mdoc_one(presentation, issuer_source, mdoc_context, verify_opts) do
+          {:ok, result} -> {:cont, {:ok, [result | results]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> reverse_list_result()
+    end
 
-  defp verify_mdoc_one(presentation, {:static, jwks}, mdoc_context, verify_opts) do
-    verify_mdoc_with_keys(presentation, mdoc_context, jwks, verify_opts)
-  end
-
-  defp verify_mdoc_one(presentation, {:resolver, resolver}, mdoc_context, verify_opts) do
-    with {:ok, doc_type} <- Mdoc.peek_doc_type(presentation),
-         {:ok, jwks} <- resolve_mdoc_issuer_jwks(doc_type, resolver) do
+    defp verify_mdoc_one(presentation, {:static, jwks}, mdoc_context, verify_opts) do
       verify_mdoc_with_keys(presentation, mdoc_context, jwks, verify_opts)
     end
-  end
 
-  # `Attesto.Mdoc.verify_device_response/4` takes a single trusted JWK/PEM, not
-  # a set, so a JWK Set (or issuer-key list) is tried one candidate at a time —
-  # mirroring `Attesto.JWS.verify_strict/3`'s multi-candidate search, just at
-  # the `Attesto.Mdoc` call boundary instead of inside COSE verification.
-  defp verify_mdoc_with_keys(presentation, mdoc_context, trusted, verify_opts) do
-    trusted
-    |> mdoc_key_candidates()
-    |> Enum.reduce_while({:error, :invalid_signature}, fn key, _acc ->
-      case Mdoc.verify_device_response(presentation, mdoc_context, key, verify_opts) do
-        {:ok, [document]} -> {:halt, {:ok, safe_mdoc_result(document)}}
-        {:ok, _other} -> {:halt, {:error, :invalid_mdoc}}
-        {:error, reason} -> {:cont, {:error, reason}}
+    defp verify_mdoc_one(presentation, {:resolver, resolver}, mdoc_context, verify_opts) do
+      with {:ok, doc_type} <- Attesto.Mdoc.peek_doc_type(presentation),
+           {:ok, jwks} <- resolve_mdoc_issuer_jwks(doc_type, resolver) do
+        verify_mdoc_with_keys(presentation, mdoc_context, jwks, verify_opts)
       end
-    end)
-  end
-
-  defp mdoc_key_candidates(%{"keys" => keys}) when is_list(keys), do: keys
-  defp mdoc_key_candidates(keys) when is_list(keys), do: keys
-  defp mdoc_key_candidates(%{} = jwk), do: [jwk]
-
-  defp resolve_mdoc_issuer_jwks(doc_type, resolver) do
-    case resolver.(doc_type) do
-      {:ok, jwks} -> {:ok, jwks}
-      {:error, reason} -> {:error, {:issuer, reason}}
-      other -> {:error, {:issuer, {:invalid_resolver_result, other}}}
     end
-  end
 
-  defp safe_mdoc_result(verified) do
-    %{
-      doc_type: verified.doc_type,
-      namespaces: verified.namespaces,
-      device_namespaces: verified.device_namespaces,
-      validity: verified.validity
-    }
+    # `Attesto.Mdoc.verify_device_response/4` takes a single trusted JWK/PEM, not
+    # a set, so a JWK Set (or issuer-key list) is tried one candidate at a time —
+    # mirroring `Attesto.JWS.verify_strict/3`'s multi-candidate search, just at
+    # the `Attesto.Mdoc` call boundary instead of inside COSE verification.
+    defp verify_mdoc_with_keys(presentation, mdoc_context, trusted, verify_opts) do
+      trusted
+      |> mdoc_key_candidates()
+      |> Enum.reduce_while({:error, :invalid_signature}, fn key, _acc ->
+        case Attesto.Mdoc.verify_device_response(presentation, mdoc_context, key, verify_opts) do
+          {:ok, [document]} -> {:halt, {:ok, safe_mdoc_result(document)}}
+          {:ok, _other} -> {:halt, {:error, :invalid_mdoc}}
+          {:error, reason} -> {:cont, {:error, reason}}
+        end
+      end)
+    end
+
+    defp mdoc_key_candidates(%{"keys" => keys}) when is_list(keys), do: keys
+    defp mdoc_key_candidates(keys) when is_list(keys), do: keys
+    defp mdoc_key_candidates(%{} = jwk), do: [jwk]
+
+    defp resolve_mdoc_issuer_jwks(doc_type, resolver) do
+      case resolver.(doc_type) do
+        {:ok, jwks} -> {:ok, jwks}
+        {:error, reason} -> {:error, {:issuer, reason}}
+        other -> {:error, {:issuer, {:invalid_resolver_result, other}}}
+      end
+    end
+
+    defp safe_mdoc_result(verified) do
+      %{
+        doc_type: verified.doc_type,
+        namespaces: verified.namespaces,
+        device_namespaces: verified.device_namespaces,
+        validity: verified.validity
+      }
+    end
+  else
+    defp verify_mdoc_value(_presentation, _issuer_source, _mdoc_context, _verify_opts), do: {:error, :mdoc_unsupported}
   end
 
   defp mdoc_context(nonce, audience, opts) do

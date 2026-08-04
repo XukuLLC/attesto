@@ -127,3 +127,44 @@ jobs:
         env:
           MIX_ENV: dev
         run: mix dialyzer
+
+  # attesto declares `:cbor` and `:plug` as `optional: true`. The build & test
+  # job above fetches those for attesto's OWN build, so its `--warnings-as-errors`
+  # compile always sees the optional-dep modules in their real form and never
+  # exercises the raising stubs. A downstream consumer that doesn't pull the
+  # optional deps compiles the stubs instead - and any call site that still
+  # pattern-matches on a stub's return emits an unreachable-clause warning that
+  # is invisible to the main job. This job reproduces that bare-consumer view via
+  # the checked-in `.github/no-optional-deps` fixture (path-deps attesto, no
+  # optional deps) and fails on any attesto compile warning.
+  no-optional-deps:
+    name: Compile without optional deps (no :cbor / :plug)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.1"
+          otp-version: "29.0.2"
+
+      - name: Compile attesto with no optional deps present
+        working-directory: .github/no-optional-deps
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+          # Compile attesto's dependencies (jose, jason, ...) first so the
+          # forced attesto recompile below type-checks against them.
+          mix deps.compile
+          # Force a clean recompile of attesto ONLY and capture its output. With
+          # no optional deps in the tree this walks the stub branches; the output
+          # is scoped to attesto, so any `warning:` line is an attesto warning.
+          mix deps.compile attesto --force 2>&1 | tee compile.log
+          if grep -qE "warning:" compile.log; then
+            echo "::error::attesto emitted compile warnings without its optional deps (:cbor / :plug). An optional-dep stub is likely reachable from a call site that pattern-matches its return. See the log above."
+            exit 1
+          fi
+          echo "attesto compiles clean without optional deps."

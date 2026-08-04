@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-08-03
+
+### Fixed
+
+- **Clean compile for consumers without the optional `:cbor` dependency.**
+  `Attesto.VpToken`'s mdoc verification path pattern-matched on `Attesto.Mdoc`,
+  which compiles to a raising stub when `:cbor` is absent. Under Elixir 1.19+'s
+  set-theoretic type checker the stub types as `none()`, so those clauses were
+  reported as unreachable — a warning that surfaced for any downstream app (e.g.
+  a Livebook `Mix.install`) that didn't pull `:cbor`. The mdoc verification
+  cluster is now gated behind `Code.ensure_loaded?(CBOR)`: with `:cbor` present
+  the behavior is unchanged; without it, an mdoc presentation fails closed with
+  `{:error, {id, :mdoc_unsupported}}` and SD-JWT VC / `jwt_vc_json` verification
+  is unaffected. A dedicated CI job now compiles the library with no optional
+  deps present and fails on any such warning.
+
 ## [1.8.0] - 2026-08-03
 
 ### Added
