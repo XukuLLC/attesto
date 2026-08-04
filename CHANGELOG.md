@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0] - 2026-08-03
+## [1.8.0] - 2026-08-03
 
 ### Added
 
@@ -27,6 +27,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   encryption-key binding threaded into mdoc `direct_post.jwt` verification —
   the interoperability details exercised while driving the OIDF OID4VCI/OID4VP
   conformance suites green.
+
+## [1.7.0] - 2026-08-02
 
 ### Security
 
