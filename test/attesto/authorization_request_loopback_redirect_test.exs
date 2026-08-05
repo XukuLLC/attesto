@@ -3,10 +3,9 @@ defmodule Attesto.AuthorizationRequestLoopbackRedirectTest do
   RFC 8252 §7.3 loopback interface redirection, exercised through the public
   `Attesto.AuthorizationRequest.validate/2` surface.
 
-  Every case is run in both configurations - the default `:exact` and the opt-in
-  `:exact_allow_loopback_port` - because the guarantee under test is as much
-  "nothing changes unless the host asks for it" as it is "the loopback port
-  varies when it does".
+  Cases exercise the default `:exact` mode and both opt-in loopback modes,
+  because the guarantee under test is as much "nothing changes unless the host
+  asks for it" as it is "the loopback port varies when it does".
   """
 
   use ExUnit.Case, async: true
@@ -41,6 +40,10 @@ defmodule Attesto.AuthorizationRequestLoopbackRedirectTest do
 
   defp validate_loopback(redirect_uri, registered) do
     validate(redirect_uri, registered, redirect_uri_matching: :exact_allow_loopback_port)
+  end
+
+  defp validate_loopback_including_localhost(redirect_uri, registered) do
+    validate(redirect_uri, registered, redirect_uri_matching: :exact_allow_loopback_port_including_localhost)
   end
 
   describe "default matching (RFC 6749 §3.1.2.3)" do
@@ -163,6 +166,19 @@ defmodule Attesto.AuthorizationRequestLoopbackRedirectTest do
                  registered_redirect_uris: ["http://127.0.0.1:0/cb"],
                  redirect_uri_matching: :exact
                )
+    end
+  end
+
+  describe "localhost-inclusive loopback redirection" do
+    test "the opt-in mode is wired through AuthorizationRequest.validate/2" do
+      registered = ["http://localhost/callback"]
+      requested = "http://localhost:51823/callback"
+
+      assert {:ok, request} = validate_loopback_including_localhost(requested, registered)
+      assert request.redirect_uri == requested
+
+      assert {:error, {:direct, :redirect_uri_not_registered}} = validate_loopback(requested, registered)
+      assert {:error, {:direct, :redirect_uri_not_registered}} = validate_exact(requested, registered)
     end
   end
 

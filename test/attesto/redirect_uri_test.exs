@@ -307,6 +307,10 @@ defmodule Attesto.RedirectURITest do
       end
     end
 
+    test "a portless localhost request matches a registration with a fixed port" do
+      assert RedirectURI.registered?("http://localhost/cb", ["http://localhost:8080/cb"], @mode)
+    end
+
     test "it is a superset: literal loopback IPs keep their §7.3 flexibility" do
       assert RedirectURI.registered?("http://127.0.0.1:51823/cb", ["http://127.0.0.1/cb"], @mode)
       assert RedirectURI.registered?("http://[::1]:51823/cb", ["http://[::1]:0/cb"], @mode)
@@ -361,8 +365,13 @@ defmodule Attesto.RedirectURITest do
       refute RedirectURI.registered?("http://localhost:51823/cb", ["http://evil.example@localhost:0/cb"], @mode)
     end
 
-    test "a fragment takes the URI outside the exception" do
+    test "a fragment on either side takes the URI outside the exception" do
       refute RedirectURI.registered?("http://localhost:51823/cb#f", ["http://localhost:0/cb"], @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb", ["http://localhost:0/cb#f"], @mode)
+    end
+
+    test "a malformed port takes the URI outside the exception" do
+      refute RedirectURI.registered?("http://localhost:abc/cb", ["http://localhost:0/cb"], @mode)
     end
 
     test "a request port outside 1..65535 takes the URI outside the exception" do

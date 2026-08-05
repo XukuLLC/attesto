@@ -49,10 +49,12 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
   # The hosts RFC 8252 §7.3 sanctions, as WHATWG spells them. `[::1]` is
   # reported bracketed by `URL.hostname`.
   @loopback_hosts ["127.0.0.1", "[::1]"]
+  @loopback_hosts_including_localhost @loopback_hosts ++ ["localhost"]
 
   # What a native app would plausibly register: the loopback callback in both
   # address families, port `0` by convention (§7.3 ignores it).
   @registered ["http://127.0.0.1:0/cb", "http://[::1]:0/cb"]
+  @registered_including_localhost @registered ++ ["http://localhost:0/cb"]
 
   # Legitimate loopback requests, adversarial near-misses, and the encodings an
   # attacker would reach for to smuggle a non-loopback host past a matcher.
@@ -82,13 +84,30 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
     "http://[::1%25eth0]:51823/cb",
     # The hostname §8.3 rules out.
     "http://localhost:51823/cb",
+    "http://localhost/cb",
+    "http://localhost:1/cb",
+    "http://localhost:65535/cb",
     "http://LOCALHOST:51823/cb",
+    "http://localhost.evil.example:51823/cb",
+    "http://evil-localhost:51823/cb",
+    "http://localhost.:51823/cb",
+    "http://evil.example@localhost:51823/cb",
+    "http://localhost:51823@evil.example/cb",
+    "http://localhost\\@evil.example/cb",
+    "http://localhost\t@evil.example/cb",
+    "http://localhost\n@evil.example/cb",
+    "http://local%68ost:51823/cb",
     # Port edge cases.
     "http://127.0.0.1:/cb",
     "http://127.0.0.1:0/cb",
     "http://127.0.0.1:65536/cb",
     "http://127.0.0.1:0080/cb",
     "http://127.0.0.1:99999999999/cb",
+    "http://localhost:/cb",
+    "http://localhost:0/cb",
+    "http://localhost:65536/cb",
+    "http://localhost:abc/cb",
+    "http://localhost:99999999999/cb",
     # Scheme variants outside the exception.
     "HTTP://127.0.0.1:51823/cb",
     "https://127.0.0.1:51823/cb",
@@ -106,7 +125,9 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
   defp unbracket(host) when is_binary(host), do: String.trim_leading(host, "[") |> String.trim_trailing("]")
   defp unbracket(host), do: host
 
-  defp accepted?(uri, matching), do: RedirectURI.registered?(uri, @registered, matching)
+  defp accepted?(uri, matching, registered \\ @registered) do
+    RedirectURI.registered?(uri, registered, matching)
+  end
 
   describe "the accept-set never escapes loopback (RFC 8252 §7.3)" do
     test "every URI the loopback rule accepts resolves to a loopback host in a browser" do
@@ -146,6 +167,33 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
       assert offenders == []
     end
 
+    test "the localhost-inclusive rule stays within its explicit host set" do
+      offenders =
+        for uri <- @corpus,
+            accepted?(uri, :exact_allow_loopback_port_including_localhost, @registered_including_localhost) do
+          parsed = whatwg(uri)
+
+          cond do
+            parsed["ok"] != true ->
+              {uri, "WHATWG refuses to parse it, so it names no reachable target"}
+
+            parsed["hostname"] not in @loopback_hosts_including_localhost ->
+              {uri, "browser resolves host to #{inspect(parsed["hostname"])}"}
+
+            parsed["protocol"] != "http:" ->
+              {uri, "browser resolves scheme to #{inspect(parsed["protocol"])}"}
+
+            true ->
+              nil
+          end
+        end
+        |> Enum.reject(&is_nil/1)
+
+      assert offenders == [],
+             "accepted redirect URIs that a browser would send outside the explicit loopback host set:\n" <>
+               Enum.map_join(offenders, "\n", fn {uri, why} -> "  #{inspect(uri)} - #{why}" end)
+    end
+
     test "the corpus actually exercises the rule (guards against a vacuous pass)" do
       # If the matcher were replaced by `fn _, _, _ -> false end` the invariant
       # tests above would pass trivially. Pin that some URIs really are
@@ -157,6 +205,21 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
       assert "http://[::1]:51823/cb" in loopback
       refute "http://127.0.0.1:51823/cb" in exact
       assert length(loopback) > length(exact)
+    end
+
+    test "the localhost-inclusive corpus exercises the additional branch" do
+      inclusive =
+        Enum.filter(
+          @corpus,
+          &accepted?(&1, :exact_allow_loopback_port_including_localhost, @registered_including_localhost)
+        )
+
+      strict = Enum.filter(@corpus, &accepted?(&1, :exact_allow_loopback_port))
+
+      assert "http://localhost:51823/cb" in inclusive
+      assert "http://localhost/cb" in inclusive
+      refute "http://localhost:51823/cb" in strict
+      assert length(inclusive) > length(strict)
     end
   end
 
@@ -175,6 +238,16 @@ defmodule Attesto.Parity.RedirectURIWhatwgParityTest do
 
       refute accepted?(uri, :exact_allow_loopback_port)
       refute accepted?(uri, :exact)
+    end
+
+    test "a backslash cannot extend localhost into an attacker-controlled authority" do
+      uri = "http://localhost\\@evil.example/cb"
+      parsed = whatwg(uri)
+
+      assert parsed["hostname"] == "localhost"
+      assert URI.parse(uri).host == "evil.example"
+
+      refute accepted?(uri, :exact_allow_loopback_port_including_localhost, @registered_including_localhost)
     end
 
     # Deliberately asserts nothing about what the reference parser returns for
