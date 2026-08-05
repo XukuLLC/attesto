@@ -5,7 +5,11 @@ defmodule Attesto.RedirectURITest do
 
   describe "matching_modes/0" do
     test "lists exactly the modes registered?/3 accepts" do
-      assert RedirectURI.matching_modes() == [:exact, :exact_allow_loopback_port]
+      assert RedirectURI.matching_modes() == [
+               :exact,
+               :exact_allow_loopback_port,
+               :exact_allow_loopback_port_including_localhost
+             ]
     end
   end
 
@@ -13,6 +17,9 @@ defmodule Attesto.RedirectURITest do
     test "passes a supported mode through" do
       assert RedirectURI.matching!(:exact) == :exact
       assert RedirectURI.matching!(:exact_allow_loopback_port) == :exact_allow_loopback_port
+
+      assert RedirectURI.matching!(:exact_allow_loopback_port_including_localhost) ==
+               :exact_allow_loopback_port_including_localhost
     end
 
     test "raises on an unrecognized mode rather than silently picking a policy" do
@@ -278,6 +285,111 @@ defmodule Attesto.RedirectURITest do
 
     test "a non-loopback request never matches a loopback registration" do
       refute RedirectURI.registered?("https://evil.example/cb", ["http://127.0.0.1:0/cb"], :exact_allow_loopback_port)
+    end
+  end
+
+  describe "registered?/3 with :exact_allow_loopback_port_including_localhost (RFC 9700 §2.1)" do
+    @mode :exact_allow_loopback_port_including_localhost
+
+    # The reason this mode exists: Claude Code's client-id metadata document
+    # registers a portless `localhost` callback and then binds an ephemeral
+    # port, so the literal-IP-only rule rejects every one of its requests.
+    test "matches the real-world client that motivates the mode" do
+      registered = ["http://localhost/callback", "http://127.0.0.1/callback"]
+
+      assert RedirectURI.registered?("http://localhost:3118/callback", registered, @mode)
+    end
+
+    test "a localhost request matches any registered localhost port" do
+      for registered <- ["http://localhost:0/cb", "http://localhost/cb", "http://localhost:8080/cb"] do
+        assert RedirectURI.registered?("http://localhost:51823/cb", [registered], @mode),
+               "expected #{registered} to match a request on port 51823"
+      end
+    end
+
+    test "it is a superset: literal loopback IPs keep their §7.3 flexibility" do
+      assert RedirectURI.registered?("http://127.0.0.1:51823/cb", ["http://127.0.0.1/cb"], @mode)
+      assert RedirectURI.registered?("http://[::1]:51823/cb", ["http://[::1]:0/cb"], @mode)
+    end
+
+    # `localhost` resolves through the device's host-name configuration and the
+    # literal IPs do not, so they name different things and must not be
+    # interchangeable - exactly as IPv4 and IPv6 loopback are not.
+    test "localhost and the loopback IP literals stay distinct hosts" do
+      refute RedirectURI.registered?("http://localhost:51823/cb", ["http://127.0.0.1:0/cb"], @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb", ["http://[::1]:0/cb"], @mode)
+      refute RedirectURI.registered?("http://127.0.0.1:51823/cb", ["http://localhost:0/cb"], @mode)
+      refute RedirectURI.registered?("http://[::1]:51823/cb", ["http://localhost:0/cb"], @mode)
+    end
+
+    test "only the port is variable - path and query must still match exactly" do
+      registered = ["http://localhost:0/cb?a=1"]
+
+      refute RedirectURI.registered?("http://localhost:51823/other?a=1", registered, @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb/?a=1", registered, @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb?a=2", registered, @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb", registered, @mode)
+      assert RedirectURI.registered?("http://localhost:51823/cb?a=1", registered, @mode)
+    end
+
+    # §7.3 is an `http`-on-the-loopback-interface exception; widening it to the
+    # name must not also widen it past the scheme.
+    test "https localhost is not relaxed" do
+      refute RedirectURI.registered?("https://localhost:51823/cb", ["https://localhost/cb"], @mode)
+    end
+
+    test "an upper-case scheme is outside the exception" do
+      refute RedirectURI.registered?("HTTP://localhost:51823/cb", ["http://localhost:0/cb"], @mode)
+    end
+
+    # The anchored authority is what keeps `localhost` a name for the loopback
+    # interface rather than a prefix an attacker can extend.
+    test "a host that merely starts or ends with localhost is not loopback" do
+      for uri <- [
+            "http://localhost.evil.example:51823/cb",
+            "http://evil-localhost:51823/cb",
+            "http://localhost.:51823/cb",
+            "http://sub.localhost:51823/cb"
+          ] do
+        refute RedirectURI.registered?(uri, ["http://localhost:0/cb"], @mode),
+               "expected #{uri} to fall outside the loopback exception"
+      end
+    end
+
+    test "userinfo takes the URI outside the exception" do
+      refute RedirectURI.registered?("http://evil.example@localhost:51823/cb", ["http://localhost:0/cb"], @mode)
+      refute RedirectURI.registered?("http://localhost:51823/cb", ["http://evil.example@localhost:0/cb"], @mode)
+    end
+
+    test "a fragment takes the URI outside the exception" do
+      refute RedirectURI.registered?("http://localhost:51823/cb#f", ["http://localhost:0/cb"], @mode)
+    end
+
+    test "a request port outside 1..65535 takes the URI outside the exception" do
+      for uri <- ["http://localhost:0/cb", "http://localhost:/cb", "http://localhost:99999999/cb"] do
+        refute RedirectURI.registered?(uri, ["http://localhost:8080/cb"], @mode),
+               "expected request #{uri} to fall back to exact comparison"
+      end
+    end
+
+    test "the registered side accepts any port, including the :0 placeholder" do
+      for registered <- ["http://localhost:0/cb", "http://localhost:/cb", "http://localhost:99999999/cb"] do
+        assert RedirectURI.registered?("http://localhost:51823/cb", [registered], @mode),
+               "expected registered #{registered} to still match a usable request port"
+      end
+    end
+
+    test "an exact match still wins for a request port the exception would refuse" do
+      assert RedirectURI.registered?("http://localhost:0/cb", ["http://localhost:0/cb"], @mode)
+    end
+
+    test "a remote host is not relaxed" do
+      refute RedirectURI.registered?("http://app.example:51823/cb", ["http://app.example/cb"], @mode)
+      refute RedirectURI.registered?("https://evil.example/cb", ["http://localhost:0/cb"], @mode)
+    end
+
+    test "an empty registered set still matches nothing" do
+      refute RedirectURI.registered?("http://localhost:51823/cb", [], @mode)
     end
   end
 

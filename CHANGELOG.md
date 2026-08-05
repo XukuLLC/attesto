@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A third redirect-URI matching mode,
+  `:exact_allow_loopback_port_including_localhost`**, which applies the RFC 8252
+  §7.3 port allowance to the bare hostname `localhost` as well as the
+  `127.0.0.1` / `[::1]` literals.
+
+  Native clients exist that register a portless `http://localhost/callback` in
+  their client-id metadata document and then bind an ephemeral port. Under
+  `:exact_allow_loopback_port` every such request fails
+  `redirect_uri_not_registered`: exact comparison fails on the port, and the
+  §7.3 exception does not cover the name. Claude Code is one such client, so no
+  Attesto deployment could serve it over the loopback flow.
+
+  The literal-IP-only reading remains correct and remains the behavior of
+  `:exact_allow_loopback_port` — §7.3's MUST is scoped to "loopback IP redirect
+  URIs", and 1.4.1's reconciliation of RFC 9700's wider wording still stands.
+  What this adds is the observation that nothing *forbids* a server allowing the
+  name, and that §8.3's case against `localhost` is stated entirely in terms of
+  what the client does (which interface it binds, its firewall, its host-name
+  resolution) — none of which a server changes by refusing the request. The
+  residual risk is the combination of two allowances the module already makes
+  separately: a registered `localhost` URI is already reachable by exact match,
+  and §7.3 port flexibility is already mandated for the IP literals. Permitting
+  only that combination is why this is a separate opt-in rather than a change to
+  the existing mode.
+
+  **No behavior change unless selected.** `:exact` and
+  `:exact_allow_loopback_port` are byte-for-byte as before — `localhost` still
+  gets no port flexibility under either, and the existing test asserting that is
+  unchanged. `localhost` is a distinct host identity from the IP literals and
+  never cross-matches them, and every other constraint is preserved: byte-exact
+  `http://` scheme, anchored authority (`localhost.evil.example`,
+  `sub.localhost`, `evil-localhost`, `localhost.` and userinfo all stay
+  outside), no fragment, exact path and query, and the asymmetric request /
+  registered port rule.
+
 ## [1.8.1] - 2026-08-03
 
 ### Fixed
