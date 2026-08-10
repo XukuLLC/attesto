@@ -91,12 +91,17 @@ defmodule Attesto.PresentationSessionTest do
     assert verified.iss == "https://issuer.example"
     assert verified.claims["given_name"] == "Alice"
 
+    # `get/1` exposes status but never the completed result payload (the PII):
+    # that is read exactly once via `result/2` (which consumes through `take/1`).
     assert {:ok, entry} = Store.get(session.id)
     assert entry.data.status == :completed
-    assert entry.data.result == %{results: %{@query_id => verified}}
+    refute Map.has_key?(entry.data, :result)
 
     assert {:ok, %{@query_id => ^verified}} =
              PresentationSession.result(Store, session.id)
+
+    # Single-use: a second read (e.g. a replayed response_code) gets nothing.
+    assert :error = PresentationSession.result(Store, session.id)
   end
 
   test "an id correlation verifies the same state-keyed session", ctx do
@@ -216,7 +221,7 @@ defmodule Attesto.PresentationSessionTest do
     assert_receive {:resolved_issuer, "https://issuer.example"}
   end
 
-  test "the optional take atomically polls and clears only completed sessions", ctx do
+  test "take atomically polls and clears only completed sessions", ctx do
     {:ok, pending} = create_session(ctx)
     assert :error = Store.take(pending.id)
     assert_pending(pending.id)

@@ -67,6 +67,7 @@ defmodule Attesto.KeyAttestation do
           | {:now, DateTime.t() | non_neg_integer()}
           | {:require_exp, boolean()}
           | {:accepted_algs, [SigningAlg.alg()]}
+          | {:enforce_fapi_alg_policy, boolean()}
         ]
 
   @type verify_error ::
@@ -106,6 +107,11 @@ defmodule Attesto.KeyAttestation do
     * `:require_exp` - whether `exp` must be present. Defaults to `true`.
     * `:accepted_algs` - JWS algorithms accepted. Defaults to
       `Attesto.SigningAlg.fapi_algs/0`.
+    * `:enforce_fapi_alg_policy` - additionally enforce the FAPI RSA modulus
+      and Edwards-curve restrictions on the attestation signer's key (parity
+      with `Attesto.ClientAssertion` and `Attesto.WalletAttestation`). Defaults
+      to `true` when `:accepted_algs` is omitted and `false` when the caller
+      supplies its own `:accepted_algs`.
 
   Returns `{:ok, %{attested_keys:, key_storage:, user_authentication:,
   certification:, claims:}}`, where `attested_keys` is the list of public
@@ -188,10 +194,17 @@ defmodule Attesto.KeyAttestation do
     trusted = Keyword.fetch!(opts, :trusted_jwks)
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
+    # Parity with client_assertion/wallet_attestation: also enforce the FAPI
+    # RSA-modulus / Edwards-curve strength gate on the attestation signer,
+    # unless the caller narrowed `:accepted_algs` itself.
+    enforce_fapi_policy =
+      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+
     candidates =
       JWS.verification_candidates(trusted,
         kid: Map.get(header, "kid"),
         accepted_algs: accepted_algs,
+        fapi?: enforce_fapi_policy,
         malformed_key: :reject_set
       )
 

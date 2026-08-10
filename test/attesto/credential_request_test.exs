@@ -36,6 +36,42 @@ defmodule Attesto.CredentialRequestTest do
     assert parsed.proofs == [{"jwt", "j1"}, {"jwt", "j2"}]
   end
 
+  test "rejects a proofs batch that exceeds the default cap" do
+    jwts = for n <- 1..51, do: "j#{n}"
+
+    assert {:error, :too_many_proofs} =
+             CredentialRequest.parse(request(%{"proofs" => %{"jwt" => jwts}}))
+  end
+
+  test "accepts a proofs batch at exactly the default cap" do
+    jwts = for n <- 1..50, do: "j#{n}"
+
+    assert {:ok, parsed} = CredentialRequest.parse(request(%{"proofs" => %{"jwt" => jwts}}))
+    assert length(parsed.proofs) == 50
+  end
+
+  test "honors a caller-supplied :max_proofs bound" do
+    jwts = for n <- 1..5, do: "j#{n}"
+
+    assert {:error, :too_many_proofs} =
+             CredentialRequest.parse(request(%{"proofs" => %{"jwt" => jwts}}), max_proofs: 4)
+
+    assert {:ok, _parsed} =
+             CredentialRequest.parse(request(%{"proofs" => %{"jwt" => jwts}}), max_proofs: 5)
+  end
+
+  test "rejects a non-integer :max_proofs instead of silently disabling the cap" do
+    over = for n <- 1..51, do: "j#{n}"
+
+    # A cross-type Erlang comparison (length <= max) would treat these as
+    # "unbounded" and let the batch through; validation must raise instead.
+    for bad <- ["50", nil, :infinity, %{}, 5.0, -1] do
+      assert_raise ArgumentError, fn ->
+        CredentialRequest.parse(request(%{"proofs" => %{"jwt" => over}}), max_proofs: bad)
+      end
+    end
+  end
+
   test "parses a credential identifier selector" do
     assert {:ok, parsed} =
              CredentialRequest.parse(%{

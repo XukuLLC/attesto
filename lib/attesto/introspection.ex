@@ -85,7 +85,13 @@ defmodule Attesto.Introspection do
       `%{"active" => false}` so a caller not authorized for the token learns
       nothing about it (FAPI: a regular client querying introspection is a
       leakage risk). When absent, every authenticated caller may introspect any
-      token (the single-trust-domain default).
+      token (the single-trust-domain default). **Any deployment where more than
+      one client can authenticate to introspection MUST set this** — without it,
+      client A can introspect a token issued to client B and learn its `sub`,
+      `scope`, `aud`, and `exp`. Scope the predicate to the caller (e.g. return
+      `true` only when the token's `client_id`/`aud` matches the authenticated
+      caller, or per your resource-server trust policy). The predicate is
+      fail-closed: a non-`true` return or a raise yields `%{"active" => false}`.
     * `:now` - the reference time (Unix seconds or `DateTime`), for tests.
   """
   @spec introspect(Config.t(), String.t(), opts()) :: response()

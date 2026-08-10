@@ -9,6 +9,14 @@ defmodule Attesto.CredentialRequest do
 
   alias Attesto.MapParams
 
+  # Cap the number of proofs a single request may carry. Each proof is
+  # cryptographically verified by the caller, so an unbounded `proofs` batch is
+  # an authenticated amplification-DoS vector: one request forces N signature
+  # (and key-attestation) verifications. OID4VCI batch issuance is for a handful
+  # of copies, so a generous fixed ceiling bounds the work without constraining
+  # legitimate use. Callers needing a different limit pass `:max_proofs`.
+  @default_max_proofs 50
+
   @type selector :: {:configuration_id, String.t()} | {:credential_identifier, String.t()}
   @type proof :: {String.t(), term()}
   @type parsed :: %{
@@ -23,11 +31,20 @@ defmodule Attesto.CredentialRequest do
   Credential selectors are required, while proofs are optional at parse time.
   Single and batch proofs are returned as one flat list for uniform handling
   by the caller.
+
+  `:max_proofs` (default `#{@default_max_proofs}`) bounds the total number of
+  proofs; a request exceeding it is rejected with `{:error, :too_many_proofs}`
+  before the caller verifies any signature.
   """
-  @spec parse(map()) :: {:ok, parsed()} | {:error, atom()}
-  def parse(request) when is_map(request) do
+  @spec parse(map(), keyword()) :: {:ok, parsed()} | {:error, atom()}
+  def parse(request, opts \\ [])
+
+  def parse(request, opts) when is_map(request) and is_list(opts) do
+    max_proofs = validate_max_proofs!(Keyword.get(opts, :max_proofs, @default_max_proofs))
+
     with {:ok, selector} <- parse_selector(request),
          {:ok, proofs} <- parse_proofs(request),
+         :ok <- check_proof_count(proofs, max_proofs),
          {:ok, response_encryption} <- parse_response_encryption(request) do
       {:ok,
        %{
@@ -38,10 +55,26 @@ defmodule Attesto.CredentialRequest do
     end
   end
 
-  def parse(request) do
+  def parse(request, _opts) do
     raise ArgumentError,
           "Attesto.CredentialRequest.parse/1 expects a map; got #{inspect(request)}"
   end
+
+  # `:max_proofs` MUST be validated to an integer before it reaches the guard:
+  # `length(proofs) <= max` is an Erlang cross-type comparison, and an integer
+  # sorts before every non-number term, so a non-integer `max` (`"50"`, `nil`,
+  # `:infinity`, `%{}` - e.g. an unparsed `System.get_env/1` value) would make
+  # the guard always true and silently disable the cap.
+  defp validate_max_proofs!(max) when is_integer(max) and max >= 0, do: max
+
+  defp validate_max_proofs!(max) do
+    raise ArgumentError,
+          "Attesto.CredentialRequest.parse/2 :max_proofs must be a non-negative integer; " <>
+            "got #{inspect(max)}"
+  end
+
+  defp check_proof_count(proofs, max) when length(proofs) <= max, do: :ok
+  defp check_proof_count(_proofs, _max), do: {:error, :too_many_proofs}
 
   defp parse_selector(request) do
     configuration_id_present? = key_present?(request, :credential_configuration_id)

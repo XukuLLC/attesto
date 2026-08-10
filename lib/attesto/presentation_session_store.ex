@@ -10,9 +10,16 @@ defmodule Attesto.PresentationSessionStore do
   `UPDATE ... WHERE status = 'pending' AND expires_at > now`; the reference ETS
   implementation serializes this transition through its owner process.
 
-  The optional `take/1` callback lets a host atomically poll and clear a
-  completed result. `get/1` is non-consuming and is suitable for serving a
-  request URI or polling without clearing the result.
+  A completed session's verified result is read exactly once, through the
+  required `take/1` callback, which atomically returns and clears it. `get/1`
+  is non-consuming and serves only pending-session needs — the request object,
+  the response-encryption key, and the `pending`/`completed` status. `get/1`
+  MUST NOT return the completed result payload (`data.result`): the OID4VP
+  `response_code` handed to the browser is the session id and transits the
+  address bar, history, `Referer`, and logs, so a `get/1` that returned the
+  claims would let anyone who captured it re-read the presented PII for the
+  whole session TTL. Reading results only via the consuming `take/1` closes
+  that. The reference store strips `:result` from `get/1`.
   """
 
   @type entry :: %{id: String.t(), data: map(), expires_at: integer()}
@@ -20,7 +27,14 @@ defmodule Attesto.PresentationSessionStore do
   @doc "Persist a new pending presentation session."
   @callback put(entry()) :: :ok
 
-  @doc "Read a presentation session without consuming it."
+  @doc """
+  Read a presentation session without consuming it.
+
+  MUST NOT return the completed result payload (`data.result`) — that is read
+  exactly once through `take/1`. Used to serve the request object and
+  response-encryption key of a pending session and to observe `pending` vs
+  `completed` status.
+  """
   @callback get(id :: String.t()) :: {:ok, entry()} | :error
 
   @doc """
@@ -31,7 +45,13 @@ defmodule Attesto.PresentationSessionStore do
   """
   @callback complete(id :: String.t(), result :: map()) :: :ok | :error
 
-  @doc "Atomically fetch and clear an unexpired completed session."
+  @doc """
+  Atomically fetch and clear an unexpired completed session.
+
+  This is the ONLY way to read a completed session's verified result, and it is
+  single-use: the row is deleted on read. Required — `Attesto.PresentationSession.result/2`
+  calls it unconditionally.
+  """
   @callback take(id :: String.t()) :: {:ok, entry()} | :error
 
   @doc """
@@ -49,5 +69,5 @@ defmodule Attesto.PresentationSessionStore do
   """
   @callback attach_response_encryption_jwk(id :: String.t(), jwk :: map()) :: :ok | :error
 
-  @optional_callbacks take: 1, attach_request_object: 2, attach_response_encryption_jwk: 2
+  @optional_callbacks attach_request_object: 2, attach_response_encryption_jwk: 2
 end

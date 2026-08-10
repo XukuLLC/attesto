@@ -2,10 +2,11 @@ defmodule Attesto.PresentationSessionStore.ETS do
   @moduledoc """
   Single-node ETS implementation of `Attesto.PresentationSessionStore`.
 
-  Presentation sessions live in a public named ETS table owned by a
-  `GenServer`. `complete/2` runs inside the owner process and atomically guards
-  the `pending` to `completed` transition on status and expiry. Concurrent
-  submissions therefore have exactly one possible winner on this node.
+  Presentation sessions live in a `:protected` named ETS table owned by a
+  `GenServer`. Every write runs inside that owner process, so `complete/2`
+  atomically guards the `pending` to `completed` transition on status and
+  expiry and concurrent submissions have exactly one possible winner on this
+  node; no other process can write the table directly.
 
   This is a per-node store. A multi-node deployment MUST use a shared store,
   or explicitly acknowledge the limitation with
@@ -25,7 +26,18 @@ defmodule Attesto.PresentationSessionStore.ETS do
 
   @behaviour Attesto.PresentationSessionStore
 
-  use Attesto.Store.ETS, default_sweep_interval_ms: 30_000, reset: :server
+  # `:protected`, not the shared default `:public`: every write here already runs
+  # inside the owner process (`put`/`complete`/`take`/`attach_*` are
+  # `GenServer.call`s), so no other process needs write access. Dropping `:public`
+  # stops a co-resident BEAM process from calling `:ets.insert/2` directly to
+  # overwrite a verified result or bypass the atomic pending -> completed guard.
+  # Reads (`get/1`) stay direct and are unaffected. The rows still hold plaintext
+  # session data, so a co-resident process can read them; treat in-VM code
+  # execution as out of scope, as everywhere else.
+  use Attesto.Store.ETS,
+    default_sweep_interval_ms: 30_000,
+    reset: :server,
+    table_options: [:set, :protected, :named_table, read_concurrency: true, write_concurrency: true]
 
   @table __MODULE__
 
@@ -38,10 +50,19 @@ defmodule Attesto.PresentationSessionStore.ETS do
   @impl Attesto.PresentationSessionStore
   def get(id) when is_binary(id) do
     case :ets.lookup(@table, id) do
-      [{^id, _expires_at, entry}] -> {:ok, entry}
+      [{^id, _expires_at, entry}] -> {:ok, drop_result(entry)}
       [] -> :error
     end
   end
+
+  # `get/1` must never expose a completed session's verified result (the
+  # presented PII): that is read exactly once via `take/1`. Strip it here so a
+  # host that reads a completed session with `get/1` (against the contract)
+  # still cannot re-read the claims. Status, expiry, request object, and
+  # response-encryption key — everything `get/1` legitimately serves — remain.
+  defp drop_result(%{data: %{result: _} = data} = entry), do: %{entry | data: Map.delete(data, :result)}
+
+  defp drop_result(entry), do: entry
 
   @impl Attesto.PresentationSessionStore
   def complete(id, result) when is_binary(id) and is_map(result) do

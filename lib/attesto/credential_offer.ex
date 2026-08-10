@@ -8,8 +8,20 @@ defmodule Attesto.CredentialOffer do
   """
 
   alias Attesto.MapParams
+  alias Attesto.Secret
 
   @default_scheme "openid-credential-offer"
+
+  # Default lifetime of a stored by-reference offer. Short by design: the offer
+  # embeds a redeemable pre-authorized code, so it should live only long enough
+  # for the wallet to dereference it.
+  @default_reference_ttl 300
+
+  # Hard ceiling on a by-reference offer's lifetime. A redeemable pre-authorized
+  # code should not sit fetchable for long; reject absurd/accidental TTLs rather
+  # than store a code for hours or (via overflow-ish nonsense) effectively
+  # forever.
+  @max_reference_ttl 3600
 
   # OID4VCI §4.1.1: the pre-authorized_code grant is keyed in `grants` by its
   # full grant-type URN, while the code itself lives in the inner
@@ -59,6 +71,44 @@ defmodule Attesto.CredentialOffer do
     value = uri |> MapParams.required_string!(:uri) |> URI.encode_www_form()
 
     "#{scheme}://?credential_offer_uri=#{value}"
+  end
+
+  @doc """
+  Store `offer` for by-reference retrieval and return the freshly generated,
+  unguessable id to embed in its `credential_offer_uri`.
+
+  The id is the ONLY thing protecting a by-reference offer: the offer endpoint
+  is unauthenticated by design (OID4VCI §4.1.3, the wallet dereferences it
+  before it has any token), and a pre-authorized offer embeds a redeemable
+  `pre-authorized_code`. A guessable id therefore lets an attacker enumerate the
+  offer endpoint, read a victim's offer, and redeem its code first. This
+  function is the blessed creation path: it generates the id here with
+  `Attesto.Secret.generate/0` (256-bit CSPRNG), so a host cannot substitute a
+  weak one. It mirrors `Attesto.PresentationSession.create/3`, which owns its
+  session-id entropy the same way. Callers MUST use this rather than calling the
+  store's `put/1` with a self-chosen id.
+
+  Options:
+
+    * `:ttl` — lifetime in seconds (default `#{@default_reference_ttl}`).
+
+  Returns `{:ok, id}`; build the retrieval URL from `id` and pass that URL to
+  `deep_link_by_reference/2`.
+  """
+  @spec store_by_reference(module(), map(), keyword()) :: {:ok, String.t()}
+  def store_by_reference(store, offer, opts \\ []) when is_atom(store) and is_map(offer) and is_list(opts) do
+    ttl = validate_ttl!(Keyword.get(opts, :ttl, @default_reference_ttl))
+    id = Secret.generate()
+    :ok = store.put(%{id: id, offer: offer, expires_at: System.system_time(:second) + ttl})
+    {:ok, id}
+  end
+
+  defp validate_ttl!(ttl) when is_integer(ttl) and ttl > 0 and ttl <= @max_reference_ttl, do: ttl
+
+  defp validate_ttl!(ttl) do
+    raise ArgumentError,
+          "Attesto.CredentialOffer.store_by_reference/3 :ttl must be an integer in " <>
+            "1..#{@max_reference_ttl} seconds; got #{inspect(ttl)}"
   end
 
   defp scheme!(opts) do

@@ -87,17 +87,27 @@ defmodule Attesto.PresentationSession do
     end
   end
 
-  @doc "Read a completed session's verified result without consuming it."
+  @doc """
+  Read and consume a completed session's verified result. Single-use.
+
+  The result is returned at most once: the completed session is atomically
+  removed on read (via the store's `take/1`). This bounds exposure of the
+  presented — potentially PII — claims. The `response_code` a verifier hands the
+  browser to trigger this read is the session id, and it transits the browser
+  address bar, history, `Referer`, and logs; a non-consuming read would let
+  anyone who later captured that value replay it to re-read the claims for the
+  rest of the session TTL. Single-use closes that: the verifier front-end reads
+  the result once, on the completion redirect, and a captured `response_code` is
+  dead afterwards. A second read (or a read of a still-pending/expired session)
+  returns `:error`.
+
+  Returns the same shape as `verify_response/4` — the VpToken results map
+  directly — so the live-return and read-back paths handle one shape, not two.
+  """
   @spec result(module(), String.t()) :: {:ok, map()} | :error
   def result(store, id) when is_atom(store) and is_binary(id) do
-    now = NumericDate.now([])
-
-    # Return the same shape as `verify_response/4` — the VpToken results map
-    # directly — so a host polling `result/2` and a host reading the live
-    # `verify_response/4` return value handle one shape, not two.
-    case store.get(id) do
-      {:ok, %{expires_at: expires_at, data: %{status: :completed, result: %{results: results}}}}
-      when expires_at > now and is_map(results) ->
+    case store.take(id) do
+      {:ok, %{data: %{status: :completed, result: %{results: results}}}} when is_map(results) ->
         {:ok, results}
 
       _other ->

@@ -203,4 +203,65 @@ defmodule Attesto.CredentialOfferTest do
 
     assert URI.decode_query(query)["credential_offer_uri"] == reference
   end
+
+  describe "store_by_reference/3" do
+    defmodule CapturingStore do
+      @moduledoc false
+      # Records the exact entry the core hands the store so the test can assert
+      # on the library-generated id and expiry.
+      def put(entry) do
+        Process.put(:captured_offer_entry, entry)
+        :ok
+      end
+    end
+
+    test "generates a 256-bit unguessable id the host never chooses" do
+      offer = CredentialOffer.build(required_opts())
+
+      {:ok, id} = CredentialOffer.store_by_reference(CapturingStore, offer)
+
+      entry = Process.get(:captured_offer_entry)
+      assert entry.id == id
+      assert entry.offer == offer
+      # 32 bytes of CSPRNG, base64url no-pad => 43 chars, URL-safe alphabet only.
+      assert byte_size(id) == 43
+      assert id =~ ~r/\A[A-Za-z0-9_-]{43}\z/
+      # >= 128 bits of entropy is the requirement; 256 clears it with margin.
+      assert {:ok, _decoded} = Base.url_decode64(id, padding: false)
+    end
+
+    test "draws a fresh id per call (no reuse across offers)" do
+      offer = CredentialOffer.build(required_opts())
+
+      {:ok, id1} = CredentialOffer.store_by_reference(CapturingStore, offer)
+      {:ok, id2} = CredentialOffer.store_by_reference(CapturingStore, offer)
+
+      refute id1 == id2
+    end
+
+    test "sets expiry from the ttl option" do
+      offer = CredentialOffer.build(required_opts())
+      before = System.system_time(:second)
+
+      {:ok, _id} = CredentialOffer.store_by_reference(CapturingStore, offer, ttl: 90)
+
+      entry = Process.get(:captured_offer_entry)
+      assert entry.expires_at >= before + 90
+      assert entry.expires_at <= System.system_time(:second) + 90
+    end
+
+    test "rejects a non-positive, non-integer, or over-max ttl" do
+      offer = CredentialOffer.build(required_opts())
+
+      for bad <- [0, -1, 1.5, "300", 3601, :infinity] do
+        assert_raise ArgumentError, fn ->
+          CredentialOffer.store_by_reference(CapturingStore, offer, ttl: bad)
+        end
+      end
+
+      # Boundaries: 1 and the max are accepted.
+      assert {:ok, _} = CredentialOffer.store_by_reference(CapturingStore, offer, ttl: 1)
+      assert {:ok, _} = CredentialOffer.store_by_reference(CapturingStore, offer, ttl: 3600)
+    end
+  end
 end
