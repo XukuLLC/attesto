@@ -49,6 +49,15 @@ defmodule Attesto.SdJwt do
   # nor be produced by resolving one.
   @reserved_claim_names ~w(_sd ...)
 
+  # DoS ceiling on a presentation, enforced in `split/1` before any base64/JSON
+  # decode work: an authenticated holder could otherwise pad the `~`-joined
+  # wire form with unbounded segments, each decoded and hashed during
+  # `index_disclosures/2`. 256 KiB is generous for any real presentation (an
+  # Issuer-signed JWT, its Disclosures, and an optional KB-JWT are typically a
+  # few KB); 1000 Disclosures is far beyond any real credential's claim count.
+  @max_presentation_bytes 256 * 1_024
+  @max_disclosures 1_000
+
   @typedoc "A parsed, verified SD-JWT presentation."
   @type verified :: %{
           claims: map(),
@@ -239,22 +248,32 @@ defmodule Attesto.SdJwt do
   # `<JWT>~<D1>~...~<Dn>~<KB?>`. A trailing `~` (empty last element) means no
   # Key Binding JWT; a non-empty last element is the KB-JWT (three dot-separated
   # segments). Everything between the JWT and the last element is a Disclosure.
+  defp split(combined) when byte_size(combined) > @max_presentation_bytes, do: {:error, :malformed}
+
   defp split(combined) do
-    case String.split(combined, @separator) do
-      [issuer_jwt | rest] when issuer_jwt != "" and rest != [] ->
-        {middle, [last]} = Enum.split(rest, length(rest) - 1)
-        kb_jwt = if last != "", do: last
-
-        cond do
-          Enum.any?(middle, &(&1 == "")) -> {:error, :malformed}
-          not is_nil(kb_jwt) and not jwt_shaped?(kb_jwt) -> {:error, :malformed}
-          true -> {:ok, issuer_jwt, middle, kb_jwt}
-        end
-
-      _ ->
-        {:error, :malformed}
+    with {:ok, segments} <- bounded_segments(combined) do
+      parse_segments(segments)
     end
   end
+
+  # Cap the segment count before any base64/JSON decode work happens.
+  defp bounded_segments(combined) do
+    segments = String.split(combined, @separator)
+    if length(segments) > @max_disclosures + 2, do: {:error, :malformed}, else: {:ok, segments}
+  end
+
+  defp parse_segments([issuer_jwt | rest]) when issuer_jwt != "" and rest != [] do
+    {middle, [last]} = Enum.split(rest, length(rest) - 1)
+    kb_jwt = if last != "", do: last
+
+    cond do
+      Enum.any?(middle, &(&1 == "")) -> {:error, :malformed}
+      not is_nil(kb_jwt) and not jwt_shaped?(kb_jwt) -> {:error, :malformed}
+      true -> {:ok, issuer_jwt, middle, kb_jwt}
+    end
+  end
+
+  defp parse_segments(_segments), do: {:error, :malformed}
 
   defp jwt_shaped?(value), do: match?([_, _, _], String.split(value, "."))
 

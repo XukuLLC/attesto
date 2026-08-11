@@ -34,6 +34,13 @@ defmodule Attesto.SdJwtVc do
   @accepted_typ ["vc+sd-jwt", "dc+sd-jwt"]
   @clock_skew_seconds 60
 
+  # Registered SD-JWT VC claims MUST always be visible: a holder must not be
+  # able to strip `cnf` (defeats holder-binding) or `status` (defeats
+  # revocation) by simply omitting the Disclosure, nor any of the other
+  # issuer-controlled claims. Subtracted from the effective disclosable list
+  # below regardless of whether it came from `:disclosable` or the default.
+  @registered_claim_names ~w(iss vct cnf status iat exp nbf sub)
+
   @type verified :: %{
           claims: map(),
           vct: String.t(),
@@ -59,7 +66,10 @@ defmodule Attesto.SdJwtVc do
 
     * `:claims` - the credential subject claims (a map). Defaults to `%{}`.
     * `:disclosable` - which of those claim names to make selectively
-      disclosable. Defaults to all of `:claims`.
+      disclosable. Defaults to all of `:claims`. Registered claims
+      (`iss`/`vct`/`cnf`/`status`/`iat`/`exp`/`nbf`/`sub`) are never made
+      disclosable even if listed here - they always remain visible, so a
+      holder cannot strip holder-binding (`cnf`) or a status reference.
     * `:cnf` - the holder key-binding confirmation (RFC 7800), e.g.
       `%{"jwk" => holder_public_jwk}`. Included for later Key Binding.
     * `:status` - a Token Status List reference map, typically built with
@@ -83,7 +93,12 @@ defmodule Attesto.SdJwtVc do
     iss = Keyword.fetch!(opts, :iss)
     vct = Keyword.fetch!(opts, :vct)
     subject_claims = Keyword.get(opts, :claims, %{})
-    disclosable = Keyword.get(opts, :disclosable, Map.keys(subject_claims))
+
+    disclosable =
+      opts
+      |> Keyword.get(:disclosable, Map.keys(subject_claims))
+      |> Enum.reject(&(to_string(&1) in @registered_claim_names))
+
     status = validate_status!(Keyword.get(opts, :status))
 
     registered =

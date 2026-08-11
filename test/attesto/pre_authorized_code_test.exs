@@ -112,6 +112,35 @@ defmodule Attesto.PreAuthorizedCodeTest do
              PreAuthorizedCode.redeem(Store, code, %{tx_code: "1234"}, now: @now)
   end
 
+  test "the underlying ETS table is :protected: only the owner process can write it" do
+    assert :protected == :ets.info(Store, :protection)
+
+    # A forged row inserted by any OTHER process (not the store's owner
+    # GenServer) must fail outright - a co-resident process must not be able
+    # to plant a redeemable pre-authorized-code grant.
+    parent = self()
+
+    spawn(fn ->
+      result =
+        try do
+          :ets.insert(Store, {"forged", System.system_time(:second) + 60, %{forged: true}})
+          :inserted
+        rescue
+          ArgumentError -> :rejected
+        end
+
+      send(parent, {:forged_insert, result})
+    end)
+
+    assert_receive {:forged_insert, :rejected}
+    assert :error = Store.take(Secret.hash("forged-code"))
+
+    # The store's own API still works: `put/1`/`take/1` are routed through
+    # the owner process, so they succeed despite the table being :protected.
+    {:ok, code} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
+    assert {:ok, _grant} = PreAuthorizedCode.redeem(Store, code, %{}, now: @now)
+  end
+
   test "exactly one of 25 simultaneous redemptions wins" do
     {:ok, code} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
 

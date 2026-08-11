@@ -66,6 +66,48 @@ defmodule Attesto.SdJwtVcTest do
       refute Map.has_key?(verified.claims, "given_name")
     end
 
+    test "registered claims can never be made selectively disclosable" do
+      {pem, jwk} = keypair()
+      {_holder_pem, holder_jwk} = keypair()
+      uri = "https://issuer/statuslists/1"
+
+      vc =
+        SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: pem],
+          claims: %{"given_name" => "Alice"},
+          cnf: %{"jwk" => holder_jwk},
+          status: StatusList.reference(uri, 1),
+          # Attempt to strip holder-binding and status by listing them
+          # (and a registered claim not even present, "sub") alongside a
+          # real subject claim.
+          disclosable: ["given_name", "cnf", "status", "sub"]
+        )
+
+      # No Disclosure was minted for cnf/status at all - they cannot be
+      # stripped by a holder because there is nothing to omit.
+      [_jwt | disclosures] = vc |> String.split("~") |> Enum.reject(&(&1 == ""))
+
+      disclosed_names =
+        Enum.map(disclosures, fn d ->
+          [_salt, name, _value] = d |> Base.url_decode64!(padding: false) |> JSON.decode!()
+          name
+        end)
+
+      assert disclosed_names == ["given_name"]
+
+      # A holder presenting zero disclosures still gets cnf/status in the
+      # clear: they were never behind an `_sd` digest to omit.
+      [jwt | _] = String.split(vc, "~")
+      assert {:ok, bare} = SdJwtVc.verify(jwt <> "~", jwk)
+      assert bare.claims["cnf"] == %{"jwk" => holder_jwk}
+      assert bare.claims["status"] == %{"status_list" => %{"idx" => 1, "uri" => uri}}
+      refute Map.has_key?(bare.claims, "given_name")
+
+      # The normal subject claim IS disclosable, proving the reject only
+      # excludes registered names rather than disabling disclosure entirely.
+      assert {:ok, full} = SdJwtVc.verify(vc, jwk)
+      assert full.claims["given_name"] == "Alice"
+    end
+
     test "rejects a non-map status option" do
       {pem, _jwk} = keypair()
 

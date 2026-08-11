@@ -127,6 +127,28 @@ defmodule Attesto.SdJwtTest do
       {_pem, jwk} = keypair()
       assert {:error, :malformed} = SdJwt.verify("not-an-sd-jwt", jwk)
     end
+
+    test "a presentation padded past the disclosure cap is rejected before any decode work" do
+      {pem, jwk} = keypair()
+      issuance = SdJwt.issue(%{"iss" => "iss", "x" => 1}, pem: pem, disclosable: ["x"])
+      {jwt, [disclosure]} = parts(issuance)
+
+      # 1001 segments beyond the issuer JWT - one over the 1000-disclosure cap.
+      # Each padding entry is garbage: if this were decoded it would fail with
+      # :invalid_disclosure instead, so :malformed proves the cap short-circuits
+      # before the decode loop runs.
+      padding = List.duplicate("not-base64url-json", 1_001)
+      padded = Enum.join([jwt, disclosure | padding] ++ [""], "~")
+
+      assert {:error, :malformed} = SdJwt.verify(padded, jwk)
+    end
+
+    test "an oversized presentation is rejected on byte length before splitting" do
+      {_pem, jwk} = keypair()
+      huge = String.duplicate("a", 300 * 1_024)
+
+      assert {:error, :malformed} = SdJwt.verify(huge, jwk)
+    end
   end
 
   describe "verify_key_binding/3" do

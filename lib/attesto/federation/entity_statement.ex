@@ -6,6 +6,16 @@ defmodule Attesto.Federation.EntityStatement do
   `entity_configuration/3` is suitable for serving from the
   `/.well-known/openid-federation` endpoint, but endpoint routing and HTTP are
   deliberately left to the host application.
+
+  ## Trust marks are NOT verified here
+
+  A `trust_marks` entry accepted by `build/3`/`verify/3` is only
+  *structurally* validated (non-empty `trust_mark_type` and `trust_mark` JWT
+  string) - the `trust_mark` JWT's signature, issuer, subject, and expiry are
+  never checked by this module. A host that wants to rely on a trust mark
+  (e.g. to gate participation) MUST separately verify it with
+  `Attesto.Federation.TrustMark.verify/3` against the Trust Mark Issuer's keys
+  before trusting it for anything.
   """
 
   alias Attesto.Federation.MetadataPolicy
@@ -375,6 +385,15 @@ defmodule Attesto.Federation.EntityStatement do
 
   defp validate_constraints(_constraints), do: {:error, :invalid_entity_statement}
 
+  # STRUCTURAL validation only: confirms each entry has a non-empty
+  # `trust_mark_type` and `trust_mark` (a JWT string), nothing more. It does
+  # NOT verify any trust_mark JWT's signature, issuer, subject, or expiry - an
+  # attacker who controls (or replays into) the surrounding Entity Statement
+  # can put any well-shaped trust mark here and it will pass this check. A
+  # host MUST call `Attesto.Federation.TrustMark.verify/3` on each entry's
+  # `trust_mark` (against Trust Mark Issuer keys obtained/trusted out of band)
+  # before relying on it for anything - do not treat `validate_optional_claims/1`
+  # passing as trust-mark verification.
   defp validate_trust_marks(:absent), do: :ok
 
   defp validate_trust_marks(marks) when is_list(marks) do
