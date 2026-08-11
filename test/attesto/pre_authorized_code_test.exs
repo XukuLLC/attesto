@@ -135,10 +135,15 @@ defmodule Attesto.PreAuthorizedCodeTest do
     assert_receive {:forged_insert, :rejected}
     assert :error = Store.take(Secret.hash("forged-code"))
 
-    # The store's own API still works: `put/1`/`take/1` are routed through
-    # the owner process, so they succeed despite the table being :protected.
+    # The store's own API still works: `put/1`/`take/1`/`reset/0` are routed
+    # through the owner process, so they succeed despite the table being
+    # :protected (reset via `:ets.delete_all_objects` from a foreign process
+    # would raise on a :protected table — the `reset: :server` macro option).
     {:ok, code} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
     assert {:ok, _grant} = PreAuthorizedCode.redeem(Store, code, %{}, now: @now)
+
+    {:ok, _} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
+    assert :ok = Store.reset()
   end
 
   test "exactly one of 25 simultaneous redemptions wins" do

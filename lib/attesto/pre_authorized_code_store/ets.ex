@@ -38,6 +38,10 @@ defmodule Attesto.PreAuthorizedCodeStore.ETS do
   # still read the table - in-VM code execution is out of scope, as elsewhere.
   use Attesto.Store.ETS,
     default_sweep_interval_ms: 30_000,
+    # `reset: :server` routes reset/0 through the owner process too — a
+    # `:protected` table rejects `:ets.delete_all_objects/1` from any other
+    # process (the `:direct` default), which breaks reset/0 for test setups.
+    reset: :server,
     table_options: [:set, :protected, :named_table, read_concurrency: true, write_concurrency: true]
 
   @table __MODULE__

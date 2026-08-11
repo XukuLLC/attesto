@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-08-10
+
+### Fixed
+
+- `Attesto.PreAuthorizedCodeStore.ETS.reset/0` (test-facing) now routes through
+  the owner process (`reset: :server`), so it works on the `:protected` table
+  introduced in 1.12.0. In 1.12.0 the macro-provided direct
+  `:ets.delete_all_objects/1` raised `insufficient access rights` when a
+  downstream test suite called `reset/0`. Production is unaffected (reset is
+  test-only).
+
 ## [1.12.0] - 2026-08-10
 
 Wallet-surface security-hardening release from a 6-front adversarial sweep of
