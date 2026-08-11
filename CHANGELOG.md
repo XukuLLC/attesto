@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-08-10
+
+Wallet-surface security-hardening release from a 6-front adversarial sweep of
+the EU-wallet code (SD-JWT/SD-JWT VC, mdoc/COSE, OID4VP verifier, OID4VCI
+issuer, OpenID Federation/DID/SIOPv2/attestation) plus an ecosystem-CVE and
+per-spec security-considerations cross-check. The cryptographic surface was
+found solid; the fixes close policy-enforcement gaps.
+
+### Security
+
+- **Status List Token freshness**: `Attesto.StatusList.verify/3` now rejects an
+  expired token (`exp` present and past, 60s clock-skew leeway). `exp` remains
+  optional per draft-ietf-oauth-status-list §11.5, so a no-exp token does not
+  expire. Previously a stale/expired list verified indefinitely, letting a
+  revoked credential read VALID.
+- **SD-JWT VC registered claims**: `Attesto.SdJwtVc.issue/2` never makes
+  registered claims (`iss`/`vct`/`cnf`/`status`/`iat`/`exp`/`nbf`/`sub`)
+  selectively disclosable, closing a holder-binding / revocation-reference strip
+  where a holder could remove `cnf` and present as a bearer credential.
+- **SD-JWT disclosure DoS**: `Attesto.SdJwt` caps presentation byte-length and
+  disclosure count before any base64/JSON decode work.
+- **Pre-authorized code store isolation**: the reference ETS store now uses a
+  `:protected` table (owner-only writes, single-use `take` preserved), matching
+  the credential-offer store, so a co-resident BEAM process cannot forge a
+  redeemable grant.
+- **OpenID Federation trust marks**: added `Attesto.Federation.TrustMark.verify/3`
+  for real signature/`iss`/`sub`/`typ`/`exp` verification;
+  `validate_trust_marks/1` is documented as structural-only.
+
+### Fixed
+
+- `Attesto.PresentationSession` `create_attrs` type now lists `:query_constraints`
+  (a latent dialyzer contract mismatch for `attesto_phoenix`).
+
 ## [1.11.0] - 2026-08-10
 
 Second security-hardening release, from two further adversarial audit rounds
