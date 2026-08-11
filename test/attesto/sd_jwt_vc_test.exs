@@ -45,6 +45,28 @@ defmodule Attesto.SdJwtVcTest do
       refute Map.has_key?(verified.claims, "b")
     end
 
+    test "an atom-keyed subject-claim collision cannot corrupt the registered cnf" do
+      {pem, jwk} = keypair()
+      holder = %{"kty" => "EC", "crv" => "P-256", "x" => "abc", "y" => "def"}
+
+      # A caller passes an atom-keyed `:cnf` in :claims that collides with the
+      # real string `"cnf"` registered claim. Without string-keying, both would
+      # survive Map.merge as separate keys -> a duplicate JSON member.
+      vc =
+        SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: pem],
+          claims: %{"given_name" => "Alice", cnf: "attacker-atom"},
+          cnf: %{"jwk" => holder}
+        )
+
+      [jwt | _] = String.split(vc, "~")
+      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk)
+      # cnf is the real holder key, unambiguously (no duplicate member).
+      assert verified.cnf == %{"jwk" => holder}
+      # The raw payload has exactly one "cnf" member.
+      {:ok, payload} = Attesto.JWS.peek_json(jwt, :payload)
+      assert payload["cnf"] == %{"jwk" => holder}
+    end
+
     test "carries an always-visible Token Status List reference" do
       {pem, jwk} = keypair()
       uri = "https://issuer/statuslists/1"

@@ -6,8 +6,12 @@ if Code.ensure_loaded?(CBOR) do
 
     Issuance builds the MobileSecurityObject (MSO), binds the holder's device
     key, and signs issuer authentication with ES256 `COSE_Sign1`. `verify/3`
-    checks issuer signatures, item digests, document type, and validity for a
-    bare `IssuerSigned` structure.
+    checks issuer signatures, item digests, and validity for a bare
+    `IssuerSigned` structure. The document type is bound ONLY when
+    `:expected_doc_type` is supplied — without it, any doc type from a trusted
+    issuer is accepted, so a caller that needs a specific doc type (e.g. a DCQL
+    `mso_mdoc` query) MUST pass it. `Attesto.VpToken` threads this via its
+    `:query_constraints` for the OID4VP path.
 
     `verify_device_response/4` additionally verifies an OID4VP presentation: a
     full ISO 18013-5 `DeviceResponse` whose `DeviceSigned.deviceAuth` is an

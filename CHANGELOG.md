@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] - 2026-08-11
+
+Second-round hardening from a review-of-the-fixes pass, a dedicated sweep of the
+shared crypto/infra primitives (never a prior review front), and fuzzing of the
+SD-JWT / mdoc / status-list parsers. mdoc and status-list parsing came through
+fuzzing fully clean.
+
+### Security
+
+- **`Attesto.Did` did:jwk DoS**: `resolve/2` now rejects an oversized
+  presenter-controlled RSA key on the raw map (via `SigningAlg.rsa_params_ok?`)
+  BEFORE `JOSE.JWK.from_map/1` bignum-decodes it — a ~256 KB modulus previously
+  pinned a scheduler for ~3s per unauthenticated request. (did:jwk resolution is
+  not yet wired to an HTTP endpoint, so this was latent.)
+- **`Attesto.SdJwtVc.issue/2` registered-claim integrity**: subject claims are
+  string-keyed before merging the registered claims, so an atom-keyed collision
+  (e.g. `claims: %{cnf: ...}`) can no longer emit a duplicate JSON member and let
+  a last-wins verifier bind to the wrong holder key. Matches `Attesto.JwtVc`.
+### Fixed
+
+- `Attesto.SdJwt.verify/3` and `Attesto.CredentialProof.verify_jwt/2` now fail
+  closed (`{:error, _}`) on a malformed host-supplied `jwks` / `accepted_algs`
+  (nil, non-list) instead of raising, honoring their documented contract
+  (found by fuzzing).
+- `Attesto.Store.ETS` `:direct` reset now clears every table the store owns, not
+  just the primary — a store adding `extra_tables:` on the default reset mode
+  would previously leave those rows intact.
+
+### Documentation
+
+- `Attesto.Did` did:web resolver: explicit SSRF warning (the fetch URL is
+  presenter-controlled — allow-list before dereferencing).
+- `Attesto.Mdoc`: clarified that document-type binding requires
+  `:expected_doc_type` (threaded via `Attesto.VpToken`'s `:query_constraints`).
+
 ## [1.12.1] - 2026-08-10
 
 ### Fixed

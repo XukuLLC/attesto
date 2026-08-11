@@ -40,6 +40,16 @@ defmodule Attesto.CredentialProofTest do
     [issuer: @issuer, client_id: @client_id, nonce: @nonce, now: @now]
   end
 
+  test "a nil accepted_algs fails closed instead of crashing" do
+    # A real proof reaches check_alg; a malformed accepted_algs (nil — host
+    # config) must return {:error, :invalid_alg}, not raise on `alg in nil`.
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    proof = sign_proof(key, public_map(key))
+
+    assert {:error, :invalid_alg} =
+             CredentialProof.verify_jwt(proof, Keyword.put(verify_opts(), :accepted_algs, nil))
+  end
+
   test "verifies a valid proof and returns the public JWK and its thumbprint" do
     key = JOSE.JWK.generate_key({:ec, "P-256"})
     jwk_map = public_map(key)

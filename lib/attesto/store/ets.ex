@@ -149,12 +149,18 @@ defmodule Attesto.Store.ETS do
     end
   end
 
-  defp reset_ast(:direct, table, _tables, _reset_match?) do
+  defp reset_ast(:direct, _table, tables, _reset_match?) do
+    table_names = Enum.map(tables, fn {name, _options} -> name end)
+
     reset_function =
       quote do
         def reset do
-          if :ets.whereis(unquote(table)) != :undefined,
-            do: :ets.delete_all_objects(unquote(table))
+          # Reset EVERY table this store owns, not just the primary — a store
+          # with `extra_tables:` on the default `:direct` mode would otherwise
+          # silently leave the extra tables' rows intact.
+          for name <- unquote(table_names),
+              :ets.whereis(name) != :undefined,
+              do: :ets.delete_all_objects(name)
 
           :ok
         end

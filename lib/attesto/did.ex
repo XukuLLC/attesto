@@ -11,11 +11,24 @@ defmodule Attesto.Did do
   returns `{:needs_fetch, url}` so the host retains ownership of HTTP, TLS,
   caching, and DID-document key selection. A resolver may instead be supplied
   as `resolver: fn url -> {:ok, public_jwk} | {:error, reason} end`.
+
+  > #### `did:web` fetch URL is ATTACKER-CONTROLLED {: .warning}
+  >
+  > The `{:needs_fetch, url}` / `:resolver` URL is derived entirely from the
+  > presented DID text — a presenter controls it. `did:web:localhost` or
+  > `did:web:internal-service.corp` yield `https://localhost/.well-known/did.json`
+  > and the like (syntactically valid hostnames the IP-literal guard cannot
+  > catch). A host fetching that URL without an allow-list has an SSRF sink. Do
+  > NOT dereference it blindly: resolve only against a trusted-domain allow-list,
+  > and use a DNS-rebinding-safe fetcher that pins the validated IP (see
+  > `AttestoPhoenix.ClientIdMetadata.Fetcher.Req` for the reference pattern). Unlike
+  > `did:key`/`did:jwk`, `did:web` keys are NOT self-certifying.
   """
 
   import Bitwise
 
   alias Attesto.JWS
+  alias Attesto.SigningAlg
 
   @base58_alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
   @base58_indexes @base58_alphabet
@@ -103,10 +116,20 @@ defmodule Attesto.Did do
   end
 
   defp validate_public_jwk(jwk) do
-    if Enum.any?(@private_jwk_members, &Map.has_key?(jwk, &1)) do
-      {:error, :private_jwk}
-    else
-      parse_public_jwk(jwk)
+    cond do
+      Enum.any?(@private_jwk_members, &Map.has_key?(jwk, &1)) ->
+        {:error, :private_jwk}
+
+      # A `did:jwk` payload is fully presenter-controlled and resolved without
+      # authentication. Reject an oversized RSA modulus/exponent on the raw map
+      # BEFORE `JOSE.JWK.from_map/1` bignum-decodes it, mirroring the gate every
+      # other untrusted-JWK path uses (Key.verification_jwk, JWS.map_candidate!,
+      # SD-JWT KB). Without it a ~256 KB modulus pins a scheduler for seconds.
+      not SigningAlg.rsa_params_ok?(jwk) ->
+        {:error, :invalid_jwk}
+
+      true ->
+        parse_public_jwk(jwk)
     end
   end
 

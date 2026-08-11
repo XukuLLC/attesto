@@ -587,6 +587,10 @@ defmodule Attesto.SdJwt do
   defp keys(%{"keys" => keys}) when is_list(keys), do: keys
   defp keys(list) when is_list(list), do: list
   defp keys(%{} = jwk), do: [jwk]
+  # A malformed `jwks` (nil / string / integer — host config, not wire input)
+  # yields no candidates, so verification fails closed with {:error, _} rather
+  # than a FunctionClauseError escaping the module's contract.
+  defp keys(_other), do: []
 
   defp peek_header(jwt) do
     case JWS.peek_json(jwt, :protected) do

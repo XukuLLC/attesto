@@ -41,6 +41,14 @@ defmodule Attesto.SdJwtTest do
   end
 
   describe "issue/2 + verify/3 round trip" do
+    test "a malformed jwks fails closed instead of crashing" do
+      # host-config, not wire input: nil/string/integer jwks must return
+      # {:error, _}, not a FunctionClauseError (fuzz regression).
+      for bad <- [nil, "not-a-jwk", 123] do
+        assert {:error, _} = Attesto.SdJwt.verify("a.b.c~", bad)
+      end
+    end
+
     test "resolves every disclosed claim and strips the SD machinery" do
       {pem, jwk} = keypair()
 

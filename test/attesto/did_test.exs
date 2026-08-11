@@ -22,6 +22,16 @@ defmodule Attesto.DidTest do
       assert {:ok, ^public} = Did.resolve(did_jwk(public))
     end
 
+    test "rejects an oversized RSA did:jwk before bignum-decoding it (DoS gate)" do
+      big_n = :binary.copy(<<255>>, 256 * 1024) |> Base.url_encode64(padding: false)
+      did = did_jwk(%{"kty" => "RSA", "n" => big_n, "e" => "AQAB"})
+
+      {micros, result} = :timer.tc(fn -> Did.resolve(did) end)
+      assert {:error, :invalid_jwk} = result
+      # Rejected on the raw map, not after a multi-second bignum decode.
+      assert micros < 500_000
+    end
+
     test "preserves permitted public JWK metadata" do
       {_private, public} = keypair({:ec, "P-256"})
       public = Map.merge(public, %{"alg" => "ES256", "kid" => "key-1", "use" => "sig"})

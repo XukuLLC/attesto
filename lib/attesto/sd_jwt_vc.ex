@@ -92,7 +92,13 @@ defmodule Attesto.SdJwtVc do
     opts = Keyword.merge(required, opts)
     iss = Keyword.fetch!(opts, :iss)
     vct = Keyword.fetch!(opts, :vct)
-    subject_claims = Keyword.get(opts, :claims, %{})
+    # String-key the subject claims BEFORE merging the (always string-keyed)
+    # registered claims: an atom-keyed collision (e.g. `claims: %{cnf: ...}`)
+    # would otherwise survive the merge as a SEPARATE key from the string
+    # `"cnf"`, signing a JWT with a duplicate JSON member — a last-wins verifier
+    # could then bind to the wrong holder key. `Attesto.JwtVc` guards this the
+    # same way.
+    subject_claims = opts |> Keyword.get(:claims, %{}) |> MapParams.string_keyed_map()
 
     disclosable =
       opts

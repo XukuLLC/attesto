@@ -130,7 +130,11 @@ defmodule Attesto.CredentialProof do
 
   defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
-    if alg != "none" and alg in accepted, do: {:ok, alg}, else: {:error, :invalid_alg}
+    # Guard is_list: a malformed `accepted_algs` (e.g. nil — host config) fails
+    # closed rather than raising on `alg in nil`.
+    if is_list(accepted) and alg != "none" and alg in accepted,
+      do: {:ok, alg},
+      else: {:error, :invalid_alg}
   end
 
   defp check_alg(_header, _opts), do: {:error, :invalid_alg}
