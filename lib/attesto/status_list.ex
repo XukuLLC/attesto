@@ -14,6 +14,7 @@ defmodule Attesto.StatusList do
 
   @header_typ "statuslist+jwt"
   @valid_bits [1, 2, 4, 8]
+  @expiry_leeway_seconds 60
 
   @type bits :: 1 | 2 | 4 | 8
   @type verified :: %{
@@ -110,12 +111,32 @@ defmodule Attesto.StatusList do
          :ok <- check_typ(header),
          :ok <- check_crit(header),
          {:ok, alg} <- accepted_alg(header, opts),
-         {:ok, claims} <- verify_signature(token, header, alg, jwks) do
+         {:ok, claims} <- verify_signature(token, header, alg, jwks),
+         :ok <- check_expiry(claims, opts) do
       decode_status_list(claims)
     end
   end
 
   def verify(_token, _jwks, _opts), do: {:error, :invalid_signature}
+
+  # draft-ietf-oauth-status-list §11.5: a relying party MUST NOT trust an
+  # expired Status List Token. `exp` is optional in the spec, so a token without
+  # one does not expire; when present it is honored with a small clock-skew
+  # leeway. A non-integer `exp` is malformed. Pass `now:`/`leeway:` to override.
+  defp check_expiry(claims, opts) do
+    case Map.get(claims, "exp") do
+      nil ->
+        :ok
+
+      exp when is_integer(exp) ->
+        now = NumericDate.now(opts, default: :system, invalid_override: :fallback)
+        leeway = Keyword.get(opts, :leeway, @expiry_leeway_seconds)
+        if NumericDate.not_expired?(exp, now, leeway: leeway), do: :ok, else: {:error, :expired}
+
+      _invalid ->
+        {:error, :invalid_status_list}
+    end
+  end
 
   @doc "Read the status value at `idx` from a packed status array."
   @spec status_at(binary(), bits(), non_neg_integer()) :: non_neg_integer()

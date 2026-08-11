@@ -75,7 +75,7 @@ defmodule Attesto.StatusListTest do
 
       assert %{"typ" => "statuslist+jwt"} = token |> JOSE.JWS.peek_protected() |> JSON.decode!()
 
-      assert {:ok, verified} = StatusList.verify(token, jwks, accepted_algs: ["ES256"])
+      assert {:ok, verified} = StatusList.verify(token, jwks, accepted_algs: ["ES256"], now: now)
       assert verified.sub == @uri
       assert verified.bits == 2
       assert verified.claims["iat"] == now
@@ -85,6 +85,19 @@ defmodule Attesto.StatusListTest do
       for idx <- [0, 3, 4, 7, 8] do
         assert StatusList.status_at(verified.statuses_binary, verified.bits, idx) == Enum.at(statuses, idx)
       end
+    end
+
+    test "rejects an expired token, honors leeway, accepts no-exp", %{jwks: jwks} do
+      now = 1_700_000_000
+      # exp well in the past → rejected
+      expired = StatusList.issue(TestKeystore, @uri, [0, 1], exp: now - 3600, now: now - 3700)
+      assert {:error, :expired} = StatusList.verify(expired, jwks, now: now)
+      # within the 60s clock-skew leeway → accepted
+      fresh_enough = StatusList.issue(TestKeystore, @uri, [0, 1], exp: now - 30, now: now - 100)
+      assert {:ok, _} = StatusList.verify(fresh_enough, jwks, now: now)
+      # no exp claim → never expires
+      no_exp = StatusList.issue(TestKeystore, @uri, [0, 1], now: now)
+      assert {:ok, _} = StatusList.verify(no_exp, jwks, now: now + 10_000_000)
     end
 
     test "rejects a tampered signature", %{jwks: jwks} do
