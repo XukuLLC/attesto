@@ -257,12 +257,46 @@ defmodule Attesto.StatusList do
 
   defp decode_status_list(_claims), do: {:error, :invalid_status_list}
 
+  # Cap on the INFLATED status bitstring. The list is signed by the status
+  # issuer, so a compromised/malicious issuer can sign a zlib bomb (~1032:1) that
+  # passes verification and then detonates here; a plain `:zlib.uncompress/1`
+  # would expand a tiny token to gigabytes and OOM the node on every status
+  # check. 16 MiB is 128M single-bit statuses - far beyond any real list.
+  @max_inflated_bytes 16 * 1024 * 1024
+
   defp inflate(compressed) do
-    {:ok, :zlib.uncompress(compressed)}
-  rescue
-    _error -> {:error, :invalid_compression}
-  catch
-    _kind, _reason -> {:error, :invalid_compression}
+    z = :zlib.open()
+
+    try do
+      :zlib.inflateInit(z)
+      bounded_inflate(z, :zlib.safeInflate(z, compressed), [], 0)
+    rescue
+      _error -> {:error, :invalid_compression}
+    catch
+      _kind, _reason -> {:error, :invalid_compression}
+    after
+      :zlib.close(z)
+    end
+  end
+
+  # Stream the inflate and abort the moment output exceeds the cap, so memory
+  # stays O(cap) regardless of the declared or actual expanded size.
+  defp bounded_inflate(z, {:continue, output}, acc, total) do
+    total = total + IO.iodata_length(output)
+
+    if total > @max_inflated_bytes do
+      {:error, :status_list_too_large}
+    else
+      bounded_inflate(z, :zlib.safeInflate(z, []), [acc, output], total)
+    end
+  end
+
+  defp bounded_inflate(_z, {:finished, output}, acc, total) do
+    if total + IO.iodata_length(output) > @max_inflated_bytes do
+      {:error, :status_list_too_large}
+    else
+      {:ok, IO.iodata_to_binary([acc, output])}
+    end
   end
 
   defp status_reference(status_claim) do

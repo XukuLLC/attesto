@@ -301,6 +301,14 @@ defmodule Attesto.JWS do
   end
 
   defp map_candidate!(jwk_map, opts) when is_map(jwk_map) do
+    # Reject an oversized-modulus / huge-exponent RSA key on the raw map before
+    # constructing the JWK, so it never reaches a scheduler-pinning modexp. This
+    # raise is caught by `build_verification_candidate/3` and handled per the
+    # `:malformed_key` policy (a bad key in a set is rejected/skipped, not fatal).
+    if !SigningAlg.rsa_params_ok?(jwk_map) do
+      raise ArgumentError, "RSA verification key parameters are out of safe bounds"
+    end
+
     jwk = JOSE.JWK.from_map(jwk_map)
 
     alg =

@@ -92,34 +92,254 @@ defmodule Attesto.VpToken do
     issuer_source = issuer_source!(opts)
     expected_query_ids = expected_query_ids!(opts)
     formats = formats!(opts)
+    constraints = query_constraints!(opts)
     validate_presentations!(vp_token)
 
-    case missing_query_ids(vp_token, expected_query_ids) do
-      [] -> verify_presentations(vp_token, issuer_source, nonce, audience, formats, opts)
+    # A stored constraint means that query id WAS requested, so it is required
+    # even if the caller did not also list it in `:expected_query_ids`. Without
+    # this, a wallet could return a valid credential under a DIFFERENT id and the
+    # constraint for the requested id would simply never be looked up (its entry
+    # is absent), dodging the type/claim binding entirely.
+    required_ids = Enum.uniq(expected_query_ids ++ Map.keys(constraints))
+
+    case missing_query_ids(vp_token, required_ids) do
+      [] -> verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts)
       missing_ids -> {:error, {:missing_credentials, missing_ids}}
     end
   end
 
-  defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, opts) do
+  @doc """
+  Derive per-query-id verification constraints from a DCQL query, for the
+  `:query_constraints` option of `verify/2`.
+
+  For each credential query it extracts the requested `format`, the accepted
+  credential type (`vct_values` for `dc+sd-jwt`, `doctype_value`/`doctype_values`
+  for `mso_mdoc`), and the claim `path`/`values` entries. `verify/2` enforces
+  these after signature and holder binding so a validly-signed credential of the
+  wrong type — or one disclosing a value outside the requested set — cannot
+  satisfy the query. Query IDs absent from the returned map are unconstrained.
+  """
+  @spec constraints_from_dcql(map()) :: %{optional(String.t()) => map()}
+  def constraints_from_dcql(dcql_query) when is_map(dcql_query) do
+    # The query may reach us atom-keyed (a host passing an Elixir map to
+    # `create_presentation_request`) or string-keyed (already JSON). The signed
+    # request object normalizes atom keys, so the stored constraints MUST too -
+    # otherwise an atom-keyed query would sign a constraint but store none,
+    # leaving the response type-blind. Deep-stringify keys once, up front.
+    case stringify_keys(dcql_query) do
+      %{"credentials" => credentials} when is_list(credentials) -> reduce_constraints(credentials)
+      _other -> %{}
+    end
+  end
+
+  def constraints_from_dcql(_dcql_query), do: %{}
+
+  defp reduce_constraints(credentials) do
+    Enum.reduce(credentials, %{}, fn credential, acc ->
+      case constraint_entry(credential) do
+        {id, constraint} -> Map.put(acc, id, constraint)
+        nil -> acc
+      end
+    end)
+  end
+
+  # Recursively stringify map keys (leaving values, including boolean atoms used
+  # in claim `values`, untouched) so constraint derivation is key-representation
+  # agnostic.
+  defp stringify_keys(map) when is_map(map) and not is_struct(map) do
+    Map.new(map, fn {key, value} -> {stringify_key(key), stringify_keys(value)} end)
+  end
+
+  defp stringify_keys(list) when is_list(list), do: Enum.map(list, &stringify_keys/1)
+  defp stringify_keys(other), do: other
+
+  defp stringify_key(key) when is_atom(key) and not is_boolean(key) and not is_nil(key), do: Atom.to_string(key)
+  defp stringify_key(key), do: key
+
+  defp constraint_entry(%{"id" => id} = credential) when is_binary(id) and id != "" do
+    meta = credential |> Map.get("meta", %{}) |> ensure_map()
+
+    {id,
+     %{
+       format: Map.get(credential, "format"),
+       vct_values: string_list(Map.get(meta, "vct_values")),
+       doctype_values: mdoc_doctypes(meta),
+       claims: parse_dcql_claims(Map.get(credential, "claims"))
+     }}
+  end
+
+  defp constraint_entry(_credential), do: nil
+
+  defp ensure_map(value) when is_map(value), do: value
+  defp ensure_map(_value), do: %{}
+
+  # `mso_mdoc` DCQL meta uses the singular `doctype_value` (OID4VP); accept a
+  # `doctype_values` list too for forward-compatibility.
+  defp mdoc_doctypes(%{"doctype_value" => value}) when is_binary(value) and value != "", do: [value]
+  defp mdoc_doctypes(%{"doctype_values" => values}), do: string_list(values)
+  defp mdoc_doctypes(_meta), do: nil
+
+  defp string_list(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
+  defp string_list(_values), do: nil
+
+  defp parse_dcql_claims(claims) when is_list(claims) do
+    Enum.flat_map(claims, fn
+      %{"path" => path} = claim when is_list(path) ->
+        [%{path: path, values: claim_values(Map.get(claim, "values"))}]
+
+      _claim ->
+        []
+    end)
+  end
+
+  defp parse_dcql_claims(_claims), do: []
+
+  defp claim_values(values) when is_list(values) and values != [], do: values
+  defp claim_values(_values), do: nil
+
+  defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts) do
     verify_opts = now_opts(opts)
-    binding_opts = [nonce: nonce, audience: audience] ++ verify_opts
-    mdoc_context_result = mdoc_context(nonce, audience, opts)
+
+    ctx = %{
+      formats: formats,
+      constraints: constraints,
+      issuer_source: issuer_source,
+      verify_opts: verify_opts,
+      binding_opts: [nonce: nonce, audience: audience] ++ verify_opts,
+      mdoc_context: mdoc_context(nonce, audience, opts)
+    }
 
     Enum.reduce_while(vp_token, {:ok, %{}}, fn {id, presentation}, {:ok, results} ->
-      case verify_entry(id, presentation, formats, issuer_source, verify_opts, binding_opts, mdoc_context_result) do
+      case verify_entry(id, presentation, ctx) do
         {:ok, result} -> {:cont, {:ok, Map.put(results, id, result)}}
         {:error, reason} -> {:halt, {:error, {id, reason}}}
       end
     end)
   end
 
-  defp verify_entry(id, presentation, formats, issuer_source, verify_opts, binding_opts, mdoc_context_result) do
-    with {:ok, format} <- entry_format(id, presentation, formats) do
-      case format do
-        :sd_jwt_vc -> verify_value(presentation, issuer_source, verify_opts, binding_opts)
-        :mso_mdoc -> verify_mdoc_entry(presentation, issuer_source, verify_opts, mdoc_context_result)
-      end
+  defp verify_entry(id, presentation, ctx) do
+    with {:ok, format} <- entry_format(id, presentation, ctx.formats),
+         {:ok, result} <- verify_by_format(format, presentation, ctx) do
+      # A validly-signed credential of the WRONG type (or wrong claim value) must
+      # not satisfy a DCQL query for another type/value. Enforce the per-query
+      # constraints derived from the request AFTER signature + holder binding.
+      enforce_constraints(result, format, Map.get(ctx.constraints, id))
     end
+  end
+
+  defp verify_by_format(:sd_jwt_vc, presentation, ctx),
+    do: verify_value(presentation, ctx.issuer_source, ctx.verify_opts, ctx.binding_opts)
+
+  defp verify_by_format(:mso_mdoc, presentation, ctx),
+    do: verify_mdoc_entry(presentation, ctx.issuer_source, ctx.verify_opts, ctx.mdoc_context)
+
+  # ── DCQL constraint enforcement ──────────────────────────────────────────
+
+  # No constraint stored for this query id: nothing to enforce (e.g. a direct
+  # `VpToken.verify` caller that did not thread `:query_constraints`).
+  defp enforce_constraints(result, _format, nil), do: {:ok, result}
+
+  defp enforce_constraints(result, format, constraint) do
+    # Bind the credential FORMAT to the query first. `format` is how the
+    # presentation was actually verified (dispatched via `:formats` or, absent
+    # that, shape detection): a `dc+sd-jwt` verifies as SD-JWT and would sail
+    # past the mdoc `doctype` check (which never runs for an sd-jwt result), so a
+    # verifier demanding an `mso_mdoc` must reject it on format alone.
+    with :ok <- check_format(format, Map.get(constraint, :format)) do
+      enforce_result_constraints(result, format, constraint)
+    end
+  end
+
+  defp enforce_result_constraints(results, format, constraint) when is_list(results) do
+    Enum.reduce_while(results, {:ok, results}, fn result, acc ->
+      case check_result(result, format, constraint) do
+        :ok -> {:cont, acc}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp enforce_result_constraints(result, format, constraint) do
+    case check_result(result, format, constraint) do
+      :ok -> {:ok, result}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # nil requested format => the query did not pin a format. Otherwise the
+  # verified format MUST equal the one the DCQL query asked for; an unknown
+  # requested format maps to no atom and so fails closed.
+  defp check_format(_actual, nil), do: :ok
+
+  defp check_format(actual, requested) do
+    if Map.get(@known_formats, requested) == actual, do: :ok, else: {:error, :format_mismatch}
+  end
+
+  defp check_result(%{vct: vct, claims: claims}, :sd_jwt_vc, constraint) do
+    with :ok <- check_type(vct, Map.get(constraint, :vct_values), :vct_mismatch) do
+      check_claims(claims, Map.get(constraint, :claims))
+    end
+  end
+
+  defp check_result(%{doc_type: doc_type, namespaces: namespaces}, :mso_mdoc, constraint) do
+    with :ok <- check_type(doc_type, Map.get(constraint, :doctype_values), :doctype_mismatch) do
+      check_claims(namespaces, Map.get(constraint, :claims))
+    end
+  end
+
+  # A constraint exists for this id but the result shape doesn't match the
+  # format's expected shape - unreachable with the current result constructors,
+  # but fail closed rather than silently accept an unenforceable presentation.
+  defp check_result(_result, _format, _constraint), do: {:error, :unenforceable_constraint}
+
+  # nil / empty allowed-set means the query did not constrain the type.
+  defp check_type(_actual, nil, _error), do: :ok
+  defp check_type(_actual, [], _error), do: :ok
+
+  defp check_type(actual, allowed, error) when is_list(allowed) do
+    if actual in allowed, do: :ok, else: {:error, error}
+  end
+
+  defp check_claims(_disclosed, nil), do: :ok
+  defp check_claims(_disclosed, []), do: :ok
+
+  defp check_claims(disclosed, claims) when is_list(claims) do
+    Enum.reduce_while(claims, :ok, fn claim, :ok ->
+      case check_claim(disclosed, claim) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A DCQL claim entry with a `values` set constrains the DISCLOSED value: the
+  # path MUST resolve and the disclosed value MUST be a member (so e.g. a query
+  # for `age_over_21 ∈ [true]` cannot be satisfied by a credential that discloses
+  # `false`). A claim with no `values` only requests disclosure — not a security
+  # constraint — so its absence is not enforced here.
+  defp check_claim(disclosed, %{path: path, values: values}) when is_list(values) and values != [] do
+    case resolve_path(disclosed, path) do
+      {:ok, value} -> if value in values, do: :ok, else: {:error, {:claim_value_mismatch, path}}
+      :error -> {:error, {:claim_value_mismatch, path}}
+    end
+  end
+
+  defp check_claim(_disclosed, _claim), do: :ok
+
+  # DCQL paths are arrays of string keys (object members / mdoc namespace+element).
+  # A non-string element (array index / wildcard) cannot be resolved against the
+  # disclosed map here; for a value-constrained claim that is fail-closed.
+  defp resolve_path(map, path) when is_list(path) do
+    Enum.reduce_while(path, {:ok, map}, fn
+      key, {:ok, m} when is_binary(key) and is_map(m) ->
+        case Map.fetch(m, key) do
+          {:ok, value} -> {:cont, {:ok, value}}
+          :error -> {:halt, :error}
+        end
+
+      _key, _acc ->
+        {:halt, :error}
+    end)
   end
 
   defp verify_mdoc_entry(_presentation, _issuer_source, _verify_opts, {:error, reason}), do: {:error, reason}
@@ -371,6 +591,20 @@ defmodule Attesto.VpToken do
       :error -> %{}
       {:ok, formats} when is_map(formats) -> normalize_formats!(formats)
       {:ok, formats} -> invalid_formats!(formats)
+    end
+  end
+
+  defp query_constraints!(opts) do
+    case Keyword.fetch(opts, :query_constraints) do
+      :error ->
+        %{}
+
+      {:ok, constraints} when is_map(constraints) ->
+        constraints
+
+      {:ok, constraints} ->
+        raise ArgumentError,
+              "Attesto.VpToken :query_constraints must be a map of query ID to constraint; got #{inspect(constraints)}"
     end
   end
 

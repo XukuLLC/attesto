@@ -484,4 +484,151 @@ defmodule Attesto.VpTokenTest do
     tampered_jwt = Enum.join([protected, payload, String.slice(signature, 0..-2//1) <> replacement], ".")
     Enum.join([tampered_jwt | rest], "~")
   end
+
+  describe "DCQL query-constraint enforcement" do
+    defp verify_with_constraints(ctx, constraints) do
+      VpToken.verify(%{"id" => ctx.presentation},
+        nonce: ctx.nonce,
+        audience: ctx.audience,
+        issuer_jwks: ctx.issuer_jwk,
+        now: ctx.now,
+        query_constraints: constraints
+      )
+    end
+
+    test "accepts a credential whose vct is in the query's vct_values" do
+      ctx = valid_context()
+      assert {:ok, %{"id" => _}} = verify_with_constraints(ctx, %{"id" => %{vct_values: ["identity"]}})
+    end
+
+    test "rejects a validly-signed credential of the wrong type (vct not in vct_values)" do
+      ctx = valid_context()
+
+      assert {:error, {"id", :vct_mismatch}} =
+               verify_with_constraints(ctx, %{"id" => %{vct_values: ["urn:eudi:pid:1"]}})
+    end
+
+    test "rejects a disclosed claim value outside the query's values set" do
+      ctx = valid_context()
+
+      assert {:error, {"id", {:claim_value_mismatch, ["given_name"]}}} =
+               verify_with_constraints(ctx, %{
+                 "id" => %{claims: [%{path: ["given_name"], values: ["Bob"]}]}
+               })
+    end
+
+    test "accepts a disclosed claim value that is in the query's values set" do
+      ctx = valid_context()
+
+      assert {:ok, %{"id" => _}} =
+               verify_with_constraints(ctx, %{
+                 "id" => %{claims: [%{path: ["given_name"], values: ["Alice"]}]}
+               })
+    end
+
+    test "rejects when a value-constrained claim is absent from the disclosure" do
+      ctx = valid_context()
+
+      assert {:error, {"id", {:claim_value_mismatch, ["age_over_21"]}}} =
+               verify_with_constraints(ctx, %{
+                 "id" => %{claims: [%{path: ["age_over_21"], values: [true]}]}
+               })
+    end
+
+    test "an empty constraint set for the id enforces nothing" do
+      ctx = valid_context()
+      assert {:ok, %{"id" => _}} = verify_with_constraints(ctx, %{"id" => %{}})
+    end
+
+    test "a constraint's query id is required even when :expected_query_ids is omitted" do
+      ctx = valid_context()
+
+      # Constraint requests "pid"; the wallet returns a credential under a
+      # different id. With no :expected_query_ids, the "pid" constraint must
+      # still make "pid" required rather than silently going unlooked-up.
+      assert {:error, {:missing_credentials, ["pid"]}} =
+               VpToken.verify(%{"swapped" => ctx.presentation},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now,
+                 query_constraints: %{"pid" => %{vct_values: ["urn:eudi:pid:1"]}}
+               )
+    end
+
+    test "rejects an SD-JWT presentation under a query that requested mso_mdoc" do
+      ctx = valid_context()
+
+      # The credential verifies as SD-JWT, but the query pinned mso_mdoc: the
+      # doctype constraint would never be consulted for an sd-jwt result, so the
+      # format itself must be rejected (cross-format substitution).
+      assert {:error, {"id", :format_mismatch}} =
+               verify_with_constraints(ctx, %{
+                 "id" => %{format: "mso_mdoc", doctype_values: ["org.iso.18013.5.1.mDL"]}
+               })
+    end
+
+    test "accepts an SD-JWT presentation under a query that requested dc+sd-jwt" do
+      ctx = valid_context()
+
+      assert {:ok, %{"id" => _}} =
+               verify_with_constraints(ctx, %{"id" => %{format: "dc+sd-jwt", vct_values: ["identity"]}})
+    end
+  end
+
+  describe "constraints_from_dcql/1" do
+    test "derives vct_values, mdoc doctype, and claim value sets per query id" do
+      dcql = %{
+        "credentials" => [
+          %{
+            "id" => "pid",
+            "format" => "dc+sd-jwt",
+            "meta" => %{"vct_values" => ["urn:eudi:pid:1"]},
+            "claims" => [%{"path" => ["age_over_21"], "values" => [true]}, %{"path" => ["given_name"]}]
+          },
+          %{
+            "id" => "mdl",
+            "format" => "mso_mdoc",
+            "meta" => %{"doctype_value" => "org.iso.18013.5.1.mDL"}
+          }
+        ]
+      }
+
+      constraints = VpToken.constraints_from_dcql(dcql)
+
+      assert constraints["pid"].vct_values == ["urn:eudi:pid:1"]
+
+      assert constraints["pid"].claims == [
+               %{path: ["age_over_21"], values: [true]},
+               %{path: ["given_name"], values: nil}
+             ]
+
+      assert constraints["mdl"].doctype_values == ["org.iso.18013.5.1.mDL"]
+    end
+
+    test "returns an empty map for a malformed or empty query" do
+      assert VpToken.constraints_from_dcql(%{}) == %{}
+      assert VpToken.constraints_from_dcql(%{"credentials" => "nope"}) == %{}
+    end
+
+    test "derives constraints from an atom-keyed query identically to string keys" do
+      atom_keyed = %{
+        credentials: [
+          %{
+            id: "pid",
+            format: "dc+sd-jwt",
+            meta: %{vct_values: ["urn:eudi:pid:1"]},
+            claims: [%{path: ["age_over_21"], values: [true]}]
+          }
+        ]
+      }
+
+      constraints = VpToken.constraints_from_dcql(atom_keyed)
+
+      # The atom-keyed query must NOT silently produce an empty (type-blind) map.
+      assert constraints["pid"].vct_values == ["urn:eudi:pid:1"]
+      assert constraints["pid"].format == "dc+sd-jwt"
+      assert constraints["pid"].claims == [%{path: ["age_over_21"], values: [true]}]
+    end
+  end
 end

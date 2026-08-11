@@ -27,6 +27,7 @@ defmodule Attesto.Key do
           | :alg_mismatch
           | :incompatible_key
           | :weak_key
+          | :oversized_key
           | :malformed_jwk
 
   @doc """
@@ -88,11 +89,19 @@ defmodule Attesto.Key do
     with :ok <- reject_private_members(jwk_map, require_public?),
          :ok <- validate_jwk_usage(jwk_map),
          :ok <- validate_jwk_alg(jwk_map, alg),
+         :ok <- validate_rsa_params(jwk_map),
          {:ok, jwk} <- from_verification_map(jwk_map),
          :ok <- validate_rsa_strength(alg, jwk, minimum_rsa_bits),
          :ok <- validate_edwards_curve(alg, jwk) do
       {:ok, jwk}
     end
+  end
+
+  # Bound RSA modulus/exponent on the RAW map before `JOSE.JWK.from_map/1` so a
+  # huge-exponent (or oversized-modulus) key is rejected in microseconds, never
+  # reaching a scheduler-pinning modexp at verify time (availability DoS).
+  defp validate_rsa_params(jwk_map) do
+    if Attesto.SigningAlg.rsa_params_ok?(jwk_map), do: :ok, else: {:error, :oversized_key}
   end
 
   @doc """

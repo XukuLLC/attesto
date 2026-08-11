@@ -290,6 +290,16 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
+    # Bound raw CBOR input before decoding: the decoder recurses per nesting byte
+    # with no depth limit, so deep-nesting input amplifies into heap ahead of any
+    # signature check. Amplification is linear; a 1 MiB ceiling bounds the
+    # worst-case footprint. A COSE_Sign1 is well under this.
+    @max_cbor_bytes 1_048_576
+
+    defp decode_complete(encoded) when is_binary(encoded) and byte_size(encoded) > @max_cbor_bytes do
+      {:error, :invalid_cose}
+    end
+
     defp decode_complete(encoded) do
       case CBOR.decode(encoded) do
         {:ok, value, ""} -> {:ok, value}

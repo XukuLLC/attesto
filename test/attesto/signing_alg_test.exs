@@ -104,4 +104,49 @@ defmodule Attesto.SigningAlgTest do
     x = :binary.copy(<<1>>, bytes) |> Base.url_encode64(padding: false)
     JOSE.JWK.from_map(%{"kty" => "OKP", "crv" => curve, "x" => x})
   end
+
+  describe "rsa_params_ok?/1 (bignum-DoS guard)" do
+    setup do
+      {_kty, rsa} = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_public_map()
+      %{rsa: rsa}
+    end
+
+    test "accepts a normal RSA verification key", %{rsa: rsa} do
+      assert SigningAlg.rsa_params_ok?(rsa)
+    end
+
+    test "rejects a huge public exponent without decoding it", %{rsa: rsa} do
+      huge_e = :binary.copy(<<0xFF>>, 100_000) |> Base.url_encode64(padding: false)
+      assert byte_size(huge_e) > 100_000
+      refute SigningAlg.rsa_params_ok?(%{rsa | "e" => huge_e})
+    end
+
+    test "rejects an even or too-small exponent", %{rsa: rsa} do
+      # 4 -> "BA" (even); 1 -> too small.
+      refute SigningAlg.rsa_params_ok?(%{rsa | "e" => Base.url_encode64(<<4>>, padding: false)})
+      refute SigningAlg.rsa_params_ok?(%{rsa | "e" => Base.url_encode64(<<1>>, padding: false)})
+    end
+
+    test "rejects an oversized modulus (> 8192 bits)", %{rsa: rsa} do
+      big_n = :binary.copy(<<0xFF>>, 2000) |> Base.url_encode64(padding: false)
+      refute SigningAlg.rsa_params_ok?(%{rsa | "n" => big_n})
+    end
+
+    test "rejects an RSA key missing n or e", %{rsa: rsa} do
+      refute SigningAlg.rsa_params_ok?(Map.delete(rsa, "e"))
+      refute SigningAlg.rsa_params_ok?(Map.delete(rsa, "n"))
+    end
+
+    test "passes non-RSA keys through" do
+      assert SigningAlg.rsa_params_ok?(%{"kty" => "EC", "crv" => "P-256", "x" => "a", "y" => "b"})
+      assert SigningAlg.rsa_params_ok?(%{"kty" => "OKP", "crv" => "Ed25519", "x" => "a"})
+    end
+
+    test "the guard is fast on a huge exponent (no modexp)", %{rsa: rsa} do
+      huge_e = :binary.copy(<<0xFF>>, 300_000) |> Base.url_encode64(padding: false)
+      {micros, false} = :timer.tc(fn -> SigningAlg.rsa_params_ok?(%{rsa | "e" => huge_e}) end)
+      # Rejected on byte-length alone: microseconds, not the seconds a modexp costs.
+      assert micros < 100_000
+    end
+  end
 end

@@ -146,6 +146,50 @@ defmodule Attesto.SigningAlg do
     _ -> false
   end
 
+  # 8192-bit ceiling: verifying against a larger modulus (or a large public
+  # exponent) is an unbounded modexp on a BEAM scheduler - an availability DoS,
+  # not a signature bypass.
+  @max_rsa_modulus_bytes 1024
+  @max_rsa_exponent 65_537
+
+  @doc """
+  Returns `true` iff an RSA verification key's parameters are within safe
+  bounds: modulus at most 8192 bits and public exponent an odd integer in
+  `3..65537`. Non-RSA keys pass (not RSA's concern).
+
+  This is a fail-closed DoS guard evaluated on the RAW base64url `n`/`e` - the
+  encoded byte length is bounded BEFORE any bignum decode - so an attacker-
+  supplied key with a multi-hundred-KB exponent or an oversized modulus is
+  rejected in microseconds instead of pinning a scheduler inside
+  OpenSSL/JOSE `modexp`. Call it at every gate that admits an untrusted key
+  before handing it to a verifier.
+  """
+  @spec rsa_params_ok?(map()) :: boolean()
+  def rsa_params_ok?(%{"kty" => "RSA", "n" => n, "e" => e}), do: rsa_modulus_ok?(n) and rsa_exponent_ok?(e)
+  def rsa_params_ok?(%{"kty" => "RSA"}), do: false
+  def rsa_params_ok?(_fields), do: true
+
+  defp rsa_modulus_ok?(encoded) when is_binary(encoded) do
+    case Base.url_decode64(encoded, padding: false) do
+      {:ok, bytes} -> byte_size(bytes) >= 1 and byte_size(bytes) <= @max_rsa_modulus_bytes
+      _other -> false
+    end
+  end
+
+  defp rsa_modulus_ok?(_encoded), do: false
+
+  defp rsa_exponent_ok?(encoded) when is_binary(encoded) do
+    with {:ok, bytes} <- Base.url_decode64(encoded, padding: false),
+         true <- byte_size(bytes) >= 1 and byte_size(bytes) <= 4 do
+      exponent = :binary.decode_unsigned(bytes)
+      exponent >= 3 and exponent <= @max_rsa_exponent and rem(exponent, 2) == 1
+    else
+      _other -> false
+    end
+  end
+
+  defp rsa_exponent_ok?(_encoded), do: false
+
   @doc """
   The unique signing algorithms across a keystore's verification keys.
 

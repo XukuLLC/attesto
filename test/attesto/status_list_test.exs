@@ -117,6 +117,25 @@ defmodule Attesto.StatusListTest do
       assert {:error, :invalid_status_list} = StatusList.verify(missing, jwks)
       assert {:error, :invalid_status_list} = StatusList.verify(malformed, jwks)
     end
+
+    test "rejects a signed zlib decompression bomb without inflating it whole", %{jwks: jwks} do
+      # A tiny compressed payload that inflates past the cap (17 MiB of zeros ->
+      # a few KB compressed). The status issuer signs it, so it passes signature
+      # verification; the bounded inflate must abort instead of allocating 17 MiB.
+      bomb = :binary.copy(<<0>>, 17 * 1024 * 1024) |> :zlib.compress()
+      assert byte_size(bomb) < 100_000
+
+      token =
+        StatusList.sign(TestKeystore, %{
+          "sub" => @uri,
+          "iat" => 1_700_000_000,
+          "status_list" => %{"bits" => 1, "lst" => JWS.encode64(bomb)}
+        })
+
+      {micros, {:error, :invalid_status_list}} = :timer.tc(fn -> StatusList.verify(token, jwks) end)
+      # Aborted at the cap, not after materializing 17 MiB.
+      assert micros < 1_000_000
+    end
   end
 
   describe "reference/2 and resolve/4" do

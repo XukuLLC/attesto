@@ -507,7 +507,7 @@ defmodule Attesto.JwtVc do
   defp valid_confirmation_method(_cnf, []), do: true
 
   defp parseable_jwk?(jwk) do
-    match?(%JOSE.JWK{}, JOSE.JWK.from_map(jwk))
+    Attesto.SigningAlg.rsa_params_ok?(jwk) and match?(%JOSE.JWK{}, JOSE.JWK.from_map(jwk))
   rescue
     _error -> false
   catch

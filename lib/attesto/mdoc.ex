@@ -604,6 +604,20 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
+    # Cap raw CBOR input before decoding. mdoc `DeviceResponse` bytes are decoded
+    # as the FIRST step of `verify_device_response/4` and `peek_doc_type/1` -
+    # ahead of any signature check - and the CBOR decoder recurses per nesting
+    # byte with no depth limit, so deep-nesting input amplifies ~70x into heap
+    # before the surrounding rescue can help. Amplification is linear, so a 1 MiB
+    # ceiling bounds the worst-case footprint. (A real mDL, photo included, is a
+    # few tens of KB.) A per-nesting depth guard would be tighter but needs a
+    # vendored decoder; the size cap is the proportionate immediate bound.
+    @max_cbor_bytes 1_048_576
+
+    defp decode_complete(encoded) when is_binary(encoded) and byte_size(encoded) > @max_cbor_bytes do
+      {:error, :invalid_mdoc}
+    end
+
     defp decode_complete(encoded) when is_binary(encoded) do
       case CBOR.decode(encoded) do
         {:ok, value, ""} -> {:ok, value}

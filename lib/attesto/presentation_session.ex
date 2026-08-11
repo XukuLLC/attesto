@@ -189,10 +189,11 @@ defmodule Attesto.PresentationSession do
     issuer_trust = Map.get(attrs, :issuer_trust)
     request_object = Map.get(attrs, :request_object)
     response_uri = Map.get(attrs, :response_uri)
+    query_constraints = Map.get(attrs, :query_constraints)
 
     if non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
          valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) and
-         valid_response_uri?(response_uri) do
+         valid_response_uri?(response_uri) and valid_query_constraints?(query_constraints) do
       {:ok,
        %{
          audience: audience,
@@ -200,11 +201,18 @@ defmodule Attesto.PresentationSession do
          issuer_trust: issuer_trust
        }
        |> MapParams.put_optional(:request_object, request_object)
-       |> MapParams.put_optional(:response_uri, response_uri)}
+       |> MapParams.put_optional(:response_uri, response_uri)
+       |> MapParams.put_optional(:query_constraints, query_constraints)}
     else
       {:error, :invalid_attrs}
     end
   end
+
+  # Per-query-id DCQL constraints (`Attesto.VpToken.constraints_from_dcql/1`);
+  # threaded opaquely so the verifier binds each presentation to its query's
+  # type/claim-value requirements.
+  defp valid_query_constraints?(nil), do: true
+  defp valid_query_constraints?(value), do: is_map(value)
 
   defp valid_request_object?(nil), do: true
   defp valid_request_object?(value), do: non_empty_string?(value)
@@ -252,6 +260,7 @@ defmodule Attesto.PresentationSession do
       |> Keyword.merge(issuer_trust_opts(data.issuer_trust))
       |> Keyword.merge(response_uri_opts(data))
       |> Keyword.merge(response_encryption_jwk_opts(data))
+      |> Keyword.merge(query_constraints_opts(data))
       |> Keyword.merge(Keyword.take(opts, [:now, :formats]))
 
     case VpToken.verify(vp_token, verify_opts) do
@@ -265,6 +274,11 @@ defmodule Attesto.PresentationSession do
 
   defp response_uri_opts(%{response_uri: response_uri}), do: [response_uri: response_uri]
   defp response_uri_opts(_data), do: []
+
+  defp query_constraints_opts(%{query_constraints: constraints}) when is_map(constraints),
+    do: [query_constraints: constraints]
+
+  defp query_constraints_opts(_data), do: []
 
   # For an mdoc presentation over `direct_post.jwt`, the OpenID4VPHandover binds
   # to the verifier's response-encryption public key thumbprint; pass the key so

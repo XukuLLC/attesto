@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-10
+
+Second security-hardening release, from two further adversarial audit rounds
+(under-covered flows + implementation-level classes) and three cross-model code
+reviews. Focused on denial-of-service resource-exhaustion classes and OID4VP
+verification correctness.
+
+### Security
+
+- **RSA verification-key parameter bounds (DoS).** `Attesto.SigningAlg.rsa_params_ok?/1`
+  rejects an RSA verification key whose modulus exceeds 8192 bits or whose public
+  exponent is not an odd integer in `3..65537`, evaluated on the RAW base64url
+  `n`/`e` before any bignum decode. Without it, an attacker-supplied key with a
+  multi-hundred-KB exponent pins a scheduler in `modexp` for seconds. Wired at
+  every gate that admits an untrusted key: `Attesto.Key.verification_jwk/2`,
+  `Attesto.JWS.verification_candidates/2` (via `map_candidate!`), the SD-JWT
+  holder Key Binding path (`Attesto.SdJwt`), and `Attesto.JwtVc`'s `cnf` parse.
+- **OID4VP format binding + query-ID requirement.** `Attesto.VpToken.verify/2`
+  now (a) binds each presentation to the DCQL-requested *format* — a validly
+  signed `dc+sd-jwt` credential can no longer satisfy an `mso_mdoc` query
+  (`:format_mismatch`) — and (b) treats every query id that carries a constraint
+  as required, so a wallet cannot return a credential under a different id to
+  dodge the type/claim binding. `constraints_from_dcql/1` accepts atom- or
+  string-keyed queries. (Completes the DCQL binding introduced in 1.10.0.)
+- **Token Status List decompression-bomb bound.** `Attesto.StatusList` inflates
+  the status bitstring through a capped `:zlib.safeInflate` loop (16 MiB ceiling,
+  `:status_list_too_large`) instead of `:zlib.uncompress/1`, so a signed zlib
+  bomb from a compromised status issuer cannot expand to gigabytes.
+- **CBOR/mdoc parse-amplification bound.** `Attesto.Mdoc` and `Attesto.Cose`
+  reject CBOR input over 1 MiB before decoding, bounding the deep-nesting
+  amplification the decoder would otherwise turn into heap ahead of any signature
+  check.
+- **Nonce single-use + store ceilings.** `Attesto.CNonceStore` gains a required
+  atomic `consume/1` (single-use OID4VCI c_nonces; see attesto_phoenix). The
+  `Attesto.CNonceStore.ETS` and `Attesto.DPoP.NonceStore.ETS` stores bound table
+  growth from their unauthenticated endpoints with an O(1) best-effort ceiling.
+
+### Changed (breaking)
+
+- `Attesto.CNonceStore` requires the `consume/1` callback. The bundled ETS store
+  implements it; custom stores must add it (a store that cannot single-use a
+  nonce must not be used for issuance).
+- `Attesto.VpToken.verify/2`: a query id present in `:query_constraints` is now
+  required in the response even if absent from `:expected_query_ids`.
+
 ## [1.10.0] - 2026-08-10
 
 Security-hardening release from an adversarial audit against four public

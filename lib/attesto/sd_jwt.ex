@@ -484,7 +484,11 @@ defmodule Attesto.SdJwt do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
     alg = Map.get(header, "alg")
 
-    if is_binary(alg) and alg in accepted and alg != "none" do
+    if is_binary(alg) and alg in accepted and alg != "none" and SigningAlg.rsa_params_ok?(holder_jwk) do
+      # `rsa_params_ok?` guards the holder key here because the KB-JWT candidate
+      # is built directly (not through `JWS.map_candidate!`), so an oversized-
+      # exponent holder `cnf.jwk` would otherwise reach a scheduler-pinning
+      # modexp during KB-JWT verification (RSA DoS).
       jwk = JOSE.JWK.from_map(holder_jwk)
 
       JWS.verify_strict(kb_jwt, [{nil, alg, jwk}],
