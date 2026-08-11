@@ -33,7 +33,8 @@ defmodule Attesto.PresentationSession do
           required(:expected_query_ids) => [String.t()],
           required(:issuer_trust) => issuer_trust(),
           optional(:request_object) => String.t(),
-          optional(:response_uri) => String.t()
+          optional(:response_uri) => String.t(),
+          optional(:query_constraints) => map()
         }
 
   @type correlation :: {:state, String.t()} | {:id, String.t()}
