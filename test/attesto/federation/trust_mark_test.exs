@@ -73,19 +73,19 @@ defmodule Attesto.Federation.TrustMarkTest do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims())
 
-    # Flip the last character of the signature segment: same shape (still
-    # valid base64url, same length), but the signature no longer verifies.
+    # Flip the first character of the signature segment: it remains valid
+    # base64url with the same length, but the signature no longer verifies.
     [header, payload, signature] = String.split(jwt, ".")
-    flipped = flip_last_char(signature)
+    flipped = flip_first_char(signature)
     tampered = Enum.join([header, payload, flipped], ".")
 
     assert {:error, :invalid_signature} = TrustMark.verify(tampered, jwks(pem), now: @now)
   end
 
-  defp flip_last_char(segment) do
-    {rest, last} = String.split_at(segment, -1)
-    replacement = if last == "A", do: "B", else: "A"
-    rest <> replacement
+  defp flip_first_char(segment) do
+    <<first::binary-size(1), rest::binary>> = segment
+    replacement = if first == "A", do: "B", else: "A"
+    replacement <> rest
   end
 
   test "a trust mark signed by the wrong key is rejected" do

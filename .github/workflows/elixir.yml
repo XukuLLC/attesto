@@ -85,6 +85,10 @@ jobs:
           mix local.rebar --force
           mix deps.get
 
+      - name: Audit dependency advisories
+        if: ${{ matrix.lint }}
+        run: mix hex.audit
+
       # Force erlang_python to (re)build its NIF against the Python 3.14 set
       # up above. PYTHON_CONFIG is the documented hint its CMake honours
       # (it derives Python3_ROOT_DIR from `--prefix`). We wipe any cached
