@@ -217,7 +217,7 @@ defmodule Attesto.IdentityAssertionTest do
     test "rejects a malformed optional scope instead of dropping its ceiling" do
       key = rsa_key()
 
-      for scope <- [123, "mcp:read\tmcp:write", "bad\\scope"] do
+      for scope <- [123, "", "   ", "mcp:read\tmcp:write", "bad\\scope"] do
         jwt = assertion(key, "RS256", %{"scope" => scope})
 
         assert {:error, :invalid_claims} =
@@ -234,6 +234,12 @@ defmodule Attesto.IdentityAssertionTest do
             %{"cnf" => "not-an-object"},
             %{"cnf" => %{}},
             %{"cnf" => %{"x5t#S256" => Attesto.Thumbprint.of("unsupported-binding")}},
+            %{
+              "cnf" => %{
+                "jkt" => Attesto.Thumbprint.of("supported-binding"),
+                "x5t#S256" => Attesto.Thumbprint.of("unsupported-binding")
+              }
+            },
             %{"cnf" => %{"jkt" => "not-a-thumbprint"}}
           ] do
         jwt = assertion(key, "RS256", overrides)

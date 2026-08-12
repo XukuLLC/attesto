@@ -250,7 +250,9 @@ defmodule Attesto.IdentityAssertion do
   # present. In particular, treating a malformed `scope` as absent would erase
   # the IdP's authorization ceiling.
   defp check_optional_scope(%{"scope" => scope}) when is_binary(scope) do
-    if scope |> Scope.parse() |> Scope.valid_list?(), do: :ok, else: {:error, :invalid_claims}
+    if scope |> Scope.parse() |> Scope.valid_list?(allow_empty?: false),
+      do: :ok,
+      else: {:error, :invalid_claims}
   end
 
   defp check_optional_scope(%{"scope" => _scope}), do: {:error, :invalid_claims}
@@ -268,7 +270,7 @@ defmodule Attesto.IdentityAssertion do
   # The draft permits an RFC 7800 confirmation claim. Attesto currently
   # implements its DPoP `jkt` method; reject a malformed value here so the
   # integration can never mistake it for an unbound assertion.
-  defp check_optional_cnf(%{"cnf" => %{"jkt" => jkt}}) do
+  defp check_optional_cnf(%{"cnf" => %{"jkt" => jkt} = cnf}) when map_size(cnf) == 1 do
     if Thumbprint.valid?(jkt), do: :ok, else: {:error, :invalid_claims}
   end
 

@@ -13,10 +13,16 @@ package now requires this release (`>= 1.13.0`).
 
 ### Security
 
-- ID-JAG verification now validates present `scope`, `resource`, and `cnf.jkt`
-  claims instead of allowing malformed optional authorization constraints to be
-  treated as absent. A signed constraint that cannot be parsed previously
-  degraded to "absent", erasing the IdP's ceiling; it now fails closed.
+- ID-JAG verification now validates a present `scope`, `resource`, and `cnf`
+  instead of allowing a malformed optional authorization constraint to be
+  treated as absent. A signed constraint that could not be parsed previously
+  degraded to "absent", erasing the IdP's ceiling; it now fails closed. An
+  empty `scope` is rejected rather than read as an unbounded one.
+- **Mixed confirmation methods are rejected.** A `cnf` carrying `jkt`
+  alongside any other member (for example an `x5t#S256` certificate
+  thumbprint) previously matched on `jkt` alone, silently dropping the second
+  constraint — an IdP that required both DPoP *and* mTLS possession got an
+  assertion enforced as DPoP-only. Only a single-member `cnf.jkt` is accepted.
 - `jti` is bounded (256 bytes) before it can reach a host replay store, so
   unbounded IdP-controlled input never becomes a store key.
 
