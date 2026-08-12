@@ -45,12 +45,13 @@ defmodule Attesto.IdentityAssertion do
       lifetime `exp - iat` does not exceed `:max_lifetime_seconds` when set.
   """
 
-  alias Attesto.{Claims, JWS}
+  alias Attesto.{Claims, JWS, ResourceIndicator, Scope, Thumbprint}
   alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @typ "oauth-id-jag+jwt"
   @clock_skew_seconds 60
+  @max_jti_bytes 256
   @required_claims ~w(iss sub aud client_id jti exp iat)
 
   @typedoc "The validated, string-keyed ID-JAG claim set."
@@ -136,6 +137,11 @@ defmodule Attesto.IdentityAssertion do
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
          :ok <- check_required_claims(claims),
+         :ok <- check_jti(claims),
+         :ok <- check_optional_scope(claims),
+         :ok <- check_optional_resource(claims),
+         :ok <- check_optional_cnf(claims),
+         :ok <- reject_unsupported_authorization_details(claims),
          :ok <- check_issuer(claims, Keyword.get(opts, :issuer)),
          :ok <- check_audience(claims, Keyword.get(opts, :audience)),
          :ok <- check_client(claims, Keyword.get(opts, :client_id)),
@@ -233,6 +239,49 @@ defmodule Attesto.IdentityAssertion do
       _ -> false
     end
   end
+
+  # `jti` is persisted by the HTTP integration's replay store. Bound it before
+  # it can become a store key; the integration additionally hashes it with the
+  # verified issuer so storage is fixed-size and issuer-local.
+  defp check_jti(%{"jti" => jti}) when is_binary(jti) and byte_size(jti) <= @max_jti_bytes, do: :ok
+  defp check_jti(_claims), do: {:error, :invalid_claims}
+
+  # draft §6.1: optional claims are still type- and syntax-constrained when
+  # present. In particular, treating a malformed `scope` as absent would erase
+  # the IdP's authorization ceiling.
+  defp check_optional_scope(%{"scope" => scope}) when is_binary(scope) do
+    if scope |> Scope.parse() |> Scope.valid_list?(), do: :ok, else: {:error, :invalid_claims}
+  end
+
+  defp check_optional_scope(%{"scope" => _scope}), do: {:error, :invalid_claims}
+  defp check_optional_scope(_claims), do: :ok
+
+  defp check_optional_resource(%{"resource" => resource}) do
+    case ResourceIndicator.validate(resource) do
+      {:ok, [_ | _]} -> :ok
+      _ -> {:error, :invalid_claims}
+    end
+  end
+
+  defp check_optional_resource(_claims), do: :ok
+
+  # The draft permits an RFC 7800 confirmation claim. Attesto currently
+  # implements its DPoP `jkt` method; reject a malformed value here so the
+  # integration can never mistake it for an unbound assertion.
+  defp check_optional_cnf(%{"cnf" => %{"jkt" => jkt}}) do
+    if Thumbprint.valid?(jkt), do: :ok, else: {:error, :invalid_claims}
+  end
+
+  defp check_optional_cnf(%{"cnf" => _cnf}), do: {:error, :invalid_claims}
+  defp check_optional_cnf(_claims), do: :ok
+
+  # The draft allows RFC 9396 authorization details, but this verifier has no
+  # policy engine for their typed constraints yet. Ignoring a signed constraint
+  # would turn it into broader scope-only authority, so fail closed until the
+  # integration can process it end to end.
+  defp reject_unsupported_authorization_details(%{"authorization_details" => _details}), do: {:error, :invalid_claims}
+
+  defp reject_unsupported_authorization_details(_claims), do: :ok
 
   defp check_issuer(_claims, nil), do: {:error, :invalid_issuer}
   defp check_issuer(%{"iss" => iss}, iss) when is_binary(iss) and iss != "", do: :ok

@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-08-11
+
+Hardening of the ID-JAG (`urn:ietf:params:oauth:grant-type:jwt-bearer`)
+assertion verifier. Pairs with `attesto_phoenix` 2.12.0, which enforces the
+signed `resource` and `cnf.jkt` constraints at the token endpoint; that
+package now requires this release (`>= 1.13.0`).
+
+### Security
+
+- ID-JAG verification now validates present `scope`, `resource`, and `cnf.jkt`
+  claims instead of allowing malformed optional authorization constraints to be
+  treated as absent. A signed constraint that cannot be parsed previously
+  degraded to "absent", erasing the IdP's ceiling; it now fails closed.
+- `jti` is bounded (256 bytes) before it can reach a host replay store, so
+  unbounded IdP-controlled input never becomes a store key.
+
+### Changed
+
+- **Potentially breaking**: an ID-JAG carrying `authorization_details`
+  (RFC 9396) is now rejected with `:invalid_claims`. This verifier has no
+  policy engine for their typed constraints, and ignoring a signed constraint
+  would silently promote a narrowly-scoped assertion to broader scope-only
+  authority. Fail closed until the constraints can be enforced end to end.
+  Trusted IdPs that mint ID-JAGs including `authorization_details` must stop
+  doing so, or pin `attesto ~> 1.12.2` until they can.
+- An RFC 7800 confirmation claim using a method other than DPoP `jkt` is
+  likewise rejected rather than treated as an unbound (bearer) assertion.
+
 ## [1.12.2] - 2026-08-11
 
 Second-round hardening from a review-of-the-fixes pass, a dedicated sweep of the

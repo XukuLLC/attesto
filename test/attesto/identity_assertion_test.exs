@@ -82,6 +82,20 @@ defmodule Attesto.IdentityAssertionTest do
       assert claims["email"] == "a@example.com"
     end
 
+    test "accepts valid resource and DPoP confirmation claims" do
+      key = rsa_key()
+      jkt = Attesto.Thumbprint.of("id-jag-holder-key")
+
+      jwt =
+        assertion(key, "RS256", %{
+          "resource" => ["https://api.example/a", "https://api.example/b"],
+          "cnf" => %{"jkt" => jkt}
+        })
+
+      assert {:ok, claims} = IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+      assert claims["cnf"]["jkt"] == jkt
+    end
+
     test "accepts aud as a single-element array" do
       key = rsa_key()
       jwt = assertion(key, "RS256", %{"aud" => [@aud]})
@@ -189,6 +203,55 @@ defmodule Attesto.IdentityAssertionTest do
       jwt = assertion(key, "RS256", %{"exp" => nil})
 
       assert {:error, :missing_claim} =
+               IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+    end
+
+    test "rejects an oversized jti before it can reach a replay store" do
+      key = rsa_key()
+      jwt = assertion(key, "RS256", %{"jti" => String.duplicate("j", 257)})
+
+      assert {:error, :invalid_claims} =
+               IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+    end
+
+    test "rejects a malformed optional scope instead of dropping its ceiling" do
+      key = rsa_key()
+
+      for scope <- [123, "mcp:read\tmcp:write", "bad\\scope"] do
+        jwt = assertion(key, "RS256", %{"scope" => scope})
+
+        assert {:error, :invalid_claims} =
+                 IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+      end
+    end
+
+    test "rejects malformed optional resource and cnf claims" do
+      key = rsa_key()
+
+      for overrides <- [
+            %{"resource" => "relative/resource"},
+            %{"resource" => []},
+            %{"cnf" => "not-an-object"},
+            %{"cnf" => %{}},
+            %{"cnf" => %{"x5t#S256" => Attesto.Thumbprint.of("unsupported-binding")}},
+            %{"cnf" => %{"jkt" => "not-a-thumbprint"}}
+          ] do
+        jwt = assertion(key, "RS256", overrides)
+
+        assert {:error, :invalid_claims} =
+                 IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+      end
+    end
+
+    test "rejects authorization_details until the exchange can enforce them" do
+      key = rsa_key()
+
+      jwt =
+        assertion(key, "RS256", %{
+          "authorization_details" => [%{"type" => "example_authorization"}]
+        })
+
+      assert {:error, :invalid_claims} =
                IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
     end
   end
