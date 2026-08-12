@@ -3,9 +3,11 @@ defmodule Attesto.Siop do
   SIOPv2 Self-Issued ID Token verification for the Relying Party role.
 
   A Self-Issued ID Token is not verified against an issuer-owned JWKS. The
-  holder embeds a public key in `sub_jwk`, signs the ID Token with that key,
-  and uses the key's RFC 7638 SHA-256 thumbprint as `sub`. `verify/2` ties all
-  three values together before returning the verified subject and public key.
+  holder either embeds a public key in `sub_jwk` and uses its RFC 7638 SHA-256
+  thumbprint as `sub`, or uses a self-contained `did:jwk` / `did:key` subject
+  whose resolved verification method signs the token. `verify/2` ties the
+  subject, verification key, and signature together before returning the
+  verified subject and public key.
 
   This module implements the JWK Thumbprint Subject Syntax Type from
   Self-Issued OpenID Provider v2 draft 13, section 11.1. It accepts `sub_jwk`
@@ -15,9 +17,10 @@ defmodule Attesto.Siop do
 
   The current draft identifies a Self-Issued ID Token with `iss == sub`.
   `https://self-issued.me/v2`, used by the earlier static-discovery model, is
-  also accepted for compatibility. DID subjects are deliberately out of
-  scope: they require method-specific DID resolution rather than an embedded
-  `sub_jwk`.
+  also accepted for JWK-thumbprint subjects. DID subjects require `iss == sub`
+  and a protected `kid` naming the method-defined verification method. Only
+  connection-free `did:jwk` and `did:key` are resolved here; network-backed DID
+  methods remain host-owned and fail closed.
 
   Verification is conn-free and fail-closed:
 
@@ -25,9 +28,12 @@ defmodule Attesto.Siop do
       headers;
     * `alg` must be an Attesto-supported asymmetric algorithm allowed by RP
       policy and compatible with a public verification JWK;
-    * the signature must verify strictly with the embedded holder key;
-    * `sub` must exactly equal the key's RFC 7638 thumbprint;
-    * `iss` must equal either `sub` or `https://self-issued.me/v2`;
+    * the signature must verify strictly with the embedded or DID-resolved
+      holder key;
+    * `sub` must exactly equal the key's RFC 7638 thumbprint, or be the
+      `did:jwk` / `did:key` from which the key and protected `kid` are derived;
+    * `iss` must equal `sub` for DID subjects, or either `sub` or
+      `https://self-issued.me/v2` for JWK-thumbprint subjects;
     * `aud` must contain the RP Client ID and `nonce` must exactly match the
       Authentication Request;
     * `exp` and `iat` are required non-negative NumericDates; `nbf` is optional
@@ -37,7 +43,7 @@ defmodule Attesto.Siop do
   Claims other than the cryptographically bound `sub` remain self-attested.
   """
 
-  alias Attesto.{Claims, JWS, Key, NumericDate, SecureCompare, SigningAlg, Thumbprint}
+  alias Attesto.{Claims, Did, JWS, Key, NumericDate, SecureCompare, SigningAlg, Thumbprint}
 
   @self_issued_issuer "https://self-issued.me/v2"
   @header_typ "JWT"
@@ -71,6 +77,13 @@ defmodule Attesto.Siop do
   @doc """
   Verify a Self-Issued ID Token and return its subject and holder public JWK.
 
+  JWK-thumbprint subjects may carry `sub_jwk` in the payload or protected
+  header. A `did:jwk` subject must instead carry protected `kid` equal to
+  `did:jwk:...#0`; a `did:key` subject must carry protected `kid` equal to the
+  DID followed by `#` and its multibase value. A DID response containing
+  `sub_jwk`, omitting `kid`, or naming any other verification method is
+  rejected.
+
   Required options:
 
     * `:audience` - the RP Client ID sent in the Authentication Request. The
@@ -97,16 +110,15 @@ defmodule Attesto.Siop do
          :ok <- check_typ(header),
          {:ok, alg} <- check_alg(header, opts),
          {:ok, unverified_claims} <- peek_json(id_token, :payload),
-         {:ok, jwk_map, jwk} <- extract_sub_jwk(header, unverified_claims, alg),
-         {:ok, claims} <- verify_signature(id_token, alg, jwk),
-         :ok <- check_verified_sub_jwk(header, claims, jwk_map),
-         {:ok, thumbprint} <- thumbprint(jwk),
-         {:ok, subject} <- check_subject(claims, thumbprint),
-         :ok <- check_issuer(claims, subject),
+         {:ok, binding} <- resolve_subject_binding(header, unverified_claims, alg),
+         {:ok, claims} <- verify_signature(id_token, alg, binding.jwk),
+         :ok <- check_verified_subject_binding(header, claims, binding, alg),
+         {:ok, subject} <- check_subject(claims, binding),
+         :ok <- check_issuer(claims, subject, binding.type),
          :ok <- check_audience(claims, audience),
          :ok <- check_nonce(claims, nonce),
          :ok <- check_temporal(claims, NumericDate.now(opts)) do
-      {:ok, %{subject: subject, jwk: jwk_map}}
+      {:ok, %{subject: subject, jwk: binding.jwk_map}}
     end
   end
 
@@ -150,10 +162,49 @@ defmodule Attesto.Siop do
 
   defp check_alg(_header, _opts), do: {:error, :invalid_alg}
 
-  defp extract_sub_jwk(header, claims, alg) do
+  defp resolve_subject_binding(header, %{"sub" => "did:" <> _rest = subject} = claims, alg) do
+    with :ok <- reject_did_sub_jwk(header, claims),
+         {:ok, verification_method} <- local_did_verification_method(subject),
+         :ok <- check_did_kid(header, verification_method),
+         {:ok, jwk_map} <- resolve_local_did(subject),
+         {:ok, jwk} <- verification_jwk(jwk_map, alg, :invalid_subject) do
+      {:ok, %{type: :did, subject: subject, jwk_map: jwk_map, jwk: jwk}}
+    end
+  end
+
+  defp resolve_subject_binding(header, claims, alg) do
     with {:ok, jwk_map} <- select_sub_jwk(header, claims),
          {:ok, jwk} <- verification_jwk(jwk_map, alg) do
-      {:ok, jwk_map, jwk}
+      {:ok,
+       %{
+         type: :jwk_thumbprint,
+         subject: Map.get(claims, "sub"),
+         jwk_map: jwk_map,
+         jwk: jwk
+       }}
+    end
+  end
+
+  defp reject_did_sub_jwk(header, claims) do
+    if Map.has_key?(header, "sub_jwk") or Map.has_key?(claims, "sub_jwk"),
+      do: {:error, :invalid_sub_jwk},
+      else: :ok
+  end
+
+  defp local_did_verification_method("did:jwk:" <> encoded = did) when encoded != "", do: {:ok, did <> "#0"}
+
+  defp local_did_verification_method("did:key:" <> multibase = did) when multibase != "",
+    do: {:ok, did <> "#" <> multibase}
+
+  defp local_did_verification_method(_subject), do: {:error, :invalid_subject}
+
+  defp check_did_kid(%{"kid" => expected}, expected), do: :ok
+  defp check_did_kid(_header, _expected), do: {:error, :invalid_subject}
+
+  defp resolve_local_did(subject) do
+    case Did.resolve(subject) do
+      {:ok, jwk_map} when is_map(jwk_map) -> {:ok, jwk_map}
+      _unsupported_or_invalid -> {:error, :invalid_subject}
     end
   end
 
@@ -179,29 +230,44 @@ defmodule Attesto.Siop do
   defp present_sub_jwk(jwk_map) when is_map(jwk_map) and map_size(jwk_map) > 0, do: {:ok, jwk_map}
   defp present_sub_jwk(_jwk_map), do: {:error, :invalid_sub_jwk}
 
-  defp verification_jwk(jwk_map, alg) do
+  defp verification_jwk(jwk_map, alg, error \\ :invalid_sub_jwk) do
     with {:ok, jwk} <- Key.verification_jwk(jwk_map, alg: alg),
          ^alg <- SigningAlg.validate_for_key!(alg, jwk) do
       {:ok, jwk}
     else
-      _other -> {:error, :invalid_sub_jwk}
+      _other -> {:error, error}
     end
   rescue
-    _ -> {:error, :invalid_sub_jwk}
+    _ -> {:error, error}
   catch
-    _, _ -> {:error, :invalid_sub_jwk}
+    _, _ -> {:error, error}
   end
 
   # The payload was inspected before signature verification solely to obtain
-  # the verification key. Re-select it from JOSE's verified claim map and
-  # require byte-for-byte map equality so parser differences cannot swap keys.
-  defp check_verified_sub_jwk(header, claims, used_jwk_map) do
-    case select_sub_jwk(header, claims) do
-      {:ok, ^used_jwk_map} -> :ok
-      {:ok, _other_jwk_map} -> {:error, :invalid_sub_jwk}
-      {:error, reason} -> {:error, reason}
+  # the verification key. Resolve the subject binding again from JOSE's
+  # verified claim map and require exact equality so parser differences cannot
+  # swap either an embedded key or a DID subject.
+  defp check_verified_subject_binding(header, claims, used, alg) do
+    case resolve_subject_binding(header, claims, alg) do
+      {:ok,
+       %{
+         type: used_type,
+         subject: used_subject,
+         jwk_map: used_jwk_map
+       }}
+      when used_type == used.type and used_subject == used.subject and used_jwk_map == used.jwk_map ->
+        :ok
+
+      {:ok, _other_binding} ->
+        {:error, binding_error(used.type)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp binding_error(:did), do: :invalid_subject
+  defp binding_error(:jwk_thumbprint), do: :invalid_sub_jwk
 
   defp verify_signature(id_token, alg, jwk) do
     JWS.verify_strict(id_token, [{nil, alg, jwk}],
@@ -223,17 +289,31 @@ defmodule Attesto.Siop do
 
   # ── Self-Issued ID Token claims ──────────────────────────────────────────
 
-  defp check_subject(%{"sub" => subject}, thumbprint) when is_binary(subject) and subject != "" do
+  defp check_subject(%{"sub" => subject}, %{type: :did, subject: subject}) when is_binary(subject) and subject != "",
+    do: {:ok, subject}
+
+  defp check_subject(claims, %{type: :jwk_thumbprint, jwk: jwk}) do
+    with {:ok, thumbprint} <- thumbprint(jwk) do
+      check_thumbprint_subject(claims, thumbprint)
+    end
+  end
+
+  defp check_subject(_claims, _binding), do: {:error, :invalid_subject}
+
+  defp check_thumbprint_subject(%{"sub" => subject}, thumbprint) when is_binary(subject) and subject != "" do
     if SecureCompare.equal?(subject, thumbprint),
       do: {:ok, subject},
       else: {:error, :invalid_subject}
   end
 
-  defp check_subject(_claims, _thumbprint), do: {:error, :invalid_subject}
+  defp check_thumbprint_subject(_claims, _thumbprint), do: {:error, :invalid_subject}
 
-  defp check_issuer(%{"iss" => issuer}, subject) when issuer == @self_issued_issuer or issuer == subject, do: :ok
+  defp check_issuer(%{"iss" => subject}, subject, :did), do: :ok
 
-  defp check_issuer(_claims, _subject), do: {:error, :invalid_issuer}
+  defp check_issuer(%{"iss" => issuer}, subject, :jwk_thumbprint)
+       when issuer == @self_issued_issuer or issuer == subject, do: :ok
+
+  defp check_issuer(_claims, _subject, _type), do: {:error, :invalid_issuer}
 
   defp check_audience(%{"aud" => audience}, expected) do
     if Claims.audience_matches?(audience, expected, :array),

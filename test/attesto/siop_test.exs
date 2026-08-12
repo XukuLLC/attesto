@@ -2,7 +2,11 @@ defmodule Attesto.SiopTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Attesto.{Siop, Thumbprint}
+
+  @base58_alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
   @audience "https://rp.example/client"
   @nonce "siop-request-nonce"
@@ -48,6 +52,155 @@ defmodule Attesto.SiopTest do
 
     assert {:ok, %{subject: context.subject, jwk: context.jwk}} ==
              Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "verifies a did:jwk subject through its fixed #0 verification method", context do
+    subject = did_jwk(context.jwk)
+    expected_jwk = context.jwk
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", subject)
+      |> Map.put("sub", subject)
+
+    token = sign(context.key, claims, %{"kid" => subject <> "#0"})
+
+    assert {:ok, %{subject: ^subject, jwk: ^expected_jwk}} =
+             Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "verifies a did:key subject through its fingerprint verification method", context do
+    subject = did_key(context.jwk)
+    fingerprint = String.replace_prefix(subject, "did:key:", "")
+    expected_jwk = context.jwk
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", subject)
+      |> Map.put("sub", subject)
+
+    token = sign(context.key, claims, %{"kid" => subject <> "#" <> fingerprint})
+
+    assert {:ok, %{subject: ^subject, jwk: ^expected_jwk}} =
+             Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "verifies an Ed25519 did:key subject", context do
+    key = JOSE.JWK.generate_key({:okp, :Ed25519})
+    jwk = public_map(key)
+    subject = did_key(jwk)
+    fingerprint = String.replace_prefix(subject, "did:key:", "")
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", subject)
+      |> Map.put("sub", subject)
+
+    token = sign(key, claims, %{"alg" => "EdDSA", "kid" => subject <> "#" <> fingerprint})
+
+    assert {:ok, %{subject: ^subject, jwk: ^jwk}} =
+             Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "DID subjects require their exact protected verification-method kid", context do
+    subject = did_jwk(context.jwk)
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", subject)
+      |> Map.put("sub", subject)
+
+    for header <- [%{}, %{"kid" => subject}, %{"kid" => subject <> "#other"}] do
+      token = sign(context.key, claims, header)
+
+      assert {:error, :invalid_subject} =
+               Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+    end
+  end
+
+  test "DID subjects reject sub_jwk in either the payload or protected header", context do
+    subject = did_jwk(context.jwk)
+    base_claims = context.claims |> Map.put("iss", subject) |> Map.put("sub", subject)
+    kid = subject <> "#0"
+
+    payload_token = sign(context.key, base_claims, %{"kid" => kid})
+
+    header_token =
+      context.key
+      |> sign(Map.delete(base_claims, "sub_jwk"), %{"kid" => kid, "sub_jwk" => context.jwk})
+
+    for token <- [payload_token, header_token] do
+      assert {:error, :invalid_sub_jwk} =
+               Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+    end
+  end
+
+  test "DID subjects require iss equal to sub", context do
+    subject = did_jwk(context.jwk)
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", @self_issued_issuer)
+      |> Map.put("sub", subject)
+
+    token = sign(context.key, claims, %{"kid" => subject <> "#0"})
+
+    assert {:error, :invalid_issuer} =
+             Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "DID subjects fail closed for unsupported methods and mismatched signing keys", context do
+    other = JOSE.JWK.generate_key({:ec, "P-256"})
+    subject = did_jwk(public_map(other))
+
+    claims =
+      context.claims
+      |> Map.delete("sub_jwk")
+      |> Map.put("iss", subject)
+      |> Map.put("sub", subject)
+
+    wrong_key_token = sign(context.key, claims, %{"kid" => subject <> "#0"})
+
+    unsupported_subject = "did:web:wallet.example"
+
+    unsupported_claims =
+      claims
+      |> Map.put("iss", unsupported_subject)
+      |> Map.put("sub", unsupported_subject)
+
+    unsupported_token = sign(context.key, unsupported_claims, %{"kid" => unsupported_subject <> "#key-0"})
+
+    assert {:error, :invalid_signature} =
+             Siop.verify(wrong_key_token, audience: @audience, nonce: @nonce, now: @now)
+
+    assert {:error, :invalid_subject} =
+             Siop.verify(unsupported_token, audience: @audience, nonce: @nonce, now: @now)
+  end
+
+  test "did:jwk enforces signature use, key operations, and algorithm metadata", context do
+    for contradictory_jwk <- [
+          Map.put(context.jwk, "use", "enc"),
+          Map.put(context.jwk, "key_ops", ["sign"]),
+          Map.put(context.jwk, "alg", "EdDSA")
+        ] do
+      subject = did_jwk(contradictory_jwk)
+
+      claims =
+        context.claims
+        |> Map.delete("sub_jwk")
+        |> Map.put("iss", subject)
+        |> Map.put("sub", subject)
+
+      token = sign(context.key, claims, %{"kid" => subject <> "#0"})
+
+      assert {:error, :invalid_subject} =
+               Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
+    end
   end
 
   test "accepts an all-string audience array containing the RP Client ID", context do
@@ -218,6 +371,37 @@ defmodule Attesto.SiopTest do
   defp public_map(key) do
     {_metadata, jwk_map} = JOSE.JWK.to_public_map(key)
     jwk_map
+  end
+
+  defp did_jwk(jwk), do: "did:jwk:" <> encode_json(jwk)
+  defp encode_json(value), do: value |> JSON.encode!() |> Base.url_encode64(padding: false)
+
+  defp did_key(%{"crv" => "Ed25519", "x" => x}) do
+    public_key = Base.url_decode64!(x, padding: false)
+    "did:key:z" <> encode_base58(<<0xED, 0x01>> <> public_key)
+  end
+
+  defp did_key(%{"crv" => "P-256", "x" => x, "y" => y}) do
+    x_bytes = Base.url_decode64!(x, padding: false)
+    y_bytes = Base.url_decode64!(y, padding: false)
+    prefix = if band(:binary.last(y_bytes), 1) == 0, do: 2, else: 3
+    "did:key:z" <> encode_base58(<<0x80, 0x24, prefix>> <> x_bytes)
+  end
+
+  defp encode_base58(bytes) do
+    zeroes = count_leading_zeroes(bytes, 0)
+    encoded = bytes |> :binary.decode_unsigned() |> encode_base58_integer("")
+    String.duplicate("1", zeroes) <> encoded
+  end
+
+  defp count_leading_zeroes(<<0, rest::binary>>, count), do: count_leading_zeroes(rest, count + 1)
+  defp count_leading_zeroes(_rest, count), do: count
+
+  defp encode_base58_integer(0, encoded), do: encoded
+
+  defp encode_base58_integer(number, encoded) do
+    character = binary_part(@base58_alphabet, rem(number, 58), 1)
+    encode_base58_integer(div(number, 58), character <> encoded)
   end
 
   defp sign(key, claims, header_overrides \\ %{}) do

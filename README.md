@@ -326,11 +326,14 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 
 **Self-issued identity & DID resolution**
 
-- `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against their embedded
-  holder JWK, RFC 7638 subject binding, RP Client ID, nonce, and temporal claims.
+- `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against an embedded
+  holder JWK or a locally resolved `did:jwk` / `did:key`, including protected
+  verification-method `kid`, subject binding, RP Client ID, nonce, and temporal
+  claims.
 - `Attesto.Did` — connection-free `did:key` (Ed25519 + P-256) and `did:jwk`
-  resolution to public JWKs, plus safe `did:web` parsing. HTTP, TLS, caching,
-  and DID-document key selection stay with the host-supplied resolver.
+  resolution to public JWKs, plus safe `did:web` parsing. For `did:web`, HTTP,
+  TLS, caching, and DID-document key selection stay with the host-supplied
+  resolver.
 
 **ISO mdoc / COSE** (optional `:cbor` dependency)
 

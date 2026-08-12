@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Attesto.Siop.verify/2` now supports SIOPv2 Decentralized Identifier Subject
+  Syntax for connection-free `did:jwk` and `did:key` subjects. Verification
+  requires the method-defined protected `kid`, rejects a simultaneous
+  `sub_jwk`, resolves the holder public key locally, enforces the JWK's
+  signature usage and algorithm metadata, verifies the signature, and requires
+  `iss == sub`. Network-backed and unsupported DID methods continue to fail
+  closed.
+
 ## [1.13.0] - 2026-08-11
 
 Hardening of the ID-JAG (`urn:ietf:params:oauth:grant-type:jwt-bearer`)
