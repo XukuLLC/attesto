@@ -67,6 +67,7 @@ defmodule Attesto.SigningAlg do
   Resolution order:
 
     * per-key metadata from `key_algs/0`, keyed by RFC 7638 `kid`
+    * the trusted JWK's `alg` member, when present
     * `signing_alg/0` for the current signing key only
     * inference from the JWK type/curve
   """
@@ -87,6 +88,7 @@ defmodule Attesto.SigningAlg do
 
     key_algs(keystore)
     |> Map.get(kid)
+    |> fallback_jwk_alg(jwk)
     |> fallback_signing_alg(keystore, opts)
     |> fallback_inferred_alg(jwk)
     |> validate_for_key!(jwk)
@@ -311,6 +313,14 @@ defmodule Attesto.SigningAlg do
   end
 
   defp fallback_signing_alg(alg, _keystore, _opts), do: alg
+
+  defp fallback_jwk_alg(nil, jwk) do
+    jwk
+    |> public_fields()
+    |> Map.get("alg")
+  end
+
+  defp fallback_jwk_alg(alg, _jwk), do: alg
 
   defp exports?(module, function, arity) do
     case Code.ensure_loaded(module) do

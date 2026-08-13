@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.15.0] - 2026-08-13
+
+### Added
+
+- RFC 8705 §2 client-certificate authentication primitives for both
+  `tls_client_auth` (all five registered DN/SAN identity forms) and
+  `self_signed_tls_client_auth` (exact registered `x5c` leaf matching).
+- `Attesto.Signer`, an additive JWS signing contract for HSM/KMS/enclave keys
+  whose private material cannot be exported. Existing PEM keystores retain the
+  same path; token, ID Token, JARM, signed introspection, JWT VC, SD-JWT, and
+  signed credential-metadata issuance can use a non-extractable signer.
+- `Attesto.Keystore.rotation_health/2` and optional
+  `verification_key_metadata/0` expiry metadata. Health reports whether the
+  current signing key is published, whether an overlap window is active, and
+  whether verification keys are expired or approaching expiry.
+
+### Security
+
+- External-signer output is verified locally against the advertised public
+  JWK and selected algorithm before a compact JWS is returned, catching wrong
+  KMS keys, message/digest mode mistakes, non-JOSE signature encodings, and
+  RSA-PSS signatures whose salt length is not the JOSE hash-output length.
+- An external signer's trusted public JWK `alg` member now participates in
+  signing-algorithm selection ahead of key-type inference; an RSA signer
+  advertising `PS256` cannot silently receive an `RS256` operation.
+- RFC 8705 certificate parsing is bounded to 1 MiB and registered identity
+  values to 4 KiB. Email SAN comparison preserves the potentially
+  case-sensitive local part while normalizing only the domain.
+- Keystore callback contracts are validated when `Attesto.Config` is built:
+  an extractable keystore must export `signing_pem/0`, while an external signer
+  must export both `signing_jwk/0` and `sign/2`. Misspelled or partial callback
+  implementations no longer wait until the first mint to fail.
+- Rotation health rejects malformed expiry metadata, marks metadata for an
+  unknown `kid` invalid, and distinguishes an expired active signing key
+  (`:expired_signing_key`, invalid) from an expired overlap key (warning).
+
 ## [1.14.0] - 2026-08-12
 
 SIOPv2 DID Subject Syntax support for connection-free DID methods. Self-issued

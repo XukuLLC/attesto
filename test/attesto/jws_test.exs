@@ -2,7 +2,7 @@ defmodule Attesto.JWSTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
-  alias __MODULE__.CurrentKeystore
+  alias __MODULE__.{CurrentKeystore, ExternalSigner}
   alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.Test.Factory
@@ -70,6 +70,72 @@ defmodule Attesto.JWSTest do
         end
 
         assert CurrentKeystore.signing_pem_calls() == 1
+      end
+    end
+
+    test "signs through a non-extractable Signer without reading private PEM material" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+      ExternalSigner.install(private_pem, public_pem)
+
+      jwt = JWS.sign_current(ExternalSigner, %{"sub" => "hsm-backed"}, typ: "JWT")
+
+      assert protected_header(jwt) == %{
+               "alg" => "RS256",
+               "kid" => Key.kid(public_pem),
+               "typ" => "JWT"
+             }
+
+      assert {true, %JOSE.JWT{fields: %{"sub" => "hsm-backed"}}, %JOSE.JWS{}} =
+               JOSE.JWT.verify_strict(Key.jwk(public_pem), ["RS256"], jwt)
+
+      assert ExternalSigner.sign_calls() == 1
+      refute function_exported?(ExternalSigner, :signing_pem, 0)
+    end
+
+    test "rejects an external signer that returns private key material" do
+      private_jwk = JOSE.JWK.generate_key({:rsa, 2048})
+      ExternalSigner.install_signing_jwk(private_jwk)
+
+      assert_raise ArgumentError, ~r/invalid signer public JWK/, fn ->
+        Attesto.Signer.signing_jwk!(ExternalSigner)
+      end
+    end
+
+    test "rejects a signature produced by a different remote key" do
+      signing_private = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_pem() |> elem(1)
+      advertised_public = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_public() |> JOSE.JWK.to_pem() |> elem(1)
+      ExternalSigner.install(signing_private, advertised_public)
+
+      assert_raise RuntimeError, ~r/does not match its public JWK and alg/, fn ->
+        JWS.sign_current(ExternalSigner, %{"sub" => "wrong-key"}, typ: "JWT")
+      end
+    end
+
+    test "honors an external public JWK alg instead of silently falling back to key-type inference" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+      ExternalSigner.install(private_pem, public_pem)
+
+      {_kind, public_map} = public_pem |> Key.jwk() |> JOSE.JWK.to_public_map()
+      ExternalSigner.install_signing_jwk(Map.put(public_map, "alg", "PS256"))
+
+      jwt = JWS.sign_current(ExternalSigner, %{"sub" => "pss-hsm"}, typ: "JWT")
+      assert protected_header(jwt)["alg"] == "PS256"
+      assert {true, %JOSE.JWT{}, %JOSE.JWS{}} = JOSE.JWT.verify_strict(Key.jwk(public_pem), ["PS256"], jwt)
+    end
+
+    test "rejects an external PS256 signature with a non-JOSE salt length" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+      ExternalSigner.install(private_pem, public_pem)
+      ExternalSigner.install_pss_saltlen(222)
+
+      {_kind, public_map} = public_pem |> Key.jwk() |> JOSE.JWK.to_public_map()
+      ExternalSigner.install_signing_jwk(Map.put(public_map, "alg", "PS256"))
+
+      assert_raise RuntimeError, ~r/does not match its public JWK and alg/, fn ->
+        JWS.sign_current(ExternalSigner, %{"sub" => "bad-pss-salt"}, typ: "JWT")
       end
     end
   end
@@ -248,5 +314,66 @@ defmodule Attesto.JWSTest do
 
     @impl true
     def verification_pems, do: [Process.get({__MODULE__, :pem})]
+  end
+
+  defmodule ExternalSigner do
+    @moduledoc false
+    @behaviour Attesto.Keystore
+    @behaviour Attesto.Signer
+
+    def install(private_pem, public_pem) do
+      Process.put({__MODULE__, :private_pem}, private_pem)
+      Process.put({__MODULE__, :public_pem}, public_pem)
+      Process.put({__MODULE__, :sign_calls}, 0)
+    end
+
+    def sign_calls, do: Process.get({__MODULE__, :sign_calls}, 0)
+
+    def install_signing_jwk(jwk), do: Process.put({__MODULE__, :signing_jwk}, jwk)
+    def install_pss_saltlen(length), do: Process.put({__MODULE__, :pss_saltlen}, length)
+
+    @impl Attesto.Signer
+    def signing_jwk do
+      case Process.get({__MODULE__, :signing_jwk}) do
+        nil ->
+          {_kind, public_map} = Process.get({__MODULE__, :public_pem}) |> Key.jwk() |> JOSE.JWK.to_public_map()
+          public_map
+
+        jwk ->
+          jwk
+      end
+    end
+
+    @impl Attesto.Signer
+    def sign(signing_input, "RS256") do
+      Process.put({__MODULE__, :sign_calls}, sign_calls() + 1)
+
+      private_key =
+        Process.get({__MODULE__, :private_pem})
+        |> Key.signing_jwk()
+        |> JOSE.JWK.to_key()
+        |> elem(1)
+
+      {:ok, :public_key.sign(signing_input, :sha256, private_key)}
+    end
+
+    def sign(signing_input, "PS256") do
+      Process.put({__MODULE__, :sign_calls}, sign_calls() + 1)
+
+      private_key =
+        Process.get({__MODULE__, :private_pem})
+        |> Key.signing_jwk()
+        |> JOSE.JWK.to_key()
+        |> elem(1)
+
+      {:ok,
+       :public_key.sign(signing_input, :sha256, private_key,
+         rsa_padding: :rsa_pkcs1_pss_padding,
+         rsa_pss_saltlen: Process.get({__MODULE__, :pss_saltlen}, 32)
+       )}
+    end
+
+    @impl Attesto.Keystore
+    def verification_pems, do: [Process.get({__MODULE__, :public_pem})]
   end
 end

@@ -6,13 +6,17 @@ defmodule Attesto.ConfigTest do
   alias Attesto.Config
   alias Attesto.PrincipalKind
 
-  # A keystore module that exists at compile time. Config.new/1 only checks
-  # that :keystore is a module (an atom); it never calls into it, so no app
-  # env and no real signing material is required for these pure tests.
+  # A keystore module that exists at compile time. Config.new/1 validates its
+  # callback contract but does not read signing material.
   defmodule DummyKeystore do
     @moduledoc false
     def signing_pem, do: "unused"
     def verification_pems, do: ["unused"]
+  end
+
+  defmodule MissingSignerKeystore do
+    @moduledoc false
+    def verification_pems, do: []
   end
 
   defp client_kind do
@@ -90,6 +94,12 @@ defmodule Attesto.ConfigTest do
       assert Config.credential_offer_store(config) == Attesto.CredentialOfferStore.ETS
       assert Config.pre_authorized_code_store(config) == Attesto.PreAuthorizedCodeStore.ETS
       assert Config.presentation_session_store(config) == Attesto.PresentationSessionStore.ETS
+    end
+  end
+
+  test "rejects a keystore missing both extractable and external signing callbacks" do
+    assert_raise ArgumentError, ~r/must export signing_pem\/0 or both signing_jwk\/0 and sign\/2/, fn ->
+      Config.new(base_opts(keystore: MissingSignerKeystore))
     end
   end
 

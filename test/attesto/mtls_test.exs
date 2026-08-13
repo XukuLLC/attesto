@@ -15,10 +15,128 @@ defmodule Attesto.MTLSTest do
     der
   end
 
+  defp gen_san_cert_der do
+    subject_alt_name =
+      {:Extension, {2, 5, 29, 17}, false,
+       [
+         {:dNSName, ~c"client.example.com"},
+         {:uniformResourceIdentifier, ~c"spiffe://example.com/client/123"},
+         {:iPAddress, <<127, 0, 0, 1>>},
+         {:rfc822Name, ~c"client@example.com"}
+       ]}
+
+    :public_key.pkix_test_data(%{
+      root: [],
+      intermediates: [],
+      peer: [extensions: [subject_alt_name]]
+    })[:cert]
+  end
+
   defp sha256_b64url(bytes) do
     :sha256
     |> :crypto.hash(bytes)
     |> Base.url_encode64(padding: false)
+  end
+
+  describe "RFC 8705 section 2 client authentication" do
+    test "extracts the registered PKI subject alternatives" do
+      der = gen_san_cert_der()
+
+      assert {:ok, identities} = MTLS.certificate_identities(der)
+      assert identities.san_dns == ["client.example.com"]
+      assert identities.san_uri == ["spiffe://example.com/client/123"]
+      assert identities.san_ip == ["127.0.0.1"]
+      assert identities.san_email == ["client@example.com"]
+      assert is_binary(identities.subject_dn) and identities.subject_dn != ""
+    end
+
+    test "tls_client_auth accepts each RFC 8705 PKI identity type" do
+      der = gen_san_cert_der()
+      {:ok, identities} = MTLS.certificate_identities(der)
+
+      for metadata <- [
+            %{"tls_client_auth_subject_dn" => identities.subject_dn},
+            %{"tls_client_auth_san_dns" => "CLIENT.EXAMPLE.COM"},
+            %{"tls_client_auth_san_uri" => "spiffe://example.com/client/123"},
+            %{"tls_client_auth_san_ip" => "127.0.0.1"},
+            %{"tls_client_auth_san_email" => "client@EXAMPLE.COM"}
+          ] do
+        assert :ok = MTLS.authenticate_client(der, :tls_client_auth, metadata)
+      end
+    end
+
+    test "email SAN comparison preserves the potentially case-sensitive local part" do
+      der = gen_san_cert_der()
+
+      assert {:error, :certificate_mismatch} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{
+                 "tls_client_auth_san_email" => "CLIENT@example.com"
+               })
+    end
+
+    test "tls_client_auth requires exactly one registered identity and rejects mismatches" do
+      der = gen_san_cert_der()
+
+      assert {:error, :invalid_client_metadata} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{})
+
+      assert {:error, :invalid_client_metadata} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{
+                 "tls_client_auth_san_dns" => "client.example.com",
+                 "tls_client_auth_san_uri" => "spiffe://example.com/client/123"
+               })
+
+      assert {:error, :certificate_mismatch} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{
+                 "tls_client_auth_san_dns" => "attacker.example.com"
+               })
+    end
+
+    test "self_signed_tls_client_auth matches the exact registered x5c leaf" do
+      der = gen_san_cert_der()
+      other = gen_cert_der("other-client")
+      registered = %{"keys" => [%{"kty" => "EC", "x5c" => [Base.encode64(der)]}]}
+
+      assert :ok =
+               MTLS.authenticate_client(der, :self_signed_tls_client_auth, %{
+                 "jwks" => registered
+               })
+
+      assert {:error, :certificate_mismatch} =
+               MTLS.authenticate_client(other, :self_signed_tls_client_auth, %{
+                 "jwks" => registered
+               })
+    end
+
+    test "self-signed method refuses unresolved jwks_uri and malformed certificates" do
+      der = gen_san_cert_der()
+
+      assert {:error, :invalid_client_metadata} =
+               MTLS.authenticate_client(der, :self_signed_tls_client_auth, %{
+                 "jwks_uri" => "https://client.example.com/jwks.json"
+               })
+
+      assert {:error, :invalid_certificate} =
+               MTLS.authenticate_client("not-a-cert", :tls_client_auth, %{
+                 "tls_client_auth_san_dns" => "client.example.com"
+               })
+    end
+
+    test "bounds forwarded certificate and registered identity parsing" do
+      der = gen_san_cert_der()
+
+      assert {:error, :invalid_certificate} =
+               MTLS.authenticate_client(
+                 :binary.copy(<<0>>, 1_048_577),
+                 :tls_client_auth,
+                 %{"tls_client_auth_san_dns" => "client.example.com"}
+               )
+
+      assert {:error, :invalid_client_metadata} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{
+                 "tls_client_auth_subject_dn" => String.duplicate("a", 4_097)
+               })
+    end
   end
 
   # -----------------------------------------------------------------

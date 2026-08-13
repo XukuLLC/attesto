@@ -1,7 +1,7 @@
 defmodule Attesto.JWS do
   @moduledoc false
 
-  alias Attesto.{Key, SigningAlg, Thumbprint}
+  alias Attesto.{Key, Signer, SigningAlg, Thumbprint}
 
   @type compact_segments :: %{
           protected_segment: binary(),
@@ -12,7 +12,8 @@ defmodule Attesto.JWS do
   @type verification_candidate :: {term(), binary(), JOSE.JWK.t()}
 
   @type signing_context :: %{
-          pem: binary(),
+          optional(:pem) => binary(),
+          signer: module(),
           jwk: JOSE.JWK.t(),
           alg: binary(),
           kid: binary()
@@ -383,21 +384,30 @@ defmodule Attesto.JWS do
   @doc false
   @spec current_signing_context(module()) :: signing_context()
   def current_signing_context(keystore) when is_atom(keystore) do
-    pem = keystore.signing_pem()
-    jwk = Key.signing_jwk(pem)
+    {jwk, source} = current_signing_jwk(keystore)
     alg = SigningAlg.for_jwk(keystore, jwk, signing?: true)
     {:ok, kid} = Thumbprint.of_jwk(jwk)
 
-    %{pem: pem, jwk: jwk, alg: alg, kid: kid}
+    Map.merge(%{signer: keystore, jwk: jwk, alg: alg, kid: kid}, source)
+  end
+
+  defp current_signing_jwk(keystore) do
+    if Signer.external?(keystore) do
+      {Signer.signing_jwk!(keystore), %{}}
+    else
+      pem = keystore.signing_pem()
+      {Key.signing_jwk(pem), %{pem: pem}}
+    end
   end
 
   @doc """
   Sign claims with a keystore's current signing key.
 
-  The key is loaded exactly once from the PEM returned by signing_pem/0.
-  alg and kid are derived from that same parsed key, while typ and
-  extra_protected carry caller-specific protected-header members. The helper
-  owns alg, kid, and typ; collisions in extra_protected raise ArgumentError.
+  The current key is loaded exactly once, from either the non-extractable
+  signer contract or the PEM returned by `signing_pem/0`. `alg` and `kid` are
+  derived from that same public key, while `typ` and `extra_protected` carry
+  caller-specific protected-header members. The helper owns `alg`, `kid`, and
+  `typ`; collisions in `extra_protected` raise `ArgumentError`.
 
   signing_context is an internal escape hatch for a caller that already needs
   the current parsed key to construct key-dependent claims. It must be a
@@ -412,10 +422,14 @@ defmodule Attesto.JWS do
     sign_with_context(context, claims, opts)
   end
 
-  defp sign_with_context(%{jwk: %JOSE.JWK{}, alg: alg, kid: kid} = context, claims, opts)
+  defp sign_with_context(%{jwk: %JOSE.JWK{}, alg: alg, kid: kid, signer: signer} = context, claims, opts)
        when is_map(claims) and is_list(opts) do
     header = current_header(alg, kid, opts)
-    sign_compact_with_jwk(context.jwk, header, claims)
+
+    case context do
+      %{pem: pem} when is_binary(pem) -> sign_compact_with_jwk(context.jwk, header, claims)
+      _ -> sign_compact_with_signer(signer, context.jwk, header, claims, alg)
+    end
   end
 
   defp sign_with_context(_context, _claims, _opts),
@@ -468,6 +482,39 @@ defmodule Attesto.JWS do
     case alg do
       "PS" <> _ -> sign_ps_compact(jwk, header, payload, alg)
       _ -> sign_jose_compact(jwk, header, payload)
+    end
+  end
+
+  defp sign_compact_with_signer(signer, public_jwk, header, claims, alg) do
+    encoded_header = encode_segment(header)
+    encoded_payload = claims |> JSON.encode!() |> encode64()
+    signing_input = encoded_header <> "." <> encoded_payload
+    signature = Signer.sign!(signer, signing_input, alg)
+    compact = signing_input <> "." <> encode64(signature)
+    verify_external_signature!(public_jwk, alg, signing_input, signature, compact)
+  end
+
+  defp verify_external_signature!(public_jwk, "PS" <> _ = alg, signing_input, signature, compact) do
+    public_key = public_jwk |> JOSE.JWK.to_key() |> elem(1)
+
+    valid? =
+      try do
+        :public_key.verify(signing_input, hash_alg(alg), signature, public_key, pss_opts(alg))
+      rescue
+        _error -> false
+      end
+
+    if valid? do
+      compact
+    else
+      raise RuntimeError, "external signer returned a signature that does not match its public JWK and alg"
+    end
+  end
+
+  defp verify_external_signature!(public_jwk, alg, _signing_input, _signature, compact) do
+    case JOSE.JWS.verify_strict(public_jwk, [alg], compact) do
+      {true, _payload, %JOSE.JWS{}} -> compact
+      _other -> raise RuntimeError, "external signer returned a signature that does not match its public JWK and alg"
     end
   end
 

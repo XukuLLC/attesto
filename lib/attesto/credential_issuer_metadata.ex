@@ -97,14 +97,12 @@ defmodule Attesto.CredentialIssuerMetadata do
   key lookup. The claims are the document's members plus `iss`/`sub` (the
   Credential Issuer Identifier) and `iat`.
 
-  `metadata` is a document from `build/1`. Required option `:pem` is the issuer
-  signing key; optional `:now` overrides the `iat` clock (unix seconds).
+  `metadata` is a document from `build/1`. Exactly one of `:pem` or `:keystore`
+  is required; optional `:now` overrides the `iat` clock (unix seconds).
   """
   @spec signed(%{required(String.t()) => term()}, keyword()) :: String.t()
   def signed(metadata, opts) when is_map(metadata) and is_list(opts) do
-    pem = Keyword.fetch!(opts, :pem)
-    jwk = Key.signing_jwk(pem)
-    alg = SigningAlg.infer(jwk)
+    {jwk, signing_source} = metadata_signing_source!(opts)
     {_modules, public_jwk} = JOSE.JWK.to_public_map(jwk)
     now = Keyword.get(opts, :now, System.system_time(:second))
     issuer = Map.get(metadata, "credential_issuer")
@@ -115,6 +113,37 @@ defmodule Attesto.CredentialIssuerMetadata do
       |> Map.put("sub", issuer)
       |> Map.put("iat", now)
 
+    sign_metadata(signing_source, public_jwk, claims)
+  end
+
+  defp metadata_signing_source!(opts) do
+    case {Keyword.get(opts, :keystore), Keyword.get(opts, :pem)} do
+      {keystore, nil} when is_atom(keystore) and not is_nil(keystore) ->
+        context = JWS.current_signing_context(keystore)
+        {context.jwk, {:keystore, keystore, context}}
+
+      {nil, pem} when is_binary(pem) and pem != "" ->
+        {Key.signing_jwk(pem), {:pem, pem}}
+
+      {nil, nil} ->
+        raise ArgumentError, "exactly one of :keystore or :pem is required"
+
+      {_keystore, _pem} ->
+        raise ArgumentError, "exactly one of :keystore or :pem is required"
+    end
+  end
+
+  defp sign_metadata({:keystore, keystore, context}, public_jwk, claims) do
+    JWS.sign_current(keystore, claims,
+      signing_context: context,
+      typ: @signed_metadata_typ,
+      extra_protected: %{"jwk" => public_jwk}
+    )
+  end
+
+  defp sign_metadata({:pem, pem}, public_jwk, claims) do
+    jwk = Key.signing_jwk(pem)
+    alg = SigningAlg.infer(jwk)
     JWS.sign_compact(pem, %{"alg" => alg, "typ" => @signed_metadata_typ, "jwk" => public_jwk}, claims)
   end
 

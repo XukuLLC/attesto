@@ -13,7 +13,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "1.14.0"
+  @version "1.15.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -145,7 +145,7 @@ defmodule Attesto.MixProject do
         "Sender-constraint": [Attesto.DPoP, ReplayCache, Attesto.MTLS],
         Scopes: [Attesto.Scope],
         Metadata: [Attesto.JWKS, Attesto.Discovery],
-        Keys: [Attesto.Keystore, Static, Attesto.Key, Attesto.Did],
+        Keys: [Attesto.Keystore, Attesto.Signer, Static, Attesto.Key, Attesto.Did],
         Observability: [Attesto.Telemetry],
         Shared: [
           Attesto.Thumbprint,

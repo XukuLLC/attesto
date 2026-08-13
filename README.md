@@ -171,6 +171,24 @@ config :attesto, Attesto.Keystore.Static,
   signing_pem: System.fetch_env!("OAUTH_SIGNING_PRIVATE_KEY_PEM")
 ```
 
+For non-extractable custody, implement `Attesto.Signer` on the keystore module:
+`signing_jwk/0` returns only the public JWK and `sign/2` delegates the encoded
+JWS signing input to the HSM/KMS. Keep `verification_pems/0` public-only for
+verification and JWKS publication; `signing_pem/0` may be omitted entirely.
+Existing PEM keystores need no changes.
+
+Rotation can be inspected without minting a probe token:
+
+```elixir
+health = Attesto.Keystore.rotation_health(MyApp.Keystore)
+# %{status: :healthy, overlap?: true, signing_kid: "...", keys: [...]}
+```
+
+An optional `verification_key_metadata/0` callback keyed by `kid` adds
+`:not_after` values. An expired current signer makes health invalid; expired
+overlap keys warn. Unknown metadata keys are invalid rather than silently
+ignored, and malformed keys or values raise as configuration errors.
+
 ### Mint and verify a token
 
 ```elixir
@@ -534,7 +552,7 @@ constraint.
 
 ## Status
 
-A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, mTLS certificate-bound tokens, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.5`.
+A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, RFC 8705 mTLS client authentication and certificate-bound tokens, extractable and non-extractable signing, rotation health, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.5`.
 
 ## Development
 

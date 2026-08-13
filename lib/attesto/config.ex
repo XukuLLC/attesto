@@ -219,7 +219,7 @@ defmodule Attesto.Config do
     end
   end
 
-  defp validate_keystore!(module) when is_atom(module) and not is_nil(module), do: :ok
+  defp validate_keystore!(module) when is_atom(module) and not is_nil(module), do: Attesto.Keystore.validate!(module)
 
   defp validate_keystore!(other),
     do: raise(ArgumentError, "Attesto.Config :keystore must be a module; got #{inspect(other)}")

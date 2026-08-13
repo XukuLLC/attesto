@@ -129,7 +129,8 @@ defmodule Attesto.SdJwt do
     * `:disclosable` - the list of top-level claim names to hide behind `_sd`
       digests (each becomes a Disclosure). Every other claim is signed in the
       clear. Defaults to `[]` (a plain, fully-visible JWT with an empty `_sd`).
-    * `:pem` - the issuer signing key (PEM). REQUIRED.
+    * exactly one of `:pem` (legacy extractable private key) or `:keystore`
+      (an `Attesto.Keystore` that may also implement `Attesto.Signer`).
     * `:alg` - the JWS algorithm; inferred from the key when omitted.
     * `:typ` - the JOSE `typ` header (e.g. `"vc+sd-jwt"`); omitted when nil.
     * `:kid` - the JOSE `kid` header; omitted when nil.
@@ -141,7 +142,6 @@ defmodule Attesto.SdJwt do
   """
   @spec issue(map(), keyword()) :: String.t()
   def issue(claims, opts) when is_map(claims) and is_list(opts) do
-    pem = Keyword.fetch!(opts, :pem)
     sd_alg = Keyword.get(opts, :sd_alg, @default_sd_alg)
     disclosable = Keyword.get(opts, :disclosable, [])
 
@@ -167,8 +167,7 @@ defmodule Attesto.SdJwt do
       |> Map.put("_sd", Enum.sort(digests))
       |> Map.put("_sd_alg", sd_alg)
 
-    header = build_header(opts)
-    jwt = Attesto.JWS.sign_compact(pem, header, payload)
+    jwt = sign_issuer_jwt(payload, opts)
 
     Enum.join([jwt | disclosures] ++ [""], @separator)
   end
@@ -569,6 +568,33 @@ defmodule Attesto.SdJwt do
     |> MapParams.put_optional("typ", Keyword.get(opts, :typ))
     |> MapParams.put_optional("kid", Keyword.get(opts, :kid))
     |> MapParams.put_optional("x5c", x5c_header(Keyword.get(opts, :x5c)))
+  end
+
+  defp sign_issuer_jwt(payload, opts) do
+    case {Keyword.get(opts, :keystore), Keyword.get(opts, :pem)} do
+      {keystore, nil} when is_atom(keystore) and not is_nil(keystore) ->
+        if Keyword.has_key?(opts, :kid) do
+          raise ArgumentError, ":kid is derived from the current key when :keystore is used"
+        end
+
+        extra_protected =
+          %{}
+          |> MapParams.put_optional("x5c", x5c_header(Keyword.get(opts, :x5c)))
+
+        Attesto.JWS.sign_current(keystore, payload,
+          typ: Keyword.get(opts, :typ),
+          extra_protected: extra_protected
+        )
+
+      {nil, pem} when is_binary(pem) and pem != "" ->
+        Attesto.JWS.sign_compact(pem, build_header(opts), payload)
+
+      {nil, nil} ->
+        raise ArgumentError, "exactly one of :keystore or :pem is required"
+
+      {_keystore, _pem} ->
+        raise ArgumentError, "exactly one of :keystore or :pem is required"
+    end
   end
 
   # The issuer X.509 certificate chain (RFC 7515 §4.1.6), a non-empty list of

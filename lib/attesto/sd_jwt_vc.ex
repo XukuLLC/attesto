@@ -123,14 +123,33 @@ defmodule Attesto.SdJwtVc do
     # the subject claims may be selectively disclosed.
     claims = Map.merge(subject_claims, registered)
 
-    SdJwt.issue(claims,
-      pem: Keyword.fetch!(opts, :pem),
-      disclosable: disclosable,
-      typ: issue_typ!(Keyword.get(opts, :typ)),
-      kid: Keyword.get(opts, :kid),
-      x5c: Keyword.get(opts, :x5c),
-      sd_alg: Keyword.get(opts, :sd_alg, "sha-256")
-    )
+    signing_options =
+      [
+        disclosable: disclosable,
+        typ: issue_typ!(Keyword.get(opts, :typ)),
+        x5c: Keyword.get(opts, :x5c),
+        sd_alg: Keyword.get(opts, :sd_alg, "sha-256")
+      ]
+      |> put_signing_source(opts)
+      |> maybe_put_kid(opts)
+
+    SdJwt.issue(claims, signing_options)
+  end
+
+  defp put_signing_source(options, opts) do
+    case {Keyword.get(opts, :keystore), Keyword.get(opts, :pem)} do
+      {keystore, nil} when is_atom(keystore) and not is_nil(keystore) -> Keyword.put(options, :keystore, keystore)
+      {nil, pem} when is_binary(pem) and pem != "" -> Keyword.put(options, :pem, pem)
+      {nil, nil} -> raise ArgumentError, "exactly one of :keystore or :pem is required"
+      {_keystore, _pem} -> raise ArgumentError, "exactly one of :keystore or :pem is required"
+    end
+  end
+
+  defp maybe_put_kid(options, opts) do
+    case Keyword.fetch(opts, :kid) do
+      {:ok, kid} -> Keyword.put(options, :kid, kid)
+      :error -> options
+    end
   end
 
   # The JOSE `typ` header names the SD-JWT VC media type. OID4VCI moved the
