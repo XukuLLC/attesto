@@ -10,9 +10,16 @@
 
 A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://openid.net/developers/how-connect-works/) engine for Elixir APIs that need modern token security, with first-class support for sender-constrained access tokens: [DPoP](https://datatracker.ietf.org/doc/html/rfc9449) and mutual TLS. It also provides the conn-free protocol pieces for JAR, JARM, token introspection, and FAPI 2.0 Message Signing.
 
-Building an authenticated Model Context Protocol (MCP) server?
-[`attesto_mcp_server`](https://hex.pm/packages/attesto_mcp_server) is the
-authenticated MCP server option in the Attesto family.
+The Attesto family also includes:
+
+- [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix) — a Phoenix/Ecto
+  authorization-server layer over this package.
+- [`attesto_client`](https://hex.pm/packages/attesto_client) — OAuth 2.0, OIDC,
+  and FAPI client flows and verification.
+- [`attesto_mcp`](https://hex.pm/packages/attesto_mcp) — Plug/Phoenix helpers
+  for protecting MCP servers.
+- [`attesto_mcp_server`](https://hex.pm/packages/attesto_mcp_server) — an
+  authenticated MCP server with HTTP and stdio transports.
 
 ## Certification
 
