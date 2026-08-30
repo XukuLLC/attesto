@@ -10,6 +10,10 @@
 
 A vendor-neutral [OAuth 2.0](https://oauth.net/2/) / [OpenID Connect](https://openid.net/developers/how-connect-works/) engine for Elixir APIs that need modern token security, with first-class support for sender-constrained access tokens: [DPoP](https://datatracker.ietf.org/doc/html/rfc9449) and mutual TLS. It also provides the conn-free protocol pieces for JAR, JARM, token introspection, and FAPI 2.0 Message Signing.
 
+Building an authenticated Model Context Protocol (MCP) server?
+[`attesto_mcp_server`](https://hex.pm/packages/attesto_mcp_server) is the
+authenticated MCP server option in the Attesto family.
+
 ## Certification
 
 [![FAPI 2.0 Certified](https://img.shields.io/badge/FAPI_2.0-Certified-F78C40)](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)
@@ -83,10 +87,12 @@ If you want a batteries-included Phoenix authorization server, use
 [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix) on top of
 this package: endpoints, router helpers, and Ecto-backed stores wired together.
 
-To protect a Model Context Protocol (MCP) server as an OAuth resource server,
-use [`attesto_mcp`](https://github.com/XukuLLC/attesto_mcp): it reuses Attesto's
-token, DPoP, and scope checks as Plug modules and adds the MCP-facing
-`WWW-Authenticate` challenge and protected-resource metadata (RFC 9728).
+To add a complete authenticated Model Context Protocol (MCP) server, use
+[`attesto_mcp_server`](https://hex.pm/packages/attesto_mcp_server). It provides
+the server, Phoenix installer, OAuth discovery, and Attesto-backed enforcement.
+If you are building a custom MCP transport and only need the protected-resource
+boundary, use the lower-level
+[`attesto_mcp`](https://hex.pm/packages/attesto_mcp) package.
 
 ## Contents
 
