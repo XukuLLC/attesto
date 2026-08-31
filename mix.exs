@@ -71,7 +71,7 @@ defmodule Attesto.MixProject do
       # test - cross-language parity / contract tests drive a reference
       # joserfc/cryptography stack in-process via the erlang_python `:py`
       # NIF (see Attesto.Test.PythonBridge). Never shipped.
-      {:erlang_python, "~> 3.0", only: :test},
+      {:erlang_python, "~> 5.0", only: :test},
       # test - the parallel JavaScript reference (jose) drives a persistent
       # Node.js worker pool over Ports (see Attesto.Test.NodeBridge). Never shipped.
       {:nodejs, "~> 3.1", only: :test},
