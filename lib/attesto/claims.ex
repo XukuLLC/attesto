@@ -1,15 +1,73 @@
 defmodule Attesto.Claims do
   @moduledoc """
-  Shared mechanics for claim-key normalization and registered-claim merging.
+  Shared mechanics for portable persisted claims, claim-key normalization,
+  and registered-claim merging.
 
   Protocol modules retain ownership of their registered-claim policy. This
-  module only makes the map-key boundary explicit before a claim map is
-  serialized or merged.
+  module defines the lossless persisted-JSON boundary used by grant stores and
+  makes map-key handling explicit before claims are serialized or merged.
   """
 
   @type atom_policy :: :reject | :convert
   @type normalize_error :: {:invalid_key, term()} | :invalid_atom_policy
   @type audience_mode :: :scalar_only | :array | :single_element | :all_array_members
+  @max_exact_integer 9_007_199_254_740_991
+  @max_portable_json_depth 64
+
+  @doc """
+  Return whether `value` is a portable, lossless JSON object for persisted
+  grant context.
+
+  Objects must have string keys and values must be the lossless I-JSON subset:
+  strings, booleans, `nil`, exact-range integers, arrays, or nested objects.
+  Floats are rejected because JSONB can canonicalize them, and integers are
+  limited to `-(2^53)+1 .. (2^53)-1` (RFC 7493 §2.2). Strings must be valid
+  UTF-8 and cannot contain U+0000, which PostgreSQL JSONB cannot store.
+  Other Elixir atoms (including atom keys), tuples, structs, PIDs, references,
+  and other VM terms are rejected. This predicate deliberately does not
+  normalize or copy values, so callers can use it before persisting a context
+  that must round-trip unchanged. Composite nesting depth is capped at 64,
+  counting the root object as depth 1, to keep JSONB operations within
+  PostgreSQL's stack limits.
+  """
+  @spec portable_json_object?(term()) :: boolean()
+  def portable_json_object?(value) when is_map(value), do: portable_json_object?(value, 1)
+
+  def portable_json_object?(_value), do: false
+
+  defp portable_json_value?(nil, _depth), do: true
+  defp portable_json_value?(value, _depth) when is_boolean(value), do: true
+
+  defp portable_json_value?(value, _depth) when is_integer(value),
+    do: value >= -@max_exact_integer and value <= @max_exact_integer
+
+  defp portable_json_value?(value, _depth) when is_float(value), do: false
+  defp portable_json_value?(value, _depth) when is_binary(value), do: portable_json_string?(value)
+  defp portable_json_value?(value, depth) when is_list(value), do: portable_json_array?(value, depth + 1)
+  defp portable_json_value?(value, depth) when is_map(value), do: portable_json_object?(value, depth + 1)
+  defp portable_json_value?(_value, _depth), do: false
+
+  defp portable_json_string?(value) do
+    is_binary(value) and String.valid?(value) and not String.contains?(value, <<0>>)
+  end
+
+  defp portable_json_array?(value, depth) when is_list(value) and depth <= @max_portable_json_depth,
+    do: portable_json_array_tail?(value, depth)
+
+  defp portable_json_array?(_value, _depth), do: false
+
+  defp portable_json_array_tail?([], _depth), do: true
+
+  defp portable_json_array_tail?([head | tail], depth),
+    do: portable_json_value?(head, depth) and portable_json_array_tail?(tail, depth)
+
+  defp portable_json_array_tail?(_improper_tail, _depth), do: false
+
+  defp portable_json_object?(value, depth) when is_map(value) and depth <= @max_portable_json_depth do
+    Enum.all?(value, fn {key, member} -> portable_json_string?(key) and portable_json_value?(member, depth) end)
+  end
+
+  defp portable_json_object?(_value, _depth), do: false
 
   @doc """
   Normalize the keys in `map` to JSON member-name binaries.

@@ -27,8 +27,8 @@ defmodule Attesto.DeviceCode do
   same fail-closed discipline `Attesto.ResourceIndicator.validate/1` applies.
   """
 
+  alias Attesto.{Claims, NumericDate, Scope, Secret, Thumbprint}
   alias Attesto.DeviceCode.Grant
-  alias Attesto.{NumericDate, Scope, Secret, Thumbprint}
 
   # RFC 8628 §6.1: a base-20 alphabet with no vowels (no accidental words) and no
   # visually ambiguous characters (0/O, 1/I/L). 20^8 ≈ 2.56e10 ≈ 34.6 bits.
@@ -246,8 +246,9 @@ defmodule Attesto.DeviceCode do
   Approve a pending device code from the verification page (RFC 8628 §3.3),
   binding the resolved resource owner.
 
-  `approval` carries `:subject` (required), and the granted `:scope` /
-  `:claims`. Atomic `pending` → `approved`. Returns `:ok`, or `{:error, reason}`
+  `approval` carries `:subject` (required), the granted `:scope`, and a
+  lossless, string-keyed I-JSON `:claims` object. Persisted claim numbers are
+  exact-range integers, not floats. Atomic `pending` → `approved`. Returns `:ok`, or `{:error, reason}`
   (`:not_found` / `:already_decided` / `:expired` / `:invalid_user_code` /
   `:invalid_subject` / `:invalid_scope` / `:invalid_claims`). A granted scope
   must be a subset of the scope bound to the device code.
@@ -431,7 +432,7 @@ defmodule Attesto.DeviceCode do
 
     cond do
       not valid_scope_list?(scope) -> {:error, :invalid_scope}
-      not is_map(claims) -> {:error, :invalid_claims}
+      not Claims.portable_json_object?(claims) -> {:error, :invalid_claims}
       true -> {:ok, %{subject: approval.subject, granted_scope: scope, granted_claims: claims}}
     end
   end
@@ -549,7 +550,7 @@ defmodule Attesto.DeviceCode do
   defp valid_device_optional_fields?(record) do
     valid_optional_field?(record, :subject, &valid_optional_binary?/1) and
       valid_optional_field?(record, :granted_scope, &valid_optional_string_list?/1) and
-      valid_optional_field?(record, :granted_claims, &valid_optional_map?/1) and
+      valid_optional_field?(record, :granted_claims, &valid_optional_json_object?/1) and
       valid_optional_field?(record, :last_polled_at, &valid_optional_non_negative_integer?/1)
   end
 
@@ -558,7 +559,7 @@ defmodule Attesto.DeviceCode do
       %{subject: subject, granted_scope: granted_scope, granted_claims: granted_claims} ->
         is_binary(subject) and subject != "" and valid_scope_list?(granted_scope) and
           MapSet.subset?(MapSet.new(granted_scope), MapSet.new(record.data.scope)) and
-          is_map(granted_claims)
+          Claims.portable_json_object?(granted_claims)
 
       _missing_decision_fields ->
         false
@@ -661,8 +662,8 @@ defmodule Attesto.DeviceCode do
   defp valid_optional_binary?(value), do: is_binary(value)
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
-  defp valid_optional_map?(nil), do: true
-  defp valid_optional_map?(value), do: is_map(value)
+  defp valid_optional_json_object?(nil), do: true
+  defp valid_optional_json_object?(value), do: Claims.portable_json_object?(value)
   defp valid_optional_non_negative_integer?(nil), do: true
   defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
 

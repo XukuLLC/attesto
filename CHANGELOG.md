@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-08-30
+## [2.0.0] - 2026-08-31
 
 ### Breaking
 
@@ -45,6 +45,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Device user codes now accept only lengths 8..64 (the default remains 8).
   The same bound applies to generation and normalization options, so custom
   verification pages should preserve the configured length when normalizing.
+- Authorization-code and refresh-token context claims, plus device-code and
+  CIBA approval claims, must now be portable JSON objects: recursively
+  string-keyed, valid UTF-8 without U+0000, proper arrays, and I-JSON exact-range
+  integers only (`-(2^53)+1 .. (2^53)-1`). Floats, out-of-range integers, and
+  other VM terms are rejected as `:invalid_claims`; composite nesting is capped
+  at 64. This portable persisted-JSON subset lets JSON-backed stores preserve
+  the canonical context without key conversion or value loss.
 - Explicit policy and lifetime options must now carry their documented type;
   omit an option to use its default instead of passing `nil`. This applies to
   client-assertion `:enforce_fapi_alg_policy` / `:max_lifetime`, wallet
@@ -104,7 +111,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   into exception messages or telemetry.
 - Persisted Refresh, CIBA, device-code, and authorization-code contexts now
   reject unexpected sibling keys at validation; host-specific values remain
-  inside the documented opaque `:claims` map.
+  inside the documented string-keyed JSON `:claims` object.
 - Refresh-reuse telemetry is emitted even when family revocation raises,
   throws, exits, or violates its return contract. The event carries only a
   bounded cleanup status, and the original cleanup failure is preserved.

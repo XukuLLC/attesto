@@ -15,8 +15,9 @@ defmodule Attesto.DeviceCodeStore do
     * `poll/2` enforces the RFC 8628 §3.5 minimum poll interval as one atomic
       conditional update of `last_polled_at`, returning the record's current
       state in the same step (no separate read that could race an approval).
-    * `consume/2` moves `approved` → `consumed` only, so an approved device code
-      mints exactly one token family even under concurrent polls.
+    * `consume/2` moves an unexpired `approved` → `consumed` only, so an
+      approved device code mints exactly one token family even under concurrent
+      polls and cannot mint after its expiry.
 
   The plaintext `device_code` is never stored; only its `Attesto.Secret.hash/1`.
   The `user_code` is stored in its normalized form (see
@@ -34,7 +35,9 @@ defmodule Attesto.DeviceCodeStore do
     * `:status` - `:pending` | `:approved` | `:denied` | `:consumed`.
     * `:subject` - the approved resource owner (nil until approved).
     * `:granted_scope` / `:granted_claims` - what the user actually authorized at
-      approval (nil/absent until approved).
+      approval; claims are a portable, recursively string-keyed object using
+      valid UTF-8 without U+0000 and exact-range integers (nil/absent until
+      approved).
     * `:expires_at` - absolute expiry, unix seconds.
     * `:last_polled_at` - unix seconds of the last accepted poll, or nil before
       the first poll.
@@ -116,11 +119,13 @@ defmodule Attesto.DeviceCodeStore do
               {:ok, entry()} | {:error, :slow_down} | :error
 
   @doc """
-  Atomically move an `approved` code to `consumed` (single use), returning the
-  record as it stood. MUST update only when `status = 'approved'`, so a second
+  Atomically move an `approved`, unexpired code to `consumed` (single use),
+  returning the record as it stood. `opts` carries `:now` (unix seconds). MUST
+  update only when `status = 'approved' AND expires_at > opts.now`, so a second
   redemption of the same device code (concurrent or sequential) returns
-  `:error`. Implement as one guarded `UPDATE ... SET status = 'consumed' WHERE
-  status = 'approved' RETURNING`.
+  `:error` and a code that expires between the core's poll-time check and the
+  consume cannot mint. Implement as one guarded `UPDATE ... SET status =
+  'consumed' WHERE status = 'approved' AND expires_at > $now RETURNING`.
   """
   @callback consume(device_code_hash(), opts :: map()) :: {:ok, entry()} | :error
 end

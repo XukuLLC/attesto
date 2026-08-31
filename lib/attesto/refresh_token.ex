@@ -37,6 +37,7 @@ defmodule Attesto.RefreshToken do
   token, not the code); rotation is deliberately the stricter of the two.
   """
 
+  alias Attesto.Claims
   alias Attesto.NumericDate
   alias Attesto.Scope
   alias Attesto.Secret
@@ -113,7 +114,8 @@ defmodule Attesto.RefreshToken do
 
   `context` MUST carry `:subject`; optional `:scope` (list, default
   `[]`), `:client_id`, `:dpop_jkt` (binds the token to a DPoP key), and
-  `:claims` (opaque host context).
+  `:claims` (a lossless, string-keyed I-JSON object of host context; persisted
+  numbers are exact-range integers, not floats).
 
   Options: `:ttl` (seconds, default 14 days) and `:now`. Public issuance
   always starts a fresh family at generation 0; only `rotate/3` can create a
@@ -827,7 +829,8 @@ defmodule Attesto.RefreshToken do
     # `:claims`, so an extra sibling key is a malformed record, not ignored data.
     exact_context_keys?(context) and
       non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
-      valid_optional_client_id?(client_id) and valid_optional_jkt?(dpop_jkt) and is_map(claims) and
+      valid_optional_client_id?(client_id) and
+      valid_optional_jkt?(dpop_jkt) and Claims.portable_json_object?(claims) and
       valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time)
   end
 
@@ -1018,7 +1021,7 @@ defmodule Attesto.RefreshToken do
   defp validate_supplemental_context(context, dpop_jkt) do
     cond do
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
-      not is_map(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
+      not Claims.portable_json_object?(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
       not valid_optional_acr?(Map.get(context, :acr)) -> {:error, :invalid_acr}
       not valid_optional_auth_time?(Map.get(context, :auth_time)) -> {:error, :invalid_auth_time}
       true -> :ok

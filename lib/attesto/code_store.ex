@@ -68,8 +68,10 @@ defmodule Attesto.CodeStore do
       all and only `:client_id`, `:redirect_uri`, `:code_challenge`, `:subject`,
       `:scope`, `:resource`, `:dpop_jkt`, `:family_id`, and `:claims`. Adapter
       metadata must not be added beside those keys; host-specific values belong
-      inside the opaque `:claims` map. The PKCE method is fixed to `S256` when a
-      challenge is present and is therefore not a stored context key.
+      inside the portable, string-keyed `:claims` object (valid UTF-8 without
+      U+0000 and exact-range integers). The PKCE method is fixed to `S256`
+      whenever a challenge is present and is therefore not a stored context
+      key.
     * `:expires_at` - absolute expiry, unix seconds. The store MAY evict
       expired records, but `Attesto.AuthorizationCode` re-checks expiry
       after `take/1`, so eviction timing is not security-critical.

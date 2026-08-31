@@ -141,6 +141,8 @@ defmodule Attesto.RefreshTokenTest do
     Map.merge(%{subject: "usr_42", scope: ["documents.read"]}, overrides)
   end
 
+  @max_exact_integer 9_007_199_254_740_991
+
   describe "issue/3" do
     test "success returns a token, a family_id, and generation 0" do
       assert {:ok, %{token: token, family_id: family_id, generation: 0}} =
@@ -181,10 +183,25 @@ defmodule Attesto.RefreshTokenTest do
     end
 
     test "a non-map :claims is rejected as invalid_claims" do
-      # :claims is opaque host context, documented as a map and stored
-      # verbatim; a non-map (here a list) is rejected at the issue boundary.
+      # :claims is JSON host context; a non-map (here a list) is rejected at
+      # the issue boundary.
       assert {:error, :invalid_claims} =
                RefreshToken.issue(RefreshStore.ETS, context(%{claims: [:not, :a, :map]}))
+    end
+
+    test "claims must be in the portable JSON subset with string keys" do
+      for claims <- [
+            %{role: "admin"},
+            %{"nested" => %{role: "admin"}},
+            %{"items" => [self()]},
+            %{<<255>> => "bad"},
+            %{"float" => 1.5},
+            %{"float" => 1.0e100},
+            %{"integer" => @max_exact_integer + 1},
+            %{"integer" => -@max_exact_integer - 1}
+          ] do
+        assert {:error, :invalid_claims} = RefreshToken.issue(RefreshStore.ETS, context(%{claims: claims}))
+      end
     end
 
     test "invalid lifetime and continuation options fail before insertion" do
@@ -273,7 +290,8 @@ defmodule Attesto.RefreshTokenTest do
         {:dpop_jkt, "private-jkt-sentinel"},
         {:acr, ""},
         {:auth_time, -1},
-        {:claims, [:private_claims_sentinel]}
+        {:claims, [:private_claims_sentinel]},
+        {:claims, %{"nested" => %{role: :private_claims_sentinel}}}
       ]
 
       for {field, value} <- invalid_values do

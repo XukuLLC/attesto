@@ -9,6 +9,7 @@ defmodule Attesto.CIBATest do
   alias Attesto.Secret
 
   @now 1_700_000_000
+  @max_exact_integer 9_007_199_254_740_991
   @client_id "ciba-client-1"
   @notification_token "8d67dc78-7faa-4d41-aabd-67707b374255"
 
@@ -160,6 +161,26 @@ defmodule Attesto.CIBATest do
       signed = request(%{signed?: true, request_jti: "replay-id", request_exp: @now + 60})
       assert {:ok, %{auth_req_id: id}} = CIBA.issue(Store, signed, %{subject: "usr_1"}, now: @now)
       assert is_binary(id)
+    end
+
+    test "approval rejects claims outside the portable JSON subset" do
+      %{auth_req_id: id} = issue()
+
+      for claims <- [
+            %{role: "admin"},
+            %{"nested" => %{role: "admin"}},
+            %{"items" => [self()]},
+            %{<<255>> => "bad"},
+            %{"float" => 1.5},
+            %{"float" => 1.0e100},
+            %{"integer" => @max_exact_integer + 1},
+            %{"integer" => -@max_exact_integer - 1}
+          ] do
+        assert {:error, :invalid_claims} =
+                 CIBA.approve(Store, id, %{subject: "usr_1", claims: claims}, now: @now + 1)
+
+        assert {:ok, _record} = Store.lookup(Secret.hash(id))
+      end
     end
 
     test "rejects negative clocks before put and leaves storage untouched" do
@@ -396,6 +417,7 @@ defmodule Attesto.CIBATest do
         fn record -> Map.put(record, :auth_req_id_hash, "private-hash-sentinel") end,
         fn record -> put_in(record, [:data, :client_id], "private-client-sentinel") end,
         fn record -> Map.put(record, :granted_scope, ["private-scope-sentinel"]) end,
+        fn record -> Map.put(record, :granted_claims, %{"nested" => %{role: :private_claims_sentinel}}) end,
         fn record -> Map.put(record, :auth_time, record.auth_time + 1) end,
         fn record -> Map.put(record, :expires_at, record.expires_at + 1) end,
         fn record -> Map.put(record, :status, :approved) end

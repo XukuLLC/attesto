@@ -8,6 +8,7 @@ defmodule Attesto.DeviceCodeTest do
   alias Attesto.Secret
 
   @now 1_700_000_000
+  @max_exact_integer 9_007_199_254_740_991
 
   defmodule ContractStore do
     @moduledoc false
@@ -181,6 +182,26 @@ defmodule Attesto.DeviceCodeTest do
       assert {:ok, %Grant{subject: "usr_1"}} =
                DeviceCode.redeem(Store, dc, %{client_id: "cli-1"}, now: @now + 1, interval: 0)
     end
+
+    test "approval rejects claims outside the portable JSON subset" do
+      %{user_code: uc} = issue()
+
+      for claims <- [
+            %{role: "admin"},
+            %{"nested" => %{role: "admin"}},
+            %{"items" => [self()]},
+            %{<<255>> => "bad"},
+            %{"float" => 1.5},
+            %{"float" => 1.0e100},
+            %{"integer" => @max_exact_integer + 1},
+            %{"integer" => -@max_exact_integer - 1}
+          ] do
+        assert {:error, :invalid_claims} =
+                 DeviceCode.approve(Store, uc, %{subject: "usr_1", claims: claims}, now: @now + 1)
+
+        assert {:ok, %{status: :pending}} = DeviceCode.lookup(Store, uc)
+      end
+    end
   end
 
   describe "user_code normalization (fail-closed)" do
@@ -225,10 +246,18 @@ defmodule Attesto.DeviceCodeTest do
       assert {:error, :access_denied} = DeviceCode.redeem(Store, dc, %{client_id: "cli-1"}, now: @now + 10)
     end
 
-    test "an expired code yields expired_token, even after approval (expiry wins)" do
+    test "an expired approved code cannot be consumed or minted (expiry wins)" do
       %{device_code: dc, user_code: uc} = issue(%{}, ttl: 600)
       assert :ok = DeviceCode.approve(Store, uc, %{subject: "usr_1"}, now: @now + 1)
-      assert {:error, :expired_token} = DeviceCode.redeem(Store, dc, %{client_id: "cli-1"}, now: @now + 601)
+
+      # The store guard is authoritative even if the core's earlier read saw
+      # the approved record before the expiry boundary.
+      hash = Secret.hash(dc)
+      assert :error = Store.consume(hash, %{now: @now + 600})
+      assert {:ok, %{status: :approved}} = Store.get(hash)
+
+      assert {:error, :expired_token} = DeviceCode.redeem(Store, dc, %{client_id: "cli-1"}, now: @now + 600)
+      assert {:ok, %{status: :approved}} = Store.get(hash)
     end
 
     test "polling faster than the interval yields slow_down" do
@@ -378,6 +407,7 @@ defmodule Attesto.DeviceCodeTest do
         fn record -> Map.put(record, :device_code_hash, "private-hash-sentinel") end,
         fn record -> put_in(record, [:data, :client_id], "private-client-sentinel") end,
         fn record -> Map.put(record, :granted_scope, ["private-scope-sentinel"]) end,
+        fn record -> Map.put(record, :granted_claims, %{"nested" => %{role: :private_claims_sentinel}}) end,
         fn record -> Map.put(record, :expires_at, record.expires_at + 1) end,
         fn record -> Map.put(record, :status, :approved) end
       ]

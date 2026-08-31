@@ -7,8 +7,9 @@ defmodule Attesto.AuthorizationCode.Grant do
   out. The host reads it to mint the access token (and, if it issues one,
   the refresh token): `subject` and `scope` become the token's `sub` and
   `scope`, `dpop_jkt` (when present) becomes the access token's `cnf.jkt`,
-  and `claims` carries any host context that rode along from the
-  authorization request.
+  and `claims` carries the lossless, string-keyed I-JSON host context that rode
+  along from the authorization request. Persisted claim numbers are limited to
+  exact-range integers; floats and unsupported VM terms are rejected.
 
   ## `family_id`
 

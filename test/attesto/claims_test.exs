@@ -4,6 +4,72 @@ defmodule Attesto.ClaimsTest do
 
   alias Attesto.Claims
 
+  @max_exact_integer 9_007_199_254_740_991
+
+  describe "portable_json_object?/1" do
+    test "accepts JSON-native scalar, array, and nested object values" do
+      value = %{
+        "string" => "value",
+        "null" => nil,
+        "boolean" => true,
+        "integer" => 7,
+        "array" => [false, nil, %{"nested" => "ok"}]
+      }
+
+      assert Claims.portable_json_object?(value)
+    end
+
+    test "rejects atom keys and non-JSON values at any nesting level" do
+      refute Claims.portable_json_object?(%{atom_key: "value"})
+      refute Claims.portable_json_object?(%{"nested" => %{atom_key: "value"}})
+      refute Claims.portable_json_object?(%{"nested" => [%{"ok" => self()}]})
+      refute Claims.portable_json_object?(%{"tuple" => {:not, "json"}})
+      refute Claims.portable_json_object?(%{"atom" => :admin})
+      refute Claims.portable_json_object?(%{"improper_array" => ["ok" | "tail"]})
+      refute Claims.portable_json_object?(%{<<255>> => "invalid key"})
+      refute Claims.portable_json_object?(%{"nul" => <<0>>})
+      refute Claims.portable_json_object?(%{"nested" => %{"nul" => "a\0b"}})
+      refute Claims.portable_json_object?(%{"nested" => %{<<0>> => "invalid key"}})
+      refute Claims.portable_json_object?(%{<<0>> => "invalid key"})
+      refute Claims.portable_json_object?(%{"bitstring" => <<1::size(1)>>})
+    end
+
+    test "rejects invalid UTF-8 binaries while accepting empty objects and arrays" do
+      assert Claims.portable_json_object?(%{"empty_object" => %{}, "empty_array" => []})
+      refute Claims.portable_json_object?(%{"invalid_utf8" => <<255>>})
+    end
+
+    test "accepts only I-JSON exact-range integers" do
+      assert Claims.portable_json_object?(%{"minimum" => -@max_exact_integer, "maximum" => @max_exact_integer})
+    end
+
+    test "rejects floats and integers outside the I-JSON exact range" do
+      for value <- [1.5, 1.0e100, @max_exact_integer + 1, -@max_exact_integer - 1] do
+        refute Claims.portable_json_object?(%{"value" => value}), "accepted non-exact number #{inspect(value)}"
+      end
+
+      refute Claims.portable_json_object?(%{"nested" => [%{"value" => @max_exact_integer + 1}]})
+      refute Claims.portable_json_object?(%{"nested" => %{"value" => -@max_exact_integer - 1}})
+    end
+
+    test "caps composite nesting at 64 while allowing wide flat arrays" do
+      assert Claims.portable_json_object?(nested_objects(64))
+      refute Claims.portable_json_object?(nested_objects(65))
+      assert Claims.portable_json_object?(%{"values" => List.duplicate(1, 1_000)})
+    end
+
+    test "counts alternating object and array containers toward the same depth" do
+      assert Claims.portable_json_object?(nested_object_arrays(32))
+      refute Claims.portable_json_object?(nested_object_arrays(33))
+    end
+  end
+
+  defp nested_objects(1), do: %{"value" => 1}
+  defp nested_objects(depth), do: %{"nested" => nested_objects(depth - 1)}
+
+  defp nested_object_arrays(1), do: %{"value" => 1}
+  defp nested_object_arrays(depth), do: %{"nested" => [nested_object_arrays(depth - 1)]}
+
   describe "normalize_keys/2 with atoms: :reject (default)" do
     test "passes an all-binary-key map through unchanged" do
       assert {:ok, %{"a" => 1, "b" => 2}} = Claims.normalize_keys(%{"a" => 1, "b" => 2})

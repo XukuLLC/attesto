@@ -8,8 +8,10 @@ defmodule Attesto.DeviceCode.Grant do
   reads it to mint the access token (and, if it issues one, the refresh token):
   `subject` and `scope` become the token's `sub` and `scope`, `resource` (RFC
   8707) the `aud`, `dpop_jkt` (when present) the `cnf.jkt`, and `claims` carries
-  the authentication/identity context the verification page recorded when the
-  user approved.
+  the lossless, string-keyed I-JSON authentication/identity context the
+  verification page recorded when the user approved. Persisted claim numbers
+  are limited to exact-range integers; floats and unsupported VM terms are
+  rejected.
   """
 
   @enforce_keys [:client_id, :subject]

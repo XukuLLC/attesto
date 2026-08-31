@@ -18,6 +18,7 @@ defmodule Attesto.AuthorizationCodeTest do
   @client_id "oc_app"
   @subject "usr_42"
   @scope ["documents.read"]
+  @max_exact_integer 9_007_199_254_740_991
 
   defmodule ContractGetStore do
     @moduledoc false
@@ -125,7 +126,7 @@ defmodule Attesto.AuthorizationCodeTest do
       assert {:ok, %Grant{scope: []}} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
-    test "claims round-trip opaquely through issue and redeem", %{challenge: challenge} do
+    test "JSON claims round-trip unchanged through issue and redeem", %{challenge: challenge} do
       claims = %{"tenant" => "acme", "nonce" => "n-1", "amr" => ["pwd"]}
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge, %{claims: claims}))
       assert {:ok, %Grant{claims: ^claims}} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
@@ -255,11 +256,26 @@ defmodule Attesto.AuthorizationCodeTest do
     end
 
     test "invalid_claims when claims is not a map", %{challenge: challenge} do
-      # :claims is the opaque host context; it is documented as a map and
-      # round-tripped verbatim, so a non-map (here a list) is rejected at
+      # :claims is JSON host context, so a non-map (here a list) is rejected at
       # the issue boundary rather than silently stored.
       assert {:error, :invalid_claims} =
                AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge, %{claims: [:not, :a, :map]}))
+    end
+
+    test "invalid_claims when claims are outside the portable JSON subset", %{challenge: challenge} do
+      for claims <- [
+            %{role: "admin"},
+            %{"nested" => %{role: "admin"}},
+            %{"items" => [self()]},
+            %{<<255>> => "bad"},
+            %{"float" => 1.5},
+            %{"float" => 1.0e100},
+            %{"integer" => @max_exact_integer + 1},
+            %{"integer" => -@max_exact_integer - 1}
+          ] do
+        assert {:error, :invalid_claims} =
+                 AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge, %{claims: claims}))
+      end
     end
 
     test "invalid_scope when scope is not a list", %{challenge: challenge} do
@@ -426,6 +442,7 @@ defmodule Attesto.AuthorizationCodeTest do
         fn record -> put_in(record, [:data, :scope], ["documents.read", 7]) end,
         fn record -> put_in(record, [:data, :resource], ["https://api.example", 7]) end,
         fn record -> put_in(record, [:data, :claims], ["private-claims-sentinel"]) end,
+        fn record -> put_in(record, [:data, :claims], %{"nested" => %{role: :private_claims_sentinel}}) end,
         fn record -> Map.put(record, :expires_at, "private-expiry-sentinel") end
       ]
 

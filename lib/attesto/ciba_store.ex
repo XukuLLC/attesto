@@ -45,7 +45,9 @@ defmodule Attesto.CIBAStore do
       authenticated end-user, the Authentication Context Class Reference
       satisfied, and the unix time of authentication.
     * `:granted_scope` / `:granted_claims` - what the user actually authorized
-      at approval (nil/absent until approved).
+      at approval; claims are a portable, recursively string-keyed object using
+      valid UTF-8 without U+0000 and exact-range integers (nil/absent until
+      approved).
     * `:interval` - the minimum seconds between accepted polls (`0` disables
       enforcement; used for records that are consumed server-side).
     * `:expires_at` - absolute expiry, unix seconds.

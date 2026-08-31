@@ -99,6 +99,7 @@ defmodule Attesto.AuthorizationCode do
   """
 
   alias Attesto.AuthorizationCode.Grant
+  alias Attesto.Claims
   alias Attesto.NumericDate
   alias Attesto.PKCE
   alias Attesto.Scope
@@ -171,8 +172,9 @@ defmodule Attesto.AuthorizationCode do
   `:family_id` (a non-empty provenance string round-tripped to the redeemed
   `Grant`; use `issue_refresh_and_finalize/6` to bind the actually issued
   refresh family), and
-  `:claims` (an opaque host context map
-  round-tripped to `redeem/4`).
+  `:claims` (a lossless, string-keyed I-JSON object of host context;
+  persisted numbers are exact-range integers, not floats) round-tripped to
+  `redeem/4`.
 
   Options: `:ttl` (seconds the code is valid, default
   #{@default_ttl_seconds}) and `:now` (clock override).
@@ -425,7 +427,7 @@ defmodule Attesto.AuthorizationCode do
     non_empty_binary?(grant.client_id) and non_empty_binary?(grant.redirect_uri) and
       non_empty_binary?(grant.subject) and valid_scope?(grant.scope) and
       valid_resource?(grant.resource) and valid_optional_jkt?(grant.dpop_jkt) and
-      valid_optional_family_id?(grant.family_id) and is_map(grant.claims)
+      valid_optional_family_id?(grant.family_id) and Claims.portable_json_object?(grant.claims)
   end
 
   defp require_matching_context!(context, key, expected) do
@@ -550,7 +552,7 @@ defmodule Attesto.AuthorizationCode do
       {valid_resource?(resource), :invalid_resource},
       {valid_optional_jkt?(dpop_jkt), :invalid_dpop_jkt},
       {valid_optional_family_id?(family_id), :invalid_family_id},
-      {is_map(claims), :invalid_claims}
+      {Claims.portable_json_object?(claims), :invalid_claims}
     ]
     |> Enum.find_value(:ok, fn {ok?, error} -> if ok?, do: false, else: {:error, error} end)
   end
@@ -653,7 +655,7 @@ defmodule Attesto.AuthorizationCode do
 
   defp valid_code_context?(dpop_jkt, family_id, claims, expires_at) do
     valid_optional_jkt?(dpop_jkt) and valid_optional_family_id?(family_id) and
-      is_map(claims) and is_integer(expires_at)
+      Claims.portable_json_object?(claims) and is_integer(expires_at)
   end
 
   # The authorization-code grant context is canonical. Host-specific values

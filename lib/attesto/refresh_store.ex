@@ -96,7 +96,8 @@ defmodule Attesto.RefreshStore do
       respectively, or `nil` when unbound.
     * `:acr` - a non-empty authentication-context string or `nil`.
     * `:auth_time` - a non-negative Unix second or `nil`.
-    * `:claims` - a map of opaque host claims.
+    * `:claims` - a portable, recursively string-keyed object of host context,
+      using valid UTF-8 without U+0000 and exact-range integers.
 
   The canonical context is also exposed as `stored_context/0` for adapter
   specifications. A positive-grace successor bundle contains the plaintext

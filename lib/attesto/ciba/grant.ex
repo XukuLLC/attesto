@@ -10,7 +10,9 @@ defmodule Attesto.CIBA.Grant do
   (RFC 8707) the `aud`, `dpop_jkt` (when present) the `cnf.jkt`, and `acr` /
   `auth_time` the ID Token's authentication-context claims (CIBA Core §10.1:
   the ID Token is issued as for a normal OIDC token response; FAPI-CIBA
-  §5.2.2 requires `acr` when the client requested one).
+  §5.2.2 requires `acr` when the client requested one). `claims` carries
+  lossless, string-keyed I-JSON host context; persisted claim numbers are
+  limited to exact-range integers.
   """
 
   @enforce_keys [:client_id, :subject]

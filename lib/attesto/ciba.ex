@@ -45,7 +45,7 @@ defmodule Attesto.CIBA do
 
   alias Attesto.CIBA.Grant
   alias Attesto.CIBA.Request
-  alias Attesto.{NumericDate, Scope, Secret, Thumbprint}
+  alias Attesto.{Claims, NumericDate, Scope, Secret, Thumbprint}
 
   @grant_type "urn:openid:params:grant-type:ciba"
 
@@ -371,7 +371,9 @@ defmodule Attesto.CIBA do
   `:subject_mismatch`, fail-closed), and optionally `:acr` (the satisfied
   Authentication Context Class Reference; FAPI-CIBA §5.2.2 requires returning
   `acr` when the client requested one), `:scope` (what the user actually
-  granted), `:claims`, and `:auth_time` (unix seconds, default `:now`).
+  granted), a lossless, string-keyed I-JSON `:claims` object (persisted claim
+  numbers are exact-range integers, not floats), and `:auth_time` (unix
+  seconds, default `:now`).
 
   Atomic `pending` → `approved`. Returns `{:ok, decision}` with the ping-mode
   notification data (§10.2 - the notification fires on approval and denial
@@ -580,7 +582,7 @@ defmodule Attesto.CIBA do
       not valid_optional_scope_list?(fields.granted_scope) ->
         {:error, :invalid_scope}
 
-      not is_map(fields.granted_claims) ->
+      not Claims.portable_json_object?(fields.granted_claims) ->
         {:error, :invalid_claims}
 
       true ->
@@ -795,7 +797,7 @@ defmodule Attesto.CIBA do
       valid_optional_field?(record, :acr, &valid_optional_binary?/1) and
       valid_optional_field?(record, :auth_time, &valid_optional_non_negative_integer?/1) and
       valid_optional_field?(record, :granted_scope, &valid_optional_scope_list?/1) and
-      valid_optional_field?(record, :granted_claims, &valid_optional_map?/1) and
+      valid_optional_field?(record, :granted_claims, &valid_optional_json_object?/1) and
       valid_optional_field?(record, :last_polled_at, &valid_optional_non_negative_integer?/1)
   end
 
@@ -829,7 +831,7 @@ defmodule Attesto.CIBA do
 
   defp valid_decision_grant?(granted_scope, requested_scope, granted_claims) do
     valid_optional_scope_list?(granted_scope) and
-      valid_granted_scope?(granted_scope, requested_scope) and is_map(granted_claims)
+      valid_granted_scope?(granted_scope, requested_scope) and Claims.portable_json_object?(granted_claims)
   end
 
   defp valid_decision_acr?(acr, [_requested | _]), do: is_binary(acr) and acr != ""
@@ -883,8 +885,8 @@ defmodule Attesto.CIBA do
   defp valid_optional_non_empty_binary?(value), do: is_binary(value) and value != ""
   defp valid_optional_jkt?(nil), do: true
   defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
-  defp valid_optional_map?(nil), do: true
-  defp valid_optional_map?(value), do: is_map(value)
+  defp valid_optional_json_object?(nil), do: true
+  defp valid_optional_json_object?(value), do: Claims.portable_json_object?(value)
   defp valid_optional_non_negative_integer?(nil), do: true
   defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
 
