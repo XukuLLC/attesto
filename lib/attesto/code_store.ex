@@ -64,9 +64,12 @@ defmodule Attesto.CodeStore do
   A stored record is a map with:
 
     * `:code_hash` - the `Attesto.Secret.hash/1` of the code (the key).
-    * `:data` - the opaque grant context the host round-trips
-      (client, redirect URI, scope, PKCE challenge, optional DPoP
-      thumbprint, subject, and any host claims).
+    * `:data` - the canonical grant context the host round-trips. It contains
+      all and only `:client_id`, `:redirect_uri`, `:code_challenge`, `:subject`,
+      `:scope`, `:resource`, `:dpop_jkt`, `:family_id`, and `:claims`. Adapter
+      metadata must not be added beside those keys; host-specific values belong
+      inside the opaque `:claims` map. The PKCE method is fixed to `S256` when a
+      challenge is present and is therefore not a stored context key.
     * `:expires_at` - absolute expiry, unix seconds. The store MAY evict
       expired records, but `Attesto.AuthorizationCode` re-checks expiry
       after `take/1`, so eviction timing is not security-critical.
