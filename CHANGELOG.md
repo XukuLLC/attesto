@@ -45,6 +45,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Device user codes now accept only lengths 8..64 (the default remains 8).
   The same bound applies to generation and normalization options, so custom
   verification pages should preserve the configured length when normalizing.
+- OID4VCI pre-authorized-code `:authorized_scopes` entries must now be valid
+  OAuth scope tokens. Empty strings, whitespace, quotes, backslashes, control
+  characters, and non-ASCII bytes are rejected as invalid attributes.
 - Authorization-code and refresh-token context claims, plus device-code and
   CIBA approval claims, must now be portable JSON objects: recursively
   string-keyed, valid UTF-8 without U+0000, proper arrays, and I-JSON exact-range
