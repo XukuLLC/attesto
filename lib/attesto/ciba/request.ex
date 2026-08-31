@@ -196,6 +196,8 @@ defmodule Attesto.CIBA.Request do
   """
   @spec validate(client(), map(), keyword()) :: {:ok, t()} | {:error, error()}
   def validate(client, params, opts \\ []) when is_map(client) and is_map(params) and is_list(opts) do
+    opts = validate_policy_options!(opts)
+
     with {:ok, client_id, mode} <- validate_client(client),
          {:ok, params, signed} <- unwrap_signed_request(client, params, opts),
          :ok <- reject_request_uri(params),
@@ -226,12 +228,65 @@ defmodule Attesto.CIBA.Request do
 
   # ----- client registration -----
 
-  defp validate_client(%{client_id: client_id, token_delivery_mode: mode})
-       when is_binary(client_id) and client_id != "" and mode in [:poll, :ping, :push], do: {:ok, client_id, mode}
+  defp validate_client(%{client_id: client_id, token_delivery_mode: mode} = client)
+       when is_binary(client_id) and client_id != "" and mode in [:poll, :ping, :push] do
+    case Map.fetch(client, :user_code_parameter) do
+      :error -> {:ok, client_id, mode}
+      {:ok, value} when is_boolean(value) -> {:ok, client_id, mode}
+      {:ok, _invalid} -> {:error, :unauthorized_client}
+    end
+  end
 
   # A client without a registered backchannel_token_delivery_mode is not
   # registered for CIBA (CIBA Core §4: the parameter is REQUIRED).
   defp validate_client(_client), do: {:error, :unauthorized_client}
+
+  defp validate_policy_options!(opts) do
+    require_signed = boolean_option!(opts, :require_signed_request, false)
+    require_binding = boolean_option!(opts, :require_binding_message, false)
+    user_code_supported = boolean_option!(opts, :user_code_supported, false)
+
+    enforce_fapi =
+      boolean_option!(
+        opts,
+        :enforce_fapi_alg_policy,
+        not Keyword.has_key?(opts, :accepted_algs)
+      )
+
+    max_lifetime = positive_option!(opts, :max_request_lifetime_seconds, @default_max_request_lifetime_seconds)
+    binding_max = positive_option!(opts, :binding_message_max_length, @default_binding_message_max_length)
+
+    notification_min =
+      positive_option!(opts, :min_client_notification_token_length, @default_notification_token_min_length)
+
+    if notification_min > @notification_token_max_length do
+      raise ArgumentError,
+            ":min_client_notification_token_length must not exceed #{@notification_token_max_length}"
+    end
+
+    opts
+    |> Keyword.put(:require_signed_request, require_signed)
+    |> Keyword.put(:require_binding_message, require_binding)
+    |> Keyword.put(:user_code_supported, user_code_supported)
+    |> Keyword.put(:enforce_fapi_alg_policy, enforce_fapi)
+    |> Keyword.put(:max_request_lifetime_seconds, max_lifetime)
+    |> Keyword.put(:binding_message_max_length, binding_max)
+    |> Keyword.put(:min_client_notification_token_length, notification_min)
+  end
+
+  defp boolean_option!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_boolean(value) -> value
+      _invalid -> raise ArgumentError, ":#{key} must be true or false"
+    end
+  end
+
+  defp positive_option!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> raise ArgumentError, ":#{key} must be a positive integer"
+    end
+  end
 
   # ----- signed authentication request (§7.1.1) -----
 

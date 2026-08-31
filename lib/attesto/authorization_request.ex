@@ -234,8 +234,8 @@ defmodule Attesto.AuthorizationRequest do
   def validate(params, opts) when is_map(params) and is_list(opts) do
     registered = Keyword.fetch!(opts, :registered_redirect_uris)
     matching = redirect_uri_matching(opts)
-    require_nonce_policy = Keyword.get(opts, :require_nonce, @default_require_nonce)
-    require_pkce = Keyword.get(opts, :require_pkce, @default_require_pkce)
+    require_nonce_policy = boolean_option!(opts, :require_nonce, @default_require_nonce)
+    require_pkce = boolean_option!(opts, :require_pkce, @default_require_pkce)
 
     with {:ok, params} <- merge_request_object(params, opts),
          {:ok, client_id} <- validate_client_id(params),
@@ -251,6 +251,13 @@ defmodule Attesto.AuthorizationRequest do
       # From here on, redirect_uri is trusted: report further errors by
       # redirecting to it (RFC 6749 §4.1.2.1).
       validate_redirectable(params, client_id, redirect_uri, require_nonce, require_pkce)
+    end
+  end
+
+  defp boolean_option!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_boolean(value) -> value
+      _invalid -> raise ArgumentError, ":#{key} must be true or false"
     end
   end
 

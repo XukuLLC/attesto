@@ -13,8 +13,14 @@ defmodule Attesto.RefreshToken do
   continue, forcing a fresh authorization.
 
   This module is pure logic over a `Attesto.RefreshStore`; the store
-  provides the atomic `consume/1` on which reuse detection depends (see
-  that behaviour's moduledoc). Only the hash of each token is stored.
+  provides the atomic family-level `rotate/4` transaction on which reuse
+  detection depends (see that behaviour's moduledoc). Token records use
+  hashes, except that a
+  positive rotation-grace window necessarily retains the plaintext
+  successor until the window closes so the same credential can be returned
+  after a lost response. That retry state is credential-equivalent and MUST
+  be protected as described by
+  `c:Attesto.RefreshStore.rotate/4`.
 
   ## DPoP binding
 
@@ -36,6 +42,7 @@ defmodule Attesto.RefreshToken do
 
   # 14 days. Refresh lifetime is a host policy; this is a sane default.
   @default_ttl_seconds 14 * 24 * 60 * 60
+  @default_rotation_grace_seconds 10
 
   @type context :: %{
           required(:subject) => String.t(),
@@ -62,12 +69,21 @@ defmodule Attesto.RefreshToken do
         }
 
   @type issue_error ::
-          :invalid_subject | :invalid_scope | :invalid_resource | :invalid_dpop_jkt | :invalid_claims | :family_revoked
+          :invalid_subject
+          | :invalid_scope
+          | :invalid_resource
+          | :invalid_client_id
+          | :invalid_dpop_jkt
+          | :invalid_claims
+          | :invalid_acr
+          | :invalid_auth_time
+          | :family_revoked
 
   @type rotate_error ::
           :invalid_grant
           | :reuse_detected
           | :grant_revoked
+          | :temporarily_unavailable
           | :expired
           | :client_required
           | :client_mismatch
@@ -84,38 +100,26 @@ defmodule Attesto.RefreshToken do
   `[]`), `:client_id`, `:dpop_jkt` (binds the token to a DPoP key), and
   `:claims` (opaque host context).
 
-  Options: `:ttl` (seconds, default 14 days), `:now`, and - when
-  continuing a family during rotation - `:family_id` and `:generation`
-  (callers issuing a first token omit both: a fresh family is started at
-  generation 0).
+  Options: `:ttl` (seconds, default 14 days) and `:now`. Public issuance
+  always starts a fresh family at generation 0; only `rotate/3` can create a
+  later generation, through the store's atomic rotation transaction.
 
   Returns `{:ok, %{token, family_id, generation}}` with the plaintext
   token to hand the client (only its hash is stored), or
-  `{:error, reason}` on malformed `context`. Returns
-  `{:error, :family_revoked}` only when continuing an explicit
-  `:family_id` that has been revoked (a fresh first issue starts a new
-  family and never hits this).
+  `{:error, reason}` on malformed `context`. A store may very rarely return
+  `{:error, :family_revoked}` if a freshly generated family identifier
+  collides with one of its retained revocation markers.
   """
   @spec issue(module(), context(), keyword()) :: {:ok, issued()} | {:error, issue_error()}
   def issue(store, context, opts \\ []) when is_atom(store) and is_map(context) and is_list(opts) do
-    with {:ok, data} <- normalize_context(context) do
-      token = Secret.generate()
-      family_id = Keyword.get_lazy(opts, :family_id, fn -> Secret.generate(16) end)
-      generation = Keyword.get(opts, :generation, 0)
-      ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
+    validate_issue_options!(opts)
 
-      case store.insert(%{
-             token_hash: Secret.hash(token),
-             family_id: family_id,
-             generation: generation,
-             data: data,
-             expires_at: NumericDate.now(opts) + ttl,
-             consumed: false,
-             consumed_at: nil,
-             successor: nil
-           }) do
-        :ok -> {:ok, %{token: token, family_id: family_id, generation: generation}}
-        {:error, :family_revoked} = err -> err
+    with {:ok, data} <- normalize_context(context) do
+      case persist_issue(store, data, opts) do
+        {:ok, issued} -> {:ok, issued}
+        {:error, :family_revoked} = error -> error
+        {:store_contract_violation} -> raise RuntimeError, "refresh store insert/1 violated its contract"
+        {:store_failure, kind, value, stacktrace} -> :erlang.raise(kind, value, stacktrace)
       end
     end
   end
@@ -131,8 +135,9 @@ defmodule Attesto.RefreshToken do
   If the presented token was already rotated, an immediate matching retry
   returns the original successor within `:rotation_grace_seconds`;
   otherwise the whole family is revoked and `{:error, :reuse_detected}` is
-  returned. Other failures: `:invalid_grant` (unknown token), `:expired`,
-  `:client_mismatch`, `:invalid_scope`, and the DPoP binding errors.
+  returned. Other failures include `:invalid_grant` (unknown token), `:expired`,
+  `:grant_revoked`, `:temporarily_unavailable`, `:client_mismatch`,
+  `:invalid_scope`, and the DPoP binding errors.
 
   Options:
 
@@ -150,156 +155,540 @@ defmodule Attesto.RefreshToken do
       request for any scope not granted is `:invalid_scope` (no
       escalation). Omitted, the successor carries the full granted scope.
     * `:ttl` - lifetime for the successor.
-    * `:rotation_grace_seconds` - idempotency window for an immediate retry of
-      the just-rotated token. Defaults to `10`; set `0` for strict reuse
-      revocation.
+    * `:rotation_grace_seconds` - non-negative integer idempotency window for
+      an immediate retry of the just-rotated token. Defaults to `10`; set `0`
+      for strict reuse revocation. The window is fixed when the successor is
+      issued: a later call may shorten it, but cannot extend it.
 
   Recoverable failures (`:client_mismatch`, `:invalid_scope`, `:expired`,
   the DPoP binding errors) are checked on a non-consuming read *before*
   the token is claimed, so they do NOT burn the token: a client that, say,
   retries with a corrected DPoP proof succeeds rather than tripping reuse
-  detection. Only a genuine replay of an already-consumed token (or a
-  concurrent double-claim) revokes the family.
+  detection. An already-consumed token is accepted only when its complete
+  successor state proves it is the same request inside the fixed retry window.
+
+  The parent claim, child insert, and retry-state persistence are one atomic
+  `c:Attesto.RefreshStore.rotate/4` operation. Simultaneous matching requests
+  therefore coalesce on the winner's complete committed successor instead of
+  observing a partially rotated family.
+
+  A store's documented `{:error, :invalid_rotation}` result means validation
+  rejected the proposed transition before committing any mutation. It is
+  reported as `{:error, :temporarily_unavailable}` with
+  `revocation: :not_attempted`; adapters MUST use that result only when they
+  can prove the transaction rolled back. Callback exceptions or ambiguous
+  unexpected returns still trigger family cleanup because they may have
+  committed.
+
+  A `get/1` exception or contract violation emits the operational
+  `[:attesto, :refresh_token, :rotation_state_failed]` event with
+  `operation: :lookup`. The original callback exception or constant contract
+  error is preserved. If a malformed returned record still binds the
+  presented token hash to a non-empty family ID, that family is revoked before
+  the contract error is raised; an untrusted or absent family is never used
+  for cleanup.
   """
   @spec rotate(module(), String.t(), keyword()) :: {:ok, rotated()} | {:error, rotate_error()}
   def rotate(store, presented_token, opts \\ []) when is_atom(store) and is_binary(presented_token) and is_list(opts) do
-    case store.get(Secret.hash(presented_token)) do
-      {:ok, %{consumed: true} = record} ->
-        maybe_idempotent_retry_or_reuse(store, record, opts)
+    _allow_missing_client = allow_missing_client?(opts)
+    grace = rotation_grace_seconds!(opts)
+    ttl = ttl_seconds!(opts)
 
-      {:ok, %{consumed: false} = record} ->
-        rotate_unconsumed(store, record, opts)
+    opts =
+      opts
+      |> Keyword.put(:rotation_grace_seconds, grace)
+      |> Keyword.put(:ttl, ttl)
+      |> Keyword.put(:now, refresh_now!(opts))
 
-      :error ->
-        {:error, :invalid_grant}
+    token_hash = Secret.hash(presented_token)
+
+    case call_store_callback(fn -> store.get(token_hash) end) do
+      {:returned, result} ->
+        handle_refresh_lookup(result, store, token_hash, opts)
+
+      {:failed, kind, value, stacktrace} ->
+        emit_rotation_state_preserving_original(%{
+          operation: :lookup,
+          reason: store_failure_reason(kind),
+          revocation: :not_attempted
+        })
+
+        :erlang.raise(kind, value, stacktrace)
     end
+  end
+
+  defp handle_refresh_lookup({:ok, %{consumed: true} = record}, store, token_hash, opts) do
+    if valid_loaded_record?(record, token_hash),
+      do: maybe_idempotent_retry_or_reuse(store, record, opts),
+      else: fail_initial_lookup(store, record, token_hash)
+  end
+
+  defp handle_refresh_lookup({:ok, %{consumed: false} = record}, store, token_hash, opts) do
+    if valid_loaded_record?(record, token_hash) and valid_unconsumed_record?(record),
+      do: rotate_unconsumed(store, record, opts),
+      else: fail_initial_lookup(store, record, token_hash)
+  end
+
+  defp handle_refresh_lookup(:error, _store, _token_hash, _opts), do: {:error, :invalid_grant}
+
+  defp handle_refresh_lookup(invalid_return, store, token_hash, _opts) do
+    fail_initial_lookup(store, invalid_return, token_hash)
+  end
+
+  defp fail_initial_lookup(store, record, token_hash) do
+    metadata = %{
+      operation: :lookup,
+      reason: :store_contract_violation,
+      revocation: :not_attempted
+    }
+
+    case trusted_family_id(record, token_hash) do
+      nil ->
+        emit_rotation_state_preserving_original(metadata)
+
+      family_id ->
+        metadata = Map.put(metadata, :family_id, family_id)
+        revocation = attempt_rotation_state_cleanup(store, family_id)
+        emit_rotation_state_preserving_original(Map.put(metadata, :revocation, revocation))
+    end
+
+    raise RuntimeError, "refresh store get/1 violated its contract"
   end
 
   defp maybe_idempotent_retry_or_reuse(store, record, opts) do
-    with true <- within_rotation_grace?(record, opts),
-         :ok <- check_client(record.data, opts),
-         :ok <- check_dpop(record.data, opts),
-         {:ok, scope} <- resolve_scope(record.data, opts),
-         {:ok, resource} <- resolve_resource(record.data, opts),
-         {:ok, successor} <- same_successor(record, scope, resource),
-         :ok <- successor_still_live?(store, successor) do
-      {:ok,
-       %{
-         token: successor.token,
-         family_id: record.family_id,
-         generation: successor.generation,
-         context: successor.context
-       }}
-    else
-      _ -> revoke_and_report_reuse(store, record)
+    case retry_window(record, opts) do
+      :inside -> recover_successor_or_reuse(store, record, opts)
+      :outside -> revoke_and_report_reuse(store, record)
+      {:state_error, reason} -> fail_rotation_state(store, record, :recover_successor, reason)
     end
   end
 
-  # EVERY path that concludes "this token was presented twice" goes through
-  # here, so revoking the family and reporting it cannot drift apart.
-  #
-  # There are three such paths and they are not interchangeable in how they
-  # were reached: the initial read finds an already-consumed token, the atomic
-  # `consume` reports `{:reuse, _}` against a concurrent rotation, or our own
-  # claim succeeds and then finds the family revoked underneath it. The first
-  # is a lone late retry; the other two are a live race, which is the shape an
-  # attacker racing the legitimate client actually produces. Instrumenting only
-  # the first would have left the concurrent cases - the ones that matter most -
-  # silent.
-  defp revoke_and_report_reuse(store, record) do
-    :ok = store.revoke_family(record.family_id)
+  defp recover_successor_or_reuse(store, record, opts) do
+    with :ok <- check_client(record.data, opts),
+         :ok <- check_dpop(record.data, opts),
+         {:ok, scope} <- resolve_scope(record.data, opts),
+         {:ok, resource} <- resolve_resource(record.data, opts),
+         {:ok, successor} <- same_successor(record, scope, resource) do
+      case successor_status(store, record, successor, opts) do
+        :live ->
+          {:ok,
+           %{
+             token: successor.token,
+             family_id: record.family_id,
+             generation: successor.generation,
+             context: successor.context
+           }}
 
-    # The family is now revoked, so the legitimate client's session is over
-    # either way. This event is the only notice anyone gets that it ended
-    # because a token was presented twice rather than because a user logged
-    # out - see `Attesto.Telemetry`.
-    Attesto.Telemetry.refresh_token_reuse_detected(%{
+        :consumed ->
+          revoke_and_report_reuse(store, record)
+
+        {:state_error, reason} ->
+          fail_rotation_state(store, record, :recover_successor, reason)
+
+        {:store_failure, kind, value, stacktrace} ->
+          fail_rotation_state_preserving(
+            store,
+            record,
+            :recover_successor,
+            store_failure_reason(kind),
+            kind,
+            value,
+            stacktrace
+          )
+      end
+    else
+      {:state_error, reason} -> fail_rotation_state(store, record, :recover_successor, reason)
+      _validation_or_retry_mismatch -> revoke_and_report_reuse(store, record)
+    end
+  end
+
+  # Every path that has evidence of actual reuse goes through here, so
+  # revoking the family and reporting it cannot drift apart. Missing or
+  # malformed recovery state takes the separate operational-failure path.
+  defp revoke_and_report_reuse(store, record) do
+    metadata = %{
       family_id: record.family_id,
       client_id: record |> Map.get(:data, %{}) |> Map.get(:client_id),
       subject: record |> Map.get(:data, %{}) |> Map.get(:subject),
       generation: Map.get(record, :generation)
-    })
+    }
 
-    {:error, :reuse_detected}
-  end
-
-  # OAuth 2.0 Security BCP §4.13.2: the rotation-grace idempotent retry is safe
-  # ONLY while the cached successor is itself still the live, unconsumed leaf -
-  # i.e. the client genuinely lost the original rotation response and never used
-  # the successor. If the successor has since been rotated (consumed) or is gone,
-  # the chain has demonstrably advanced past it, so replaying the parent is a
-  # true reuse of an already-used token, not a lost-response retry: fall through
-  # to family revocation rather than re-issuing the (now stale) successor.
-  defp successor_still_live?(store, successor) do
-    case store.get(Secret.hash(successor.token)) do
-      {:ok, %{consumed: false}} -> :ok
-      _ -> {:error, :successor_consumed}
+    try do
+      revoke_family!(store, record.family_id)
+    rescue
+      exception ->
+        emit_reuse_preserving_original(Map.put(metadata, :revocation, :failed))
+        reraise exception, __STACKTRACE__
+    catch
+      kind, value ->
+        emit_reuse_preserving_original(Map.put(metadata, :revocation, :failed))
+        :erlang.raise(kind, value, __STACKTRACE__)
+    else
+      :ok ->
+        Attesto.Telemetry.refresh_token_reuse_detected(Map.put(metadata, :revocation, :succeeded))
+        {:error, :reuse_detected}
     end
   end
 
-  # Validate on the read (no consumption), then atomically claim. Only the
-  # claim consumes the token, so a recoverable validation failure leaves
-  # it intact for a corrected retry.
+  # OAuth 2.0 Security BCP §4.14.2 requires family invalidation when reuse is
+  # detected. Our implementation-specific idempotent retry is safe ONLY while
+  # the cached successor is itself still the live, unconsumed leaf -
+  # i.e. the client genuinely lost the original rotation response and never used
+  # the successor. If the successor has since been rotated, the chain has
+  # demonstrably advanced past it and replaying the parent is true reuse. An
+  # absent, malformed, or prematurely expired successor is instead a recovery
+  # state failure: deny and revoke, but do not allege credential reuse.
+  defp successor_status(store, parent, successor, opts) do
+    family_id = parent.family_id
+    generation = successor.generation
+    context = successor.context
+    token_hash = Secret.hash(successor.token)
+
+    case call_store_callback(fn -> store.get(token_hash) end) do
+      {:returned, {:ok, child}} ->
+        classify_successor_status(child, token_hash, family_id, generation, context, opts)
+
+      {:returned, :error} ->
+        {:state_error, :successor_missing}
+
+      {:returned, _invalid_return} ->
+        {:state_error, :store_contract_violation}
+
+      {:failed, kind, value, stacktrace} ->
+        {:store_failure, kind, value, stacktrace}
+    end
+  end
+
+  defp classify_successor_status(child, token_hash, family_id, generation, context, opts) do
+    if valid_loaded_record?(child, token_hash) and
+         child.family_id == family_id and child.generation == generation and child.data == context do
+      classify_successor_liveness(child, opts)
+    else
+      {:state_error, :successor_invalid}
+    end
+  end
+
+  defp classify_successor_liveness(%{consumed: true} = child, _opts) do
+    classify_consumed_successor(Map.get(child, :consumed_at))
+  end
+
+  defp classify_successor_liveness(%{consumed: false} = child, opts) do
+    classify_unconsumed_successor(
+      child,
+      Map.get(child, :consumed_at),
+      Map.get(child, :successor),
+      opts
+    )
+  end
+
+  defp classify_consumed_successor(consumed_at) when is_integer(consumed_at), do: :consumed
+  defp classify_consumed_successor(_consumed_at), do: {:state_error, :successor_invalid}
+
+  defp classify_unconsumed_successor(child, nil, nil, opts) do
+    if child.expires_at > NumericDate.now(opts), do: :live, else: {:state_error, :successor_expired}
+  end
+
+  defp classify_unconsumed_successor(_child, _consumed_at, _successor, _opts), do: {:state_error, :successor_invalid}
+
+  # Validate on the read (no consumption), then atomically commit the parent,
+  # child, and retry state. A recoverable validation failure leaves the parent
+  # intact for a corrected retry.
   defp rotate_unconsumed(store, record, opts) do
     with :ok <- check_client(record.data, opts),
          :ok <- check_expiry(record, opts),
          :ok <- check_dpop(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
-         {:ok, resource} <- resolve_resource(record.data, opts),
-         {:ok, claimed} <- claim(store, record, opts) do
-      issue_successor(store, claimed, scope, resource, opts)
+         {:ok, resource} <- resolve_resource(record.data, opts) do
+      rotate_successor(store, record, scope, resource, opts)
     end
   end
 
-  defp issue_successor(store, claimed, scope, resource, opts) do
-    successor_data = %{claimed.data | scope: scope, resource: resource}
+  defp rotate_successor(store, parent, scope, resource, opts),
+    do: rotate_successor(store, parent, scope, resource, opts, 3)
 
-    case issue(store, successor_data,
-           family_id: claimed.family_id,
-           generation: claimed.generation + 1,
-           ttl: Keyword.get(opts, :ttl, @default_ttl_seconds),
-           now: Keyword.get(opts, :now)
-         ) do
-      {:ok, issued} ->
-        _ =
-          store.remember_successor(
-            claimed.token_hash,
-            %{
-              token: issued.token,
-              generation: issued.generation,
-              context: successor_data
-            },
-            now: NumericDate.now(opts)
-          )
+  defp rotate_successor(store, parent, scope, resource, opts, attempts_left) do
+    now = NumericDate.now(opts)
+    successor_data = %{parent.data | scope: scope, resource: resource}
 
-        {:ok,
-         %{
-           token: issued.token,
-           family_id: issued.family_id,
-           generation: issued.generation,
-           context: successor_data
-         }}
+    {issued, child} =
+      build_issue(successor_data,
+        family_id: parent.family_id,
+        generation: parent.generation + 1,
+        ttl: Keyword.fetch!(opts, :ttl),
+        now: now
+      )
 
-      {:error, :family_revoked} ->
-        # We won the atomic claim, but the family was revoked before our
-        # successor landed. DENY on that - no successor is minted and the
-        # family stays revoked - but do NOT report it as reuse, because this
-        # branch does not know that it was.
-        #
-        # `store.revoke_family/1` is the same operation `Attesto.Revocation`
-        # performs for an ordinary RFC 7009 request or a logout, so a family
-        # can be revoked here by a user signing out mid-rotation. That is a
-        # token presented ONCE. Emitting the reuse event for it would page
-        # someone with "a credential has been stolen" over a logout, and an
-        # alert that fires on routine behaviour is one people learn to close.
-        #
-        # The RETURN says the same thing: `:grant_revoked`, not
-        # `:reuse_detected`. A caller alerting on the atom would otherwise draw
-        # the conclusion the telemetry deliberately refuses to.
-        :ok = store.revoke_family(claimed.family_id)
+    successor = successor_state(issued, successor_data, child, opts)
+
+    rotation = %{
+      store: store,
+      parent: parent,
+      scope: scope,
+      resource: resource,
+      opts: opts,
+      attempts_left: attempts_left,
+      issued: issued,
+      child: child,
+      successor: successor,
+      successor_data: successor_data,
+      now: now
+    }
+
+    fn -> store.rotate(parent.token_hash, child, successor, now: now) end
+    |> call_store_callback()
+    |> handle_rotate_result(rotation)
+  end
+
+  defp handle_rotate_result({:returned, {:ok, committed_parent, committed_child}}, rotation) do
+    finish_atomic_rotation(committed_parent, committed_child, rotation)
+  end
+
+  defp handle_rotate_result({:returned, {:reuse, committed_parent}}, rotation) do
+    if valid_claim_record?(committed_parent, rotation.parent, :reuse),
+      do: maybe_idempotent_retry_or_reuse(rotation.store, committed_parent, rotation.opts),
+      else:
+        fail_rotation_state(
+          rotation.store,
+          rotation.parent,
+          :rotate_successor,
+          :store_contract_violation
+        )
+  end
+
+  defp handle_rotate_result({:returned, {:error, :family_revoked}}, _rotation), do: {:error, :grant_revoked}
+
+  defp handle_rotate_result({:returned, {:error, :expired}}, _rotation), do: {:error, :expired}
+
+  defp handle_rotate_result({:returned, {:error, :retry_state_unavailable}}, rotation),
+    do: report_rotation_unavailable(rotation.parent, :retry_state_unavailable)
+
+  defp handle_rotate_result({:returned, {:error, :token_conflict}}, %{attempts_left: attempts_left} = rotation)
+       when attempts_left > 0 do
+    rotate_successor(
+      rotation.store,
+      rotation.parent,
+      rotation.scope,
+      rotation.resource,
+      rotation.opts,
+      attempts_left - 1
+    )
+  end
+
+  defp handle_rotate_result({:returned, {:error, :token_conflict}}, rotation),
+    do: report_rotation_unavailable(rotation.parent, :token_conflict)
+
+  defp handle_rotate_result({:returned, {:error, :family_integrity_error}}, rotation),
+    do: report_revoked_integrity_failure(rotation.parent, :generation_conflict)
+
+  defp handle_rotate_result({:returned, {:error, :invalid_rotation}}, rotation),
+    do: report_rotation_unavailable(rotation.parent, :invalid_rotation)
+
+  defp handle_rotate_result({:returned, :error}, _rotation), do: {:error, :invalid_grant}
+
+  defp handle_rotate_result({:returned, _invalid_return}, rotation),
+    do: fail_rotation_state(rotation.store, rotation.parent, :rotate_successor, :store_contract_violation)
+
+  defp handle_rotate_result({:failed, kind, value, stacktrace}, rotation) do
+    fail_rotation_state_preserving(
+      rotation.store,
+      rotation.parent,
+      :rotate_successor,
+      store_failure_reason(kind),
+      kind,
+      value,
+      stacktrace
+    )
+  end
+
+  defp finish_atomic_rotation(committed_parent, committed_child, rotation) do
+    if valid_committed_parent?(
+         committed_parent,
+         rotation.parent,
+         rotation.successor,
+         rotation.now
+       ) and valid_committed_child?(committed_child, rotation.child, rotation.now),
+       do: rotated_successfully(rotation.issued, rotation.successor_data),
+       else:
+         fail_rotation_state(
+           rotation.store,
+           rotation.parent,
+           :rotate_successor,
+           :store_contract_violation
+         )
+  end
+
+  defp successor_state(issued, successor_data, child, opts) do
+    now = NumericDate.now(opts)
+    grace = Keyword.fetch!(opts, :rotation_grace_seconds)
+
+    if grace == 0 do
+      %{retry_until: now, recoverable: false}
+    else
+      %{
+        token: issued.token,
+        generation: issued.generation,
+        context: successor_data,
+        retry_until: min(now + grace, child.expires_at - 1)
+      }
+    end
+  end
+
+  defp valid_committed_child?(child, expected, now) do
+    child == expected and valid_loaded_record?(child, expected.token_hash) and
+      valid_unconsumed_record?(child) and child.expires_at > now
+  end
+
+  defp valid_committed_parent?(committed, original, successor, now) do
+    valid_loaded_record?(committed, original.token_hash) and committed.consumed == true and
+      committed.consumed_at == now and committed.successor == successor and
+      same_claim_identity?(committed, original)
+  end
+
+  defp persist_issue(store, data, opts), do: persist_issue(store, data, opts, 3)
+
+  defp persist_issue(store, data, opts, attempts_left) do
+    {issued, record} = build_issue(data, opts)
+
+    case call_store_callback(fn -> store.insert(record) end) do
+      {:returned, :ok} ->
+        {:ok, issued}
+
+      {:returned, {:error, :family_revoked}} ->
+        {:error, :family_revoked}
+
+      {:returned, {:error, :conflict}} when attempts_left > 0 ->
+        persist_issue(store, data, opts, attempts_left - 1)
+
+      {:returned, {:error, :conflict}} ->
+        {:store_contract_violation}
+
+      {:returned, _invalid_return} ->
+        {:store_contract_violation}
+
+      {:failed, kind, value, stacktrace} ->
+        {:store_failure, kind, value, stacktrace}
+    end
+  end
+
+  defp build_issue(data, opts) do
+    token = Secret.generate()
+    family_id = Keyword.get_lazy(opts, :family_id, fn -> Secret.generate(16) end)
+    generation = Keyword.get(opts, :generation, 0)
+    ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
+
+    record = %{
+      token_hash: Secret.hash(token),
+      family_id: family_id,
+      generation: generation,
+      data: data,
+      expires_at: NumericDate.now(opts) + ttl,
+      consumed: false,
+      consumed_at: nil,
+      successor: nil
+    }
+
+    {%{token: token, family_id: family_id, generation: generation}, record}
+  end
+
+  defp rotated_successfully(issued, successor_data) do
+    {:ok,
+     %{
+       token: issued.token,
+       family_id: issued.family_id,
+       generation: issued.generation,
+       context: successor_data
+     }}
+  end
+
+  defp fail_rotation_state(store, record, operation, reason) do
+    metadata = rotation_state_metadata(record, operation, reason)
+
+    try do
+      revoke_family!(store, record.family_id)
+    rescue
+      exception ->
+        Attesto.Telemetry.refresh_token_rotation_state_failed(Map.put(metadata, :revocation, :failed))
+        reraise exception, __STACKTRACE__
+    catch
+      kind, value ->
+        Attesto.Telemetry.refresh_token_rotation_state_failed(Map.put(metadata, :revocation, :failed))
+        :erlang.raise(kind, value, __STACKTRACE__)
+    else
+      :ok ->
+        Attesto.Telemetry.refresh_token_rotation_state_failed(Map.put(metadata, :revocation, :succeeded))
         {:error, :grant_revoked}
     end
   end
+
+  defp report_rotation_unavailable(record, reason) do
+    record
+    |> rotation_state_metadata(:rotate_successor, reason)
+    |> Map.put(:revocation, :not_attempted)
+    |> Attesto.Telemetry.refresh_token_rotation_state_failed()
+
+    {:error, :temporarily_unavailable}
+  end
+
+  defp report_revoked_integrity_failure(record, reason) do
+    record
+    |> rotation_state_metadata(:rotate_successor, reason)
+    |> Map.put(:revocation, :succeeded)
+    |> Attesto.Telemetry.refresh_token_rotation_state_failed()
+
+    {:error, :grant_revoked}
+  end
+
+  defp fail_rotation_state_preserving(store, record, operation, reason, kind, value, stacktrace) do
+    metadata = rotation_state_metadata(record, operation, reason)
+    revocation = attempt_rotation_state_cleanup(store, record.family_id)
+    emit_rotation_state_preserving_original(Map.put(metadata, :revocation, revocation))
+    :erlang.raise(kind, value, stacktrace)
+  end
+
+  defp rotation_state_metadata(record, operation, reason) do
+    %{
+      operation: operation,
+      reason: reason,
+      family_id: record.family_id,
+      client_id: record |> Map.get(:data, %{}) |> Map.get(:client_id),
+      subject: record |> Map.get(:data, %{}) |> Map.get(:subject),
+      generation: Map.get(record, :generation)
+    }
+  end
+
+  defp attempt_rotation_state_cleanup(store, family_id) do
+    case store.revoke_family(family_id) do
+      :ok -> :succeeded
+      _contract_violation -> :failed
+    end
+  catch
+    _kind, _value -> :failed
+  end
+
+  defp revoke_family!(store, family_id) do
+    case store.revoke_family(family_id) do
+      :ok -> :ok
+      _contract_violation -> raise RuntimeError, "refresh store revoke_family/1 violated its contract"
+    end
+  end
+
+  # The callback failure is already being re-raised. A telemetry dispatcher
+  # failure must not replace it with a less useful secondary exception.
+  defp emit_rotation_state_preserving_original(metadata) do
+    Attesto.Telemetry.refresh_token_rotation_state_failed(metadata)
+  catch
+    _kind, _value -> :ok
+  end
+
+  defp emit_reuse_preserving_original(metadata) do
+    Attesto.Telemetry.refresh_token_reuse_detected(metadata)
+  catch
+    _kind, _value -> :ok
+  end
+
+  defp store_failure_reason(:error), do: :store_raised
+  defp store_failure_reason(:throw), do: :store_threw
+  defp store_failure_reason(:exit), do: :store_exited
 
   # RFC 6749 §10.4: a refresh token must only be redeemed by the client it
   # was issued to. Fail closed by default - when the token carries a
@@ -317,7 +706,13 @@ defmodule Attesto.RefreshToken do
 
   defp check_client(_data, _opts), do: :ok
 
-  defp allow_missing_client?(opts), do: Keyword.get(opts, :allow_missing_client_id?, false)
+  defp allow_missing_client?(opts) do
+    case Keyword.fetch(opts, :allow_missing_client_id?) do
+      :error -> false
+      {:ok, value} when is_boolean(value) -> value
+      {:ok, _value} -> raise ArgumentError, ":allow_missing_client_id? must be true or false"
+    end
+  end
 
   # RFC 6749 §6: the requested scope MUST be a subset of the originally
   # granted scope. Narrowing is allowed; widening is refused. No request
@@ -359,40 +754,197 @@ defmodule Attesto.RefreshToken do
     end
   end
 
-  # The atomic claim. Closes the read-then-claim race: if a concurrent
-  # rotation claimed this token between our read and here, `consume`
-  # reports `{:reuse, _}` and we revoke the family.
-  defp claim(store, record, opts) do
-    case store.consume(record.token_hash, now: NumericDate.now(opts)) do
-      {:ok, claimed} ->
-        {:ok, claimed}
+  defp call_store_callback(callback) do
+    {:returned, callback.()}
+  catch
+    kind, value -> {:failed, kind, value, __STACKTRACE__}
+  end
 
-      {:reuse, claimed} ->
-        revoke_and_report_reuse(store, claimed)
+  defp valid_loaded_record?(record, token_hash) do
+    is_map(record) and Map.get(record, :token_hash) == token_hash and
+      non_empty_binary?(Map.get(record, :family_id)) and
+      is_integer(Map.get(record, :generation)) and Map.get(record, :generation) >= 0 and
+      valid_stored_context?(Map.get(record, :data)) and is_integer(Map.get(record, :expires_at)) and
+      is_boolean(Map.get(record, :consumed))
+  end
 
-      :error ->
-        {:error, :invalid_grant}
+  # A malformed record must not be allowed to name an arbitrary family for
+  # cleanup. The hash binding is the minimum trustworthy link back to the
+  # credential that was presented; no other malformed fields are copied into
+  # telemetry.
+  defp trusted_family_id(record, token_hash) when is_map(record) do
+    if Map.get(record, :token_hash) == token_hash and non_empty_binary?(Map.get(record, :family_id)) do
+      Map.get(record, :family_id)
     end
   end
 
-  defp within_rotation_grace?(record, opts) do
-    grace = Keyword.get(opts, :rotation_grace_seconds, 10)
-    consumed_at = Map.get(record, :consumed_at)
+  defp trusted_family_id(_record, _token_hash), do: nil
 
-    is_integer(grace) and grace > 0 and is_integer(consumed_at) and
-      NumericDate.now(opts) - consumed_at <= grace
+  defp valid_unconsumed_record?(record) do
+    is_nil(Map.get(record, :consumed_at)) and is_nil(Map.get(record, :successor))
+  end
+
+  defp valid_claim_record?(claimed, original, :reuse) do
+    valid_loaded_record?(claimed, original.token_hash) and Map.get(claimed, :consumed) == true and
+      is_integer(Map.get(claimed, :consumed_at)) and same_claim_identity?(claimed, original)
+  end
+
+  defp same_claim_identity?(claimed, original) do
+    Enum.all?([:token_hash, :family_id, :generation, :data, :expires_at], fn key ->
+      Map.fetch(claimed, key) == Map.fetch(original, key)
+    end)
+  end
+
+  defp valid_stored_context?(%{
+         subject: subject,
+         scope: scope,
+         resource: resource,
+         client_id: client_id,
+         dpop_jkt: dpop_jkt,
+         acr: acr,
+         auth_time: auth_time,
+         claims: claims
+       }) do
+    non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
+      valid_optional_client_id?(client_id) and valid_optional_jkt?(dpop_jkt) and is_map(claims) and
+      valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time)
+  end
+
+  defp valid_stored_context?(_malformed), do: false
+
+  defp retry_window(record, opts) do
+    grace = Keyword.fetch!(opts, :rotation_grace_seconds)
+    consumed_at = Map.get(record, :consumed_at)
+    now = NumericDate.now(opts)
+
+    cond do
+      not is_integer(consumed_at) ->
+        {:state_error, :consumed_at_missing}
+
+      consumed_at < 0 ->
+        {:state_error, :consumed_at_invalid}
+
+      now < consumed_at and consumed_at - now > grace ->
+        {:state_error, :clock_before_consumption}
+
+      grace == 0 ->
+        :outside
+
+      max(now, consumed_at) - consumed_at > grace ->
+        :outside
+
+      true ->
+        # A serving node may lag the node that committed `consumed_at`. Clamp
+        # only bounded backward skew to the committed instant, so a retry can
+        # use the already-fixed deadline without extending the grace window.
+        retry_deadline_status(Map.get(record, :successor), consumed_at, max(now, consumed_at))
+    end
+  end
+
+  defp retry_deadline_status(%{retry_until: retry_until, recoverable: false}, consumed_at, now)
+       when is_integer(retry_until) do
+    cond do
+      retry_until < consumed_at -> {:state_error, :retry_deadline_invalid}
+      retry_until == consumed_at -> :outside
+      now > retry_until -> :outside
+      true -> {:state_error, :successor_state_unavailable}
+    end
+  end
+
+  defp retry_deadline_status(%{retry_until: retry_until}, consumed_at, now) when is_integer(retry_until) do
+    cond do
+      retry_until < consumed_at -> {:state_error, :retry_deadline_invalid}
+      now <= retry_until -> :inside
+      true -> :outside
+    end
+  end
+
+  defp retry_deadline_status(%{retry_until: _invalid}, _consumed_at, _now), do: {:state_error, :retry_deadline_invalid}
+
+  defp retry_deadline_status(_missing_or_invalid_successor, _consumed_at, _now),
+    do: {:state_error, :successor_state_missing}
+
+  defp rotation_grace_seconds!(opts) do
+    case Keyword.get(opts, :rotation_grace_seconds, @default_rotation_grace_seconds) do
+      grace when is_integer(grace) and grace >= 0 ->
+        grace
+
+      other ->
+        raise ArgumentError,
+              ":rotation_grace_seconds must be a non-negative integer; got #{inspect(other)}"
+    end
+  end
+
+  defp validate_issue_options!(opts) do
+    _ttl = ttl_seconds!(opts)
+    _now = refresh_now!(opts)
+
+    if Keyword.has_key?(opts, :family_id) or Keyword.has_key?(opts, :generation) do
+      raise ArgumentError,
+            ":family_id and :generation are internal rotation state; public issuance always starts a new family"
+    end
+
+    :ok
+  end
+
+  defp ttl_seconds!(opts) do
+    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
+    end
+  end
+
+  defp refresh_now!(opts) do
+    case NumericDate.now(opts) do
+      now when is_integer(now) and now >= 0 -> now
+      _negative -> raise ArgumentError, ":now must be a non-negative NumericDate"
+    end
   end
 
   defp same_successor(record, scope, resource) do
     case Map.get(record, :successor) do
-      %{token: token, generation: generation, context: %{scope: ^scope, resource: ^resource} = context}
-      when is_binary(token) and is_integer(generation) ->
-        {:ok, %{token: token, generation: generation, context: context}}
+      %{token: token, generation: generation, context: context}
+      when is_binary(token) and token != "" and is_integer(generation) and is_map(context) ->
+        classify_successor(record, token, generation, context, scope, resource)
+
+      nil ->
+        {:state_error, :successor_state_missing}
 
       _ ->
-        {:error, :no_successor}
+        {:state_error, :successor_state_invalid}
     end
   end
+
+  defp classify_successor(record, token, generation, context, scope, resource) do
+    cond do
+      generation != record.generation + 1 ->
+        {:state_error, :successor_state_invalid}
+
+      not valid_successor_context?(context, record.data) ->
+        {:state_error, :successor_state_invalid}
+
+      not equivalent_authorization_set?(context.scope, scope) or
+          not equivalent_authorization_set?(context.resource, resource) ->
+        {:error, :retry_request_mismatch}
+
+      true ->
+        {:ok, %{token: token, generation: generation, context: context}}
+    end
+  end
+
+  defp valid_successor_context?(context, parent) do
+    valid_stored_context?(context) and
+      Enum.all?([:subject, :client_id, :dpop_jkt, :acr, :auth_time, :claims], fn key ->
+        Map.get(context, key) == Map.get(parent, key)
+      end) and authorization_subset?(context.scope, parent.scope) and
+      authorization_subset?(context.resource, parent.resource)
+  end
+
+  defp authorization_subset?(requested, granted) do
+    MapSet.subset?(MapSet.new(requested), MapSet.new(granted))
+  end
+
+  defp equivalent_authorization_set?(left, right), do: MapSet.equal?(MapSet.new(left), MapSet.new(right))
 
   # ----- validation -----
 
@@ -401,18 +953,29 @@ defmodule Attesto.RefreshToken do
     resource = Map.get(context, :resource, [])
     dpop_jkt = Map.get(context, :dpop_jkt)
 
+    with :ok <- validate_primary_context(context, scope, resource),
+         :ok <- validate_supplemental_context(context, dpop_jkt) do
+      {:ok, build_data(context, scope, resource, dpop_jkt)}
+    end
+  end
+
+  defp validate_primary_context(context, scope, resource) do
     cond do
       not non_empty_binary?(Map.get(context, :subject)) -> {:error, :invalid_subject}
       not valid_scope?(scope) -> {:error, :invalid_scope}
       not valid_resource?(resource) -> {:error, :invalid_resource}
+      not valid_optional_client_id?(Map.get(context, :client_id)) -> {:error, :invalid_client_id}
+      true -> :ok
+    end
+  end
+
+  defp validate_supplemental_context(context, dpop_jkt) do
+    cond do
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
       not is_map(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
       not valid_optional_acr?(Map.get(context, :acr)) -> {:error, :invalid_acr}
       not valid_optional_auth_time?(Map.get(context, :auth_time)) -> {:error, :invalid_auth_time}
-      # RFC 8707: the bound resource set rides through rotation unchanged via the
-      # `%{claimed.data | scope: scope}` struct-update in `issue_successor/4`, so
-      # a refreshed access token stays audienced to the same resource(s).
-      true -> {:ok, build_data(context, scope, resource, dpop_jkt)}
+      true -> :ok
     end
   end
 
@@ -425,7 +988,7 @@ defmodule Attesto.RefreshToken do
       dpop_jkt: dpop_jkt,
       # RFC 9470 / OIDC Core §2: the authentication context (`acr`/`auth_time`)
       # of the ORIGINAL end-user authentication. Carried through rotation
-      # unchanged (issue_successor/4's struct-update never overrides them), so a
+      # unchanged (successor_data only narrows scope/resource), so a
       # refresh-minted access token reports the original auth event - a refresh
       # never makes the authentication "fresher".
       acr: Map.get(context, :acr),
@@ -436,6 +999,8 @@ defmodule Attesto.RefreshToken do
 
   defp valid_optional_acr?(nil), do: true
   defp valid_optional_acr?(acr), do: non_empty_binary?(acr)
+  defp valid_optional_client_id?(nil), do: true
+  defp valid_optional_client_id?(client_id), do: non_empty_binary?(client_id)
   defp valid_optional_auth_time?(nil), do: true
   defp valid_optional_auth_time?(auth_time), do: is_integer(auth_time) and auth_time >= 0
 

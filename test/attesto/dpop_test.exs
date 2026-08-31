@@ -795,7 +795,11 @@ defmodule Attesto.DPoPTest do
     test "passes a ttl derived from a custom :max_age_seconds" do
       parent = self()
       {proof, _jkt} = Factory.dpop_proof()
-      replay_check = fn _jti, ttl -> send(parent, {:ttl, ttl}) && :ok end
+
+      replay_check = fn _jti, ttl ->
+        send(parent, {:ttl, ttl})
+        :ok
+      end
 
       assert {:ok, _} =
                DPoP.verify_proof(proof, base_opts(max_age_seconds: 300, replay_check: replay_check))
@@ -822,7 +826,11 @@ defmodule Attesto.DPoPTest do
       assert jkt_a != jkt_b
 
       digest = fn jkt -> :sha256 |> :crypto.hash(jkt <> ":" <> jti) |> Base.url_encode64(padding: false) end
-      seen = fn key, _ttl -> send(self(), {:key, key}) && :ok end
+
+      seen = fn key, _ttl ->
+        send(self(), {:key, key})
+        :ok
+      end
 
       assert {:ok, %{replay_key: key_a}} =
                DPoP.verify_proof(proof_a, base_opts(replay_check: seen))
@@ -853,11 +861,14 @@ defmodule Attesto.DPoPTest do
 
     test "raises if :replay_check returns an unsupported value" do
       {proof, _jkt} = Factory.dpop_proof()
-      bogus = fn _jti, _ttl -> :random_unexpected_value end
+      bogus = fn _jti, _ttl -> {:error, "credential-sentinel-that-must-not-escape"} end
 
-      assert_raise ArgumentError, ~r/:replay_check/, fn ->
-        DPoP.verify_proof(proof, base_opts(replay_check: bogus))
-      end
+      error =
+        assert_raise ArgumentError, ~r/:replay_check/, fn ->
+          DPoP.verify_proof(proof, base_opts(replay_check: bogus))
+        end
+
+      refute Exception.message(error) =~ "credential-sentinel"
     end
 
     test "raises if :replay_check is not a 2-arity function" do

@@ -509,6 +509,23 @@ defmodule Attesto.TokenVerifyTest do
       assert {:error, :dpop_proof_required} = Token.verify(config, jwt, dpop_jkt: nil)
     end
 
+    test "a malformed binding requirement cannot disable confirmation verification", %{config: config} do
+      assert {:ok, %{access_token: jwt}} =
+               Token.mint(
+                 config,
+                 %{kind: "client", sub: "oc_abc123", scopes: [], claims: %{"client_id" => "oc_abc123"}},
+                 dpop_jkt: @valid_jkt
+               )
+
+      for invalid <- [nil, "false", 0, {:error, :unavailable}] do
+        assert_raise ArgumentError, ~r/:require_confirmation_binding must be true or false/, fn ->
+          Token.verify(config, jwt, require_confirmation_binding: invalid)
+        end
+      end
+
+      assert {:ok, _claims} = Token.verify(config, jwt, require_confirmation_binding: false)
+    end
+
     test "a DPoP-bound token with a mismatched :dpop_jkt fails with :dpop_binding_mismatch", %{config: config} do
       other = "AAAAOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
 

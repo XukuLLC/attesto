@@ -32,8 +32,8 @@ defmodule Attesto.CodeStore do
   §4.13 (and RFC 6749 §4.1.2) say more: when a code is presented a second
   time the AS SHOULD revoke the tokens already issued from the first
   redemption, because a second presentation is an attack signal (the code
-  leaked). Acting on that signal requires remembering which family the
-  first redemption spawned.
+  leaked). Acting on that signal requires remembering which family, if any,
+  the first redemption spawned.
 
   A store MAY opt into this by implementing the OPTIONAL `mark_consumed/2`
   callback and extending `take/1` to return `{:error, :consumed, meta}`
@@ -45,7 +45,9 @@ defmodule Attesto.CodeStore do
       as before. Single use is unaffected.
     * A store that DOES implement reuse tracking calls `mark_consumed/2`
       when a redemption succeeds, recording the `code_hash` together with
-      `meta` (the `family_id`/`subject` of that first redemption). A later
+      `meta` (the `family_id`/`subject` for that redemption). The family is
+      `nil` for `finalize/3` no-refresh flows and is the exact issued family
+      only for `issue_refresh_and_finalize/6`. A later
       `take/1` of the same hash then returns `{:error, :consumed, meta}`,
       and `Attesto.AuthorizationCode.redeem/4` surfaces
       `{:error, {:reuse, meta}}` so the caller can revoke the family.
@@ -75,9 +77,10 @@ defmodule Attesto.CodeStore do
   @typedoc """
   Reuse metadata recorded at the first redemption and replayed to a later
   `take/1` of the same `code_hash`. Opaque to `Attesto.CodeStore`; carried
-  through `Attesto.AuthorizationCode.redeem/4` to the caller so it can
-  revoke the family the leaked code spawned. Conventionally holds the
-  `:family_id` and `:subject` of the first redemption.
+  through `Attesto.AuthorizationCode.redeem/4` to the caller. Conventionally
+  holds `:family_id` and `:subject`; the family is `nil` for a no-refresh
+  `finalize/3` marker and non-nil only when the refresh composition captured
+  an actually issued family.
   """
   @type consumed_meta :: map()
 
@@ -103,8 +106,9 @@ defmodule Attesto.CodeStore do
     * `{:error, :consumed, meta}` - OPTIONAL, only for a store that
       implements `mark_consumed/2`: the code was already successfully
       redeemed once. `meta` is the value passed to `mark_consumed/2` at
-      that first redemption (carrying the `family_id`/`subject`). This is
-      the code-reuse attack signal (OAuth 2.0 Security BCP §4.13); the
+      that first redemption (carrying the `family_id`/`subject`, with a nil
+      family for no-refresh finalization). This is the code-reuse attack
+      signal (OAuth 2.0 Security BCP §4.13); the
       redeemer surfaces it so the caller can revoke descendants.
 
   A store that does not track reuse never returns the third form, so the
@@ -121,7 +125,8 @@ defmodule Attesto.CodeStore do
   Implemented only by stores that support code-reuse detection (OAuth 2.0
   Security BCP §4.13 / RFC 6749 §4.1.2). `Attesto.AuthorizationCode` calls
   it exactly once, after a redemption fully validates, with `meta` carrying
-  the first redemption's `:family_id` and `:subject`. A store that does not
+  that redemption's `:family_id` and `:subject` (or a nil family when
+  `finalize/3` is used for a no-refresh flow). A store that does not
   implement this callback simply omits it from the behaviour; the redeemer
   detects its absence (`function_exported?/3`) and skips the call, leaving
   single-use behaviour unchanged.

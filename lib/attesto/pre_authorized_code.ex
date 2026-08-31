@@ -12,9 +12,7 @@ defmodule Attesto.PreAuthorizedCode do
   hash. When a transaction code is bound, only its hash is stored as well.
   """
 
-  alias Attesto.NumericDate
-  alias Attesto.Secret
-  alias Attesto.SecureCompare
+  alias Attesto.{NumericDate, Scope, Secret, SecureCompare}
 
   @default_ttl_seconds 300
 
@@ -44,18 +42,20 @@ defmodule Attesto.PreAuthorizedCode do
   """
   @spec issue(module(), issue_attrs(), keyword()) :: {:ok, String.t()} | {:error, :invalid_attrs}
   def issue(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
+    ttl = ttl_seconds!(opts)
+    now = numeric_date!(opts)
+
     with {:ok, data} <- normalize_attrs(attrs) do
       code = Secret.generate()
-      ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
 
-      :ok =
-        store.put(%{
-          code_hash: Secret.hash(code),
-          data: data,
-          expires_at: NumericDate.now(opts) + ttl
-        })
-
-      {:ok, code}
+      case store.put(%{
+             code_hash: Secret.hash(code),
+             data: data,
+             expires_at: now + ttl
+           }) do
+        :ok -> {:ok, code}
+        _unexpected -> store_contract_error(:put)
+      end
     end
   end
 
@@ -69,24 +69,34 @@ defmodule Attesto.PreAuthorizedCode do
   @spec redeem(module(), String.t(), map(), keyword()) :: {:ok, grant()} | {:error, atom()}
   def redeem(store, code, params, opts \\ [])
       when is_atom(store) and is_binary(code) and is_map(params) and is_list(opts) do
-    case store.take(Secret.hash(code)) do
-      {:ok, %{data: data, expires_at: expires_at}} ->
-        redeem_taken(data, expires_at, params, opts)
+    now = numeric_date!(opts)
+    code_hash = Secret.hash(code)
+
+    case store.take(code_hash) do
+      {:ok, record} ->
+        if valid_record?(record, code_hash) do
+          redeem_taken(record.data, record.expires_at, params, now)
+        else
+          store_contract_error(:take)
+        end
 
       :error ->
         {:error, :invalid_grant}
+
+      _unexpected ->
+        store_contract_error(:take)
     end
   end
 
-  defp redeem_taken(data, expires_at, params, opts) do
-    with :ok <- check_expiry(expires_at, opts),
+  defp redeem_taken(data, expires_at, params, now) do
+    with :ok <- check_expiry(expires_at, now),
          :ok <- check_tx_code(data, params) do
       {:ok, Map.take(data, [:subject, :credential_configuration_ids, :authorized_scopes])}
     end
   end
 
-  defp check_expiry(expires_at, opts) do
-    if expires_at > NumericDate.now(opts), do: :ok, else: {:error, :expired}
+  defp check_expiry(expires_at, now) do
+    if expires_at > now, do: :ok, else: {:error, :expired}
   end
 
   defp check_tx_code(data, params) do
@@ -146,8 +156,63 @@ defmodule Attesto.PreAuthorizedCode do
     is_list(value) and value != [] and Enum.all?(value, &valid_non_empty_string?/1)
   end
 
-  defp valid_string_list?(value), do: is_list(value) and Enum.all?(value, &is_binary/1)
+  defp valid_string_list?(value), do: Scope.valid_list?(value)
+
+  defp ttl_seconds!(opts) do
+    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
+    end
+  end
+
+  defp numeric_date!(opts) do
+    case NumericDate.now(opts) do
+      now when is_integer(now) and now >= 0 -> now
+      _invalid -> raise ArgumentError, ":now must be a non-negative NumericDate"
+    end
+  rescue
+    ArgumentError ->
+      reraise ArgumentError,
+              [message: ":now must be a non-negative NumericDate"],
+              __STACKTRACE__
+  end
 
   defp valid_optional_tx_code?(nil), do: true
   defp valid_optional_tx_code?(value), do: valid_non_empty_string?(value)
+
+  defp valid_record?(
+         %{
+           code_hash: record_hash,
+           data:
+             %{
+               subject: subject,
+               credential_configuration_ids: credential_configuration_ids,
+               authorized_scopes: authorized_scopes
+             } = data,
+           expires_at: expires_at
+         },
+         expected_hash
+       ) do
+    record_hash == expected_hash and valid_non_empty_string?(subject) and
+      valid_non_empty_string_list?(credential_configuration_ids) and
+      valid_string_list?(authorized_scopes) and is_integer(expires_at) and
+      valid_tx_code_hash?(data)
+  end
+
+  defp valid_record?(_record, _expected_hash), do: false
+
+  defp valid_tx_code_hash?(data) do
+    case Map.fetch(data, :tx_code_hash) do
+      {:ok, tx_code_hash} -> is_binary(tx_code_hash) and tx_code_hash != ""
+      :error -> true
+    end
+  end
+
+  defp store_contract_error(:put) do
+    raise RuntimeError, "pre-authorized code store put/1 violated its contract"
+  end
+
+  defp store_contract_error(:take) do
+    raise RuntimeError, "pre-authorized code store take/1 violated its contract"
+  end
 end

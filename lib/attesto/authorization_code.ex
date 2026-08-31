@@ -45,8 +45,9 @@ defmodule Attesto.AuthorizationCode do
   implements the optional reuse-tracking pair (`c:Attesto.CodeStore.take/1`
   returning `{:error, :consumed, meta}` plus
   `c:Attesto.CodeStore.mark_consumed/2`). The reuse marker is recorded by
-  `finalize/3`, which the caller invokes AFTER the full token response has been
-  successfully built - NOT by `redeem/4` itself. So a code whose redemption
+  `finalize/3`, which the caller invokes AFTER all access-token, ID-token, and
+  other response fields have been successfully built - NOT by `redeem/4`
+  itself. So a code whose redemption
   validated but whose downstream issuance then failed (a mint or refresh-token
   fault, a host callback returning a bad principal) is left single-use-spent
   but NOT reuse-flagged: a replay is `{:error, :invalid_grant}`, and a
@@ -54,14 +55,24 @@ defmodule Attesto.AuthorizationCode do
   (which would wrongly revoke the family). Once `finalize/3` has run, a later
   redemption of the same code yields `{:error, {:reuse, meta}}`, where `meta`
   carries that first redemption's context so the caller can revoke the
-  descendant family (e.g. via `Attesto.Revocation`). A store that does not
+  descendant family (e.g. via `Attesto.Revocation`). The no-refresh
+  `finalize/3` path records a nil family ID; only
+  `issue_refresh_and_finalize/6` records the exact family returned by refresh
+  issuance. A store that does not
   implement the pair behaves exactly as before: a re-presented code is
   `{:error, :invalid_grant}`.
   This is additive and fail-safe (see `Attesto.CodeStore`).
 
-  Pass a `:family_id` to `issue/3` to link the code to the refresh-token
-  family it will spawn; it rides onto the returned `Grant` so the host
-  mints the family under that id, and it is what reuse detection replays.
+  `:family_id` on an authorization request is provenance metadata carried by
+  the returned `Grant`; public `Attesto.RefreshToken.issue/3` deliberately
+  rejects that value and always creates a fresh family. A host that issues a
+  refresh token from a redeemed code should use
+  `issue_refresh_and_finalize/6`, which owns issuance, captures the returned
+  family ID, and records it only after issuance succeeds. This keeps the
+  code-reuse marker useful without reopening caller control over
+  refresh-family generation. That helper also requires the refresh context's
+  subject and client to match the redeemed grant and permits only
+  scope/resource narrowing.
 
   ## DPoP-bound codes
 
@@ -137,10 +148,10 @@ defmodule Attesto.AuthorizationCode do
   Optional `:code_challenge` binds the code to PKCE; when present,
   `:code_challenge_method` must be `"S256"` if given. Optional `:scope` (a
   list of strings, default `[]`), `:dpop_jkt` (binds the code to a DPoP key),
-  `:family_id` (a
-  non-empty string linking this code to the refresh-token family it will
-  spawn; rides onto the redeemed `Grant` and is what code-reuse detection
-  replays - see the moduledoc), and `:claims` (an opaque host context map
+  `:family_id` (a non-empty provenance string round-tripped to the redeemed
+  `Grant`; use `issue_refresh_and_finalize/6` to bind the actually issued
+  refresh family), and
+  `:claims` (an opaque host context map
   round-tripped to `redeem/4`).
 
   Options: `:ttl` (seconds the code is valid, default
@@ -154,17 +165,25 @@ defmodule Attesto.AuthorizationCode do
   def issue(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
     with :ok <- validate_method(attrs),
          {:ok, data} <- normalize_issue_attrs(attrs) do
+      ttl = ttl_seconds!(opts)
+      now = NumericDate.non_negative_now!(opts)
       code = Secret.generate()
-      ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
 
-      :ok =
-        store.put(%{
-          code_hash: Secret.hash(code),
-          data: data,
-          expires_at: NumericDate.now(opts) + ttl
-        })
+      case store.put(%{
+             code_hash: Secret.hash(code),
+             data: data,
+             expires_at: now + ttl
+           }) do
+        :ok -> {:ok, code}
+        _unexpected -> code_store_contract_error(:put)
+      end
+    end
+  end
 
-      {:ok, code}
+  defp ttl_seconds!(opts) do
+    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
     end
   end
 
@@ -192,27 +211,39 @@ defmodule Attesto.AuthorizationCode do
   `Attesto.CodeStore`), a second redemption of a code that was already
   successfully redeemed returns `{:error, {:reuse, meta}}` rather than
   `{:error, :invalid_grant}`. `meta` carries the first redemption's
-  `:family_id` and `:subject` so the caller can revoke the descendant
-  family (OAuth 2.0 Security BCP §4.13). Codes the store has never seen
-  remain `{:error, :invalid_grant}`.
+  `:family_id` and `:subject`. For a redemption that issued a refresh token,
+  `:family_id` identifies the descendant family to revoke (OAuth 2.0 Security
+  BCP §4.13); for a no-refresh redemption it is `nil`. Codes the store has
+  never seen remain `{:error, :invalid_grant}`.
   """
   @spec redeem(module(), String.t(), redeem_params(), keyword()) ::
           {:ok, Grant.t()} | {:error, redeem_error()}
-  def redeem(store, code, params, opts \\ []) when is_atom(store) and is_binary(code) and is_map(params) do
-    case store.take(Secret.hash(code)) do
+  def redeem(store, code, params, opts \\ [])
+      when is_atom(store) and is_binary(code) and is_map(params) and is_list(opts) do
+    now = NumericDate.non_negative_now!(opts)
+    _allow_missing_client = allow_missing_client?(opts)
+    opts = Keyword.put(opts, :now, now)
+    code_hash = Secret.hash(code)
+
+    case store.take(code_hash) do
       {:ok, record} ->
-        redeem_taken(record, params, opts)
+        if valid_record?(record, code_hash),
+          do: redeem_taken(record, params, opts),
+          else: code_store_contract_error(:take)
 
       # OAuth 2.0 Security BCP §4.13 / RFC 6749 §4.1.2: a re-presented,
       # already-FINALIZED code is the reuse attack signal. Only stores with
-      # reuse tracking return this, and only once `finalize/3` has recorded the
+      # reuse tracking return this, and only once finalization has recorded the
       # marker; surface the first redemption's context so the caller can revoke
       # the descendant family.
-      {:error, :consumed, meta} ->
+      {:error, :consumed, meta} when is_map(meta) ->
         {:error, {:reuse, meta}}
 
       :error ->
         {:error, :invalid_grant}
+
+      _unexpected ->
+        code_store_contract_error(:take)
     end
   end
 
@@ -230,14 +261,30 @@ defmodule Attesto.AuthorizationCode do
   @spec dpop_bound?(module(), String.t()) :: boolean()
   def dpop_bound?(store, code) when is_atom(store) and is_binary(code) do
     if function_exported?(store, :get, 1) do
-      case store.get(Secret.hash(code)) do
-        {:ok, %{data: %{dpop_jkt: jkt}}} when is_binary(jkt) and jkt != "" -> true
-        _ -> false
-      end
+      read_dpop_binding(store, Secret.hash(code))
     else
       false
     end
   end
+
+  defp read_dpop_binding(store, code_hash) do
+    case store.get(code_hash) do
+      {:ok, record} -> dpop_binding_from_record(record, code_hash)
+      :error -> false
+      _unexpected -> code_store_contract_error(:get)
+    end
+  end
+
+  defp dpop_binding_from_record(%{code_hash: code_hash, data: data, expires_at: expires_at}, code_hash)
+       when is_map(data) and is_integer(expires_at) do
+    case Map.get(data, :dpop_jkt) do
+      jkt when is_binary(jkt) and jkt != "" -> true
+      nil -> false
+      _malformed -> code_store_contract_error(:get)
+    end
+  end
+
+  defp dpop_binding_from_record(_record, _code_hash), do: code_store_contract_error(:get)
 
   # `take/1` has already claimed the code (single use). Validate it and return
   # the grant. The reuse marker is NOT recorded here - the caller records it via
@@ -265,11 +312,121 @@ defmodule Attesto.AuthorizationCode do
   a host callback fault) does NOT leave a spent-but-tokenless code recorded as a
   completed redemption (which would make a legitimate retry look like a reuse
   attack and revoke the family). A no-op for stores that do not implement
-  `c:Attesto.CodeStore.mark_consumed/2`.
+  `c:Attesto.CodeStore.mark_consumed/2`. This form is only for flows that issue
+  no refresh token and always records a nil `family_id` in the marker. The
+  `Grant`'s `family_id` is authorization provenance, not a refresh-family
+  identifier. For a refresh grant, use `issue_refresh_and_finalize/6` so the
+  marker carries the family ID returned by `RefreshToken.issue/3` without
+  accepting a caller-supplied ID.
   """
   @spec finalize(module(), String.t(), Grant.t()) :: :ok
   def finalize(store, code, %Grant{} = grant) when is_atom(store) and is_binary(code) do
-    record_consumption(store, Secret.hash(code), grant)
+    # An authorization-request family is provenance only. A no-refresh marker
+    # must never be mistaken for the family of a refresh credential.
+    record_consumption(store, Secret.hash(code), %{grant | family_id: nil})
+  end
+
+  @doc """
+  Issue an initial refresh token for a redeemed code and finalize its reuse
+  marker with the family ID returned by the refresh-token issuer.
+
+  This composition API is the safe bridge for authorization-code flows that
+  issue refresh tokens. First finish every access-token, ID-token, and other
+  response operation that can fail; then call this function, and add the
+  returned plaintext refresh token to the response only after it returns
+  `{:ok, issued}`. It calls `Attesto.RefreshToken.issue/3` itself, so callers
+  never provide a family ID or generation. Only a validated success result can
+  reach `mark_consumed/2`, and the exact family ID captured from that result is
+  written to the code-reuse marker. A refresh issuance error is returned
+  unchanged and leaves the code spent-but-unfinalized. A finalization exception
+  or contract violation is propagated and never becomes an `:ok` result.
+
+  `refresh_context` must carry the redeemed grant's `:subject` and
+  `:client_id`, and its `:scope` and `:resource` lists must be subsets of the
+  grant's authorization. If the redeemed grant is DPoP-bound, the context's
+  `:dpop_jkt` must exactly match that binding; a missing or different key is
+  rejected. A token-endpoint DPoP binding may differ from the
+  authorization-request binding only when the redeemed grant itself is
+  unbound, which permits token-endpoint DPoP initiation without weakening a
+  holder-of-key grant. The context must not contain top-level `:family_id` or
+  `:generation` continuation fields. Those are internal rotation state, not
+  caller input; put authorization provenance inside `:claims` when needed.
+  """
+  @spec issue_refresh_and_finalize(
+          module(),
+          String.t(),
+          Grant.t(),
+          module(),
+          Attesto.RefreshToken.context(),
+          keyword()
+        ) :: {:ok, Attesto.RefreshToken.issued()} | {:error, Attesto.RefreshToken.issue_error()}
+  def issue_refresh_and_finalize(code_store, code, %Grant{} = grant, refresh_store, refresh_context, opts \\ [])
+      when is_atom(code_store) and is_binary(code) and is_atom(refresh_store) and is_map(refresh_context) and
+             is_list(opts) do
+    validate_refresh_context!(grant, refresh_context)
+
+    case Attesto.RefreshToken.issue(refresh_store, refresh_context, opts) do
+      {:ok, issued} ->
+        issued = validate_issued_refresh!(issued)
+        :ok = record_consumption(code_store, Secret.hash(code), %{grant | family_id: issued.family_id})
+        {:ok, issued}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp validate_refresh_context!(%Grant{} = grant, context) do
+    if not valid_refresh_grant?(grant) do
+      raise ArgumentError, "redeemed grant is invalid for refresh-token issuance"
+    end
+
+    if Enum.any?([:family_id, :generation, "family_id", "generation"], &Map.has_key?(context, &1)) do
+      raise ArgumentError,
+            ":family_id and :generation are internal refresh rotation state and are not valid issue context fields"
+    end
+
+    require_matching_context!(context, :subject, grant.subject)
+    require_matching_context!(context, :client_id, grant.client_id)
+    require_subset_context!(context, :scope, grant.scope)
+    require_subset_context!(context, :resource, grant.resource)
+
+    if not is_nil(grant.dpop_jkt) do
+      require_matching_context!(context, :dpop_jkt, grant.dpop_jkt)
+    end
+
+    :ok
+  end
+
+  defp valid_refresh_grant?(%Grant{} = grant) do
+    non_empty_binary?(grant.client_id) and non_empty_binary?(grant.redirect_uri) and
+      non_empty_binary?(grant.subject) and valid_scope?(grant.scope) and
+      valid_resource?(grant.resource) and valid_optional_jkt?(grant.dpop_jkt) and
+      valid_optional_family_id?(grant.family_id) and is_map(grant.claims)
+  end
+
+  defp require_matching_context!(context, key, expected) do
+    if Map.get(context, key) != expected do
+      raise ArgumentError, "refresh context :#{key} must match the redeemed grant"
+    end
+  end
+
+  defp require_subset_context!(context, key, granted) do
+    requested = Map.get(context, key, [])
+
+    if not is_list(requested) or not Enum.all?(requested, &(&1 in granted)) do
+      raise ArgumentError, "refresh context :#{key} must be a subset of the redeemed grant"
+    end
+  end
+
+  defp validate_issued_refresh!(%{token: token, family_id: family_id, generation: generation} = issued)
+       when is_binary(token) and token != "" and is_binary(family_id) and family_id != "" and is_integer(generation) and
+              generation == 0 do
+    issued
+  end
+
+  defp validate_issued_refresh!(_invalid) do
+    raise RuntimeError, "refresh token issue/3 violated its contract"
   end
 
   # Record the successful redemption so a re-presentation of the same code
@@ -280,7 +437,10 @@ defmodule Attesto.AuthorizationCode do
   # family it spawned so the caller can revoke descendants on a later replay.
   defp record_consumption(store, code_hash, %Grant{} = grant) do
     if function_exported?(store, :mark_consumed, 2) do
-      :ok = store.mark_consumed(code_hash, %{family_id: grant.family_id, subject: grant.subject})
+      case store.mark_consumed(code_hash, %{family_id: grant.family_id, subject: grant.subject}) do
+        :ok -> :ok
+        _unexpected -> code_store_contract_error(:mark_consumed)
+      end
     end
 
     :ok
@@ -300,7 +460,13 @@ defmodule Attesto.AuthorizationCode do
     end
   end
 
-  defp allow_missing_client?(opts), do: Keyword.get(opts, :allow_missing_client_id?, false)
+  defp allow_missing_client?(opts) do
+    case Keyword.fetch(opts, :allow_missing_client_id?) do
+      :error -> false
+      {:ok, value} when is_boolean(value) -> value
+      {:ok, _value} -> raise ArgumentError, ":allow_missing_client_id? must be true or false"
+    end
+  end
 
   # ----- issue validation -----
 
@@ -417,6 +583,61 @@ defmodule Attesto.AuthorizationCode do
   # ----- helpers -----
 
   defp non_empty_binary?(v), do: is_binary(v) and v != ""
+
+  defp valid_record?(
+         %{
+           code_hash: record_hash,
+           data: %{
+             client_id: client_id,
+             redirect_uri: redirect_uri,
+             code_challenge: code_challenge,
+             subject: subject,
+             scope: scope,
+             resource: resource,
+             dpop_jkt: dpop_jkt,
+             family_id: family_id,
+             claims: claims
+           },
+           expires_at: expires_at
+         },
+         expected_hash
+       ) do
+    valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) and
+      valid_code_grant?(code_challenge, subject, scope, resource) and
+      valid_code_context?(dpop_jkt, family_id, claims, expires_at)
+  end
+
+  defp valid_record?(_record, _expected_hash), do: false
+
+  defp valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) do
+    record_hash == expected_hash and non_empty_binary?(client_id) and non_empty_binary?(redirect_uri)
+  end
+
+  defp valid_code_grant?(code_challenge, subject, scope, resource) do
+    valid_optional_challenge?(code_challenge) and non_empty_binary?(subject) and
+      valid_scope?(scope) and valid_resource?(resource)
+  end
+
+  defp valid_code_context?(dpop_jkt, family_id, claims, expires_at) do
+    valid_optional_jkt?(dpop_jkt) and valid_optional_family_id?(family_id) and
+      is_map(claims) and is_integer(expires_at)
+  end
+
+  defp code_store_contract_error(:put) do
+    raise RuntimeError, "authorization code store put/1 violated its contract"
+  end
+
+  defp code_store_contract_error(:take) do
+    raise RuntimeError, "authorization code store take/1 violated its contract"
+  end
+
+  defp code_store_contract_error(:get) do
+    raise RuntimeError, "authorization code store get/1 violated its contract"
+  end
+
+  defp code_store_contract_error(:mark_consumed) do
+    raise RuntimeError, "authorization code store mark_consumed/2 violated its contract"
+  end
 
   # PKCE is optional at issuance: a host that relaxed `:require_pkce` for a
   # confidential client issues a code with no challenge (nil). A challenge that

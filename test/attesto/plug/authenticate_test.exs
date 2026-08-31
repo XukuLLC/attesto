@@ -560,13 +560,20 @@ defmodule Attesto.Plug.AuthenticateTest do
       {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
       {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: DPoP.compute_ath(token))
 
-      opts = Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :unavailable} end)
+      opts =
+        Authenticate.init(
+          config: config,
+          replay_check: fn _jti, _ttl -> {:error, "credential-sentinel-that-must-not-escape"} end
+        )
 
-      assert_raise ArgumentError, ~r/must return :ok or \{:error, :replay\}/, fn ->
-        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
-        |> request()
-        |> Authenticate.call(opts)
-      end
+      error =
+        assert_raise ArgumentError, ~r/must return :ok or \{:error, :replay\}/, fn ->
+          [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+          |> request()
+          |> Authenticate.call(opts)
+        end
+
+      refute Exception.message(error) =~ "credential-sentinel"
     end
 
     test "a replayed jti on an otherwise-valid request is still refused", %{config: config} do

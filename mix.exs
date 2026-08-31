@@ -13,7 +13,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "1.15.0"
+  @version "2.0.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -114,9 +114,10 @@ defmodule Attesto.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
+      extras: ["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
       groups_for_extras: [
         Changelog: ~r/CHANGELOG\.md/,
+        Contributing: ~r/CONTRIBUTING\.md/,
         License: ~r/LICENSE/
       ],
       groups_for_modules: [
@@ -166,7 +167,7 @@ defmodule Attesto.MixProject do
         "Changelog" => "https://hexdocs.pm/attesto/changelog.html",
         "GitHub" => @url
       },
-      files: ~w(lib LICENSE mix.exs README.md CHANGELOG.md)
+      files: ~w(lib LICENSE mix.exs README.md CHANGELOG.md CONTRIBUTING.md)
     ]
   end
 end

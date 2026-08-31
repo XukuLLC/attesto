@@ -4,7 +4,132 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-08-30
+
+### Breaking
+
+- `Attesto.RefreshStore` now requires one family-serialized `rotate/4`
+  transaction in place of the unsafe `consume/2` then `insert/1` then
+  `remember_successor/3` sequence. A winner returns
+  `{:ok, committed_parent, committed_child}`; a loser returns the complete
+  committed parent. The callback also distinguishes revoked, expired,
+  retry-state-unavailable, random token-collision, invalid-rotation, and
+  sibling-generation-integrity outcomes. `get/1` must provide strong reads
+  consistent with rotation and revocation. Custom stores must migrate before
+  upgrading.
+- `Attesto.DeviceCodeStore` now requires `get/1`; `lookup_user_code/1` returns
+  the full entry; and the decision callbacks are `approve/3` and `deny/2`,
+  receive `%{now: unix_seconds}`, and return the committed post-transition
+  entry. Decisions must atomically require a pending, unexpired code. Custom
+  stores must update these callbacks.
+- `Attesto.RefreshToken.issue/3` always starts a new family at generation zero.
+  The former public `:family_id` and `:generation` continuation options are
+  rejected; only the atomic rotation path can create descendants.
+- Authorization-code `:family_id` is provenance metadata rather than a
+  refresh-family injection point. Hosts issuing a refresh token from a
+  redeemed code should call `Attesto.AuthorizationCode.issue_refresh_and_finalize/6`,
+  which owns issuance, requires the refresh context's subject and client to
+  match the grant, permits only scope/resource subsets, and binds the exact
+  returned family ID; the three-arity `finalize/3` remains for flows that issue
+  no refresh token and records a nil family marker. A DPoP-bound grant requires
+  the exact same refresh binding; token-endpoint DPoP initiation may differ
+  only when the redeemed grant is unbound. Build the access/ID-token response
+  before calling the composition API, and add its refresh token only after
+  successful return.
+- `c:Attesto.RefreshStore.insert/1` reports `{:error, :conflict}` for an existing
+  token hash or family generation and must leave the candidate row absent.
+  Successful `rotate/4` calls return the exact committed parent and child
+  snapshots, including the committed `consumed_at` and successor state; custom
+  adapters must not substitute a racy post-commit read.
+- Device user codes now accept only lengths 8..64 (the default remains 8).
+  The same bound applies to generation and normalization options, so custom
+  verification pages should preserve the configured length when normalizing.
+- Explicit policy and lifetime options must now carry their documented type;
+  omit an option to use its default instead of passing `nil`. This applies to
+  client-assertion `:enforce_fapi_alg_policy` / `:max_lifetime`, wallet
+  attestation `:enforce_fapi_alg_policy` / `:max_age_seconds`, authorization
+  request `:require_nonce` / `:require_pkce`, key attestation `:require_exp` /
+  `:enforce_fapi_alg_policy`, CIBA request policy and length options, and CIBA
+  issuance `:expires_in` / `:max_expires_in` / `:interval`. Introspection's
+  `:authorize` option must be a one-argument function or `nil`.
+
+### Adapter migration
+
+- Before upgrading a custom store, audit every callback against the Attesto 2
+  contracts. `RefreshStore` requires family-serialized `rotate/4` and strong
+  `get/1` reads; `DeviceCodeStore` requires full-record `get/1` and
+  `lookup_user_code/1`; and `CodeStore`, `PreAuthorizedCodeStore`, `CIBAStore`,
+  and `PresentationSessionStore` now reject unexpected callback returns and
+  malformed records with constant contract errors. Return the documented
+  tuples, maps, and atoms exactly, preserve the required record bindings, and
+  keep state transitions atomic before deploying a custom adapter.
+
+### Security
+
+- Refresh rotation now commits the parent transition, protected retry state,
+  and exact child in one atomic operation serialized against family
+  revocation. Simultaneous matching requests coalesce on one successor instead
+  of observing partial state. A pre-commit protection failure or documented
+  `:invalid_rotation` rollback leaves the parent usable and returns
+  `:temporarily_unavailable` without revocation; an ambiguous callback
+  failure or corrupt committed state attempts family revocation. Every path
+  emits a distinct
+  `[:attesto, :refresh_token, :rotation_state_failed]` event instead of
+  reporting success or falsely alleging token reuse. A callback that raises,
+  throws, or exits gets the same sanitized event and cleanup attempt before
+  its original failure is propagated unchanged.
+- Rotation grace must be a non-negative integer and is fixed when the
+  successor is issued via a stored `retry_until` deadline. Clock rollback,
+  malformed recovery state, a missing successor, and an expired successor can
+  no longer return a cached refresh credential. The ETS reference store
+  redacts retry credentials after their deadline; strict zero-grace rotation
+  stores only an exact non-secret tombstone, and revoked-family markers are
+  retained for the store lifetime rather than expiring after a fixed 30-day
+  interval. A backward clock difference between serving nodes, no larger than
+  the configured grace, is tolerated during that fixed retry window; larger
+  rollback remains fail-closed. Generation lookup is
+  constant-time, and a pre-existing sibling generation atomically revokes the
+  corrupt family. An expired ancestor remains a valid family-revocation handle
+  when the caller is authorized, so live descendants cannot survive revocation.
+- Client-binding and sender-constraint opt-outs now require exact booleans.
+  Malformed `:allow_missing_client_id?` and
+  `:require_confirmation_binding` values can no longer disable their checks;
+  omitted means the secure default and explicit `nil` is not an opt-out.
+- Unexpected replay-, nonce-, and refresh-store callback returns now fail
+  loudly, including a refused successor-persistence callback that older code
+  could ignore. Constant contract errors no longer copy adapter return data
+  into exception messages or telemetry.
+- Refresh-reuse telemetry is emitted even when family revocation raises,
+  throws, exits, or violates its return contract. The event carries only a
+  bounded cleanup status, and the original cleanup failure is preserved.
+- Refresh-token introspection keeps RFC 7662's indistinguishable inactive
+  response when its store violates the callback contract, raises, throws, or
+  exits, while emitting the sanitized
+  `[:attesto, :introspection, :refresh_store_failed]` operational event.
+- Refresh-rotation lookup exceptions and malformed records now emit the
+  sanitized `rotation_state_failed` event with `operation: :lookup`; when the
+  presented hash and family ID are still trustworthy, the family is revoked
+  before the constant contract error is returned or the original callback
+  failure is re-raised.
+- Presentation-session store results are now validated before use, including
+  the consuming result read. Unexpected callback returns and malformed
+  records fail loudly with constant errors instead of becoming ordinary
+  missing-state outcomes. Authorization-code reads and consumption,
+  device/CIBA state transitions, and OID4VCI pre-authorized-code redemption
+  enforce their documented store contracts the same way. Consumed records
+  must match the requested code identity and preserve the security context
+  validated immediately before the atomic transition; a malformed or changed
+  record can no longer construct a grant.
+- Device and CIBA approvals cannot widen the originally requested scope;
+  persisted decisions must retain their subject and required authentication
+  context. CIBA propagates the approved `acr` and `auth_time` into its grant;
+  a one-second approval/redeemer clock difference is tolerated, while larger
+  future timestamps and impossible persisted records remain rejected before
+  grant construction.
+- Authorization-code, OID4VCI pre-authorized-code, refresh-token, device-code,
+  and CIBA clock/lifetime options are validated before any destructive store
+  transition, so malformed host input cannot burn an otherwise valid one-time
+  grant.
 
 ## [1.15.0] - 2026-08-13
 
@@ -116,7 +241,7 @@ fuzzing fully clean.
   closed (`{:error, _}`) on a malformed host-supplied `jwks` / `accepted_algs`
   (nil, non-list) instead of raising, honoring their documented contract
   (found by fuzzing).
-- `Attesto.Store.ETS` `:direct` reset now clears every table the store owns, not
+- The internal ETS store's `:direct` reset now clears every table the store owns, not
   just the primary — a store adding `extra_tables:` on the default reset mode
   would previously leave those rows intact.
 
@@ -187,7 +312,7 @@ verification correctness.
   `n`/`e` before any bignum decode. Without it, an attacker-supplied key with a
   multi-hundred-KB exponent pins a scheduler in `modexp` for seconds. Wired at
   every gate that admits an untrusted key: `Attesto.Key.verification_jwk/2`,
-  `Attesto.JWS.verification_candidates/2` (via `map_candidate!`), the SD-JWT
+  the internal JWS candidate selector (via `map_candidate!`), the SD-JWT
   holder Key Binding path (`Attesto.SdJwt`), and `Attesto.JwtVc`'s `cnf` parse.
 - **OID4VP format binding + query-ID requirement.** `Attesto.VpToken.verify/2`
   now (a) binds each presentation to the DCQL-requested *format* — a validly
@@ -312,6 +437,10 @@ defense-in-depth.
   `sub.localhost`, `evil-localhost`, `localhost.` and userinfo all stay
   outside), no fragment, exact path and query, and the asymmetric request /
   registered port rule.
+
+  Thanks to [@jtippett](https://github.com/jtippett) for the contribution in
+  [#20](https://github.com/XukuLLC/attesto/pull/20).
+
 ## [1.8.1] - 2026-08-03
 
 ### Fixed
@@ -1324,7 +1453,7 @@ unchanged unless a caller opts into the new policy/options.
   token is a redirectable `invalid_request` error (OIDC Core §3.1.2.1). The
   parsed list is still exposed for the controller, which enforces semantics such
   as `prompt=none` (the OP MUST NOT show UI).
-- `c:Attesto.RefreshStore.consume/2` receives rotation options such as the
+- The former `consume/2` callback on `Attesto.RefreshStore` receives rotation options such as the
   claim timestamp and returns consumed records with enough metadata for
   retry/reuse decisions. This is the intentional 0.6 store-contract change.
 

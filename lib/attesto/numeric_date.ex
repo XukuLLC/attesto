@@ -120,6 +120,20 @@ defmodule Attesto.NumericDate do
     end
   end
 
+  @doc """
+  Resolve a Unix-second clock and reject negative values.
+
+  Stateful grant transitions use this boundary so a malformed clock cannot
+  produce a record with an invalid expiry or reach a mutating store callback.
+  """
+  @spec non_negative_now!(keyword(), keyword()) :: non_neg_integer()
+  def non_negative_now!(opts, policy \\ []) when is_list(opts) and is_list(policy) do
+    case now(opts, policy) do
+      value when is_integer(value) and value >= 0 -> value
+      _negative -> raise ArgumentError, ":now must be a non-negative NumericDate"
+    end
+  end
+
   defp invalid_now(:fallback, default), do: live_now(default)
 
   defp invalid_now(:raise, _default), do: raise(ArgumentError, "invalid :now override; expected a DateTime or integer")

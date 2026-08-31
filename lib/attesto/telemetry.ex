@@ -3,15 +3,19 @@ defmodule Attesto.Telemetry do
   `:telemetry` events Attesto emits for security-relevant refusals.
 
   These events exist for one reason: some refusals are not routine. A
-  refresh token presented twice, or a DPoP proof whose `jti` has already
-  been seen, is the shape a stolen credential makes. A return value tells
+  refresh token presented twice outside the safe retry conditions, or a DPoP
+  proof whose `jti` has already been seen, is consistent with a stolen
+  credential. A return value tells
   the calling function; it does not tell whoever is on call. Attaching a
   handler is how that signal reaches a pager, a SIEM, or an audit log
   without a host wrapping every call site.
 
   Ordinary failures are deliberately NOT events. An expired token, an
   unknown client, a wrong scope - these happen constantly in healthy
-  traffic, and emitting them would bury the three below in noise.
+  traffic, and emitting them would bury the useful signals below in noise.
+  Attesto also emits operational events when refresh rotation cannot commit,
+  recover, or read trustworthy state, and another when refresh introspection
+  cannot read its backing store reliably. Neither implies theft.
 
   ## These are indicators, not verdicts
 
@@ -29,8 +33,8 @@ defmodule Attesto.Telemetry do
   rate-limit and deduplicate by `client_id` before alerting, correlate
   across events and requests, and page on a pattern rather than on a single
   occurrence. `refresh_token.reuse_detected` is the one worth escalating
-  fastest, because reaching it has already revoked the family - the damage
-  it reports is done either way.
+  fastest, because family revocation is attempted first; inspect the event's
+  `:revocation` metadata to determine whether containment succeeded.
 
   ## Events
 
@@ -41,10 +45,10 @@ defmodule Attesto.Telemetry do
 
   A refresh token was presented after it had already been rotated, outside
   the idempotency window or without matching the original client, binding,
-  and scope (RFC 6749 §10.4, RFC 9700 §4.14). **The whole family has been
-  revoked** by the time this fires, so the legitimate client's session is
-  already over; this event is the only notice anyone gets that it was not
-  an ordinary logout.
+  and scope (RFC 6749 §10.4, RFC 9700 §4.14). Family revocation is attempted
+  before this fires. The event is emitted even when that cleanup fails, because
+  losing the highest-value security signal along with the revocation would
+  hide both the replay and its incomplete containment.
 
   This is the highest-value event here. Treat it as an alert, not a log
   line.
@@ -57,6 +61,51 @@ defmodule Attesto.Telemetry do
       carried one.
     * `:subject` - the resource owner whose session was revoked.
     * `:generation` - the generation of the presented token.
+    * `:revocation` - `:succeeded` or `:failed` for the family cleanup attempt.
+
+  ### `[:attesto, :refresh_token, :rotation_state_failed]`
+
+  Attesto could not durably store or safely recover the credential-equivalent
+  state required for refresh rotation. The rotation is always denied, but the
+  containment action depends on what happened: a pre-commit protection failure,
+  exhausted random token collision, or documented `:invalid_rotation` rollback
+  leaves the parent untouched and needs no revocation; malformed or unreadable
+  committed state triggers a family revocation attempt; a sibling-generation
+  integrity failure is atomically revoked by the store. A callback exception during rotation has ambiguous
+  commit status, so Attesto attempts revocation before propagating the
+  original failure. An initial `get/1` exception has no trustworthy family
+  identity and is reported without containment; a malformed record is revoked
+  only when its presented hash and family ID still bind it to the credential.
+  This is an operational or configuration fault, **not** refresh-token reuse.
+
+  Metadata:
+
+    * `:operation` - the failed rotation boundary: `:lookup`,
+      `:rotate_successor`, or `:recover_successor`.
+    * `:reason` - a bounded Attesto-defined atom identifying the failed
+      invariant, including `:store_raised`, `:store_threw`, or `:store_exited`
+      for a callback contract violation; it never contains the adapter's
+      return value, exception, or throw/exit value.
+    * `:revocation` - `:succeeded` or `:failed` for containment, or
+      `:not_attempted` when no mutation committed by contract or no
+      trustworthy family identity was available.
+    * `:family_id`, `:client_id`, `:subject`, and `:generation` - the same
+      correlation fields as the reuse event.
+
+  ### `[:attesto, :introspection, :refresh_store_failed]`
+
+  Refresh-token introspection could not reliably read its configured
+  `Attesto.RefreshStore`. The RFC 7662 response remains
+  `%{"active" => false}` so the failure cannot become a token-existence
+  oracle, while this operational event makes the backing-store fault visible
+  to the host.
+
+  Metadata:
+
+    * `:operation` - currently always `:get`.
+    * `:reason` - one of `:store_contract_violation`, `:store_raised`,
+      `:store_threw`, or `:store_exited`. It never contains the adapter's
+      return value, exception, or throw/exit value.
 
   ### `[:attesto, :dpop, :replay_detected]`
 
@@ -76,7 +125,7 @@ defmodule Attesto.Telemetry do
   possession: a DPoP-bound token under a mismatched key (RFC 9449 §7.1),
   or an mTLS-bound token with a mismatched certificate (RFC 8705 §3).
 
-  This is the weakest of the three. A token separated from its holder
+  This is the weakest refusal indicator. A token separated from its holder
   produces it - but so does a key rotation, a stale cached key, and a
   client that simply chooses to send the wrong one, repeatedly and for
   free. Correlate before concluding anything; see "indicators, not
@@ -135,6 +184,8 @@ defmodule Attesto.Telemetry do
         "attesto-security",
         [
           [:attesto, :refresh_token, :reuse_detected],
+          [:attesto, :refresh_token, :rotation_state_failed],
+          [:attesto, :introspection, :refresh_store_failed],
           [:attesto, :dpop, :replay_detected],
           [:attesto, :token, :sender_constraint_mismatch]
         ],
@@ -150,17 +201,39 @@ defmodule Attesto.Telemetry do
   """
 
   @refresh_token_reuse [:attesto, :refresh_token, :reuse_detected]
+  @refresh_token_rotation_state_failure [:attesto, :refresh_token, :rotation_state_failed]
+  @introspection_refresh_store_failure [:attesto, :introspection, :refresh_store_failed]
   @dpop_replay [:attesto, :dpop, :replay_detected]
   @sender_constraint_mismatch [:attesto, :token, :sender_constraint_mismatch]
 
   @doc "Every event this library emits, for `:telemetry.attach_many/4`."
   @spec events() :: [[atom()]]
-  def events, do: [@refresh_token_reuse, @dpop_replay, @sender_constraint_mismatch]
+  def events,
+    do: [
+      @refresh_token_reuse,
+      @refresh_token_rotation_state_failure,
+      @introspection_refresh_store_failure,
+      @dpop_replay,
+      @sender_constraint_mismatch
+    ]
 
   @doc false
   @spec refresh_token_reuse_detected(map()) :: :ok
   def refresh_token_reuse_detected(metadata) when is_map(metadata) do
     emit(@refresh_token_reuse, metadata)
+  end
+
+  @doc false
+  @spec refresh_token_rotation_state_failed(map()) :: :ok
+  def refresh_token_rotation_state_failed(metadata) when is_map(metadata) do
+    emit(@refresh_token_rotation_state_failure, metadata)
+  end
+
+  @doc false
+  @spec introspection_refresh_store_failed(atom()) :: :ok
+  def introspection_refresh_store_failed(reason)
+      when reason in [:store_contract_violation, :store_raised, :store_threw, :store_exited] do
+    emit(@introspection_refresh_store_failure, %{operation: :get, reason: reason})
   end
 
   @doc false

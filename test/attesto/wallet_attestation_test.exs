@@ -80,6 +80,20 @@ defmodule Attesto.WalletAttestationTest do
     assert is_integer(result.replay_ttl)
   end
 
+  test "malformed security policy options raise before JWT parsing" do
+    for invalid <- [nil, 0, "true", :yes] do
+      assert_raise ArgumentError, ~r/:enforce_fapi_alg_policy must be true or false/, fn ->
+        WalletAttestation.verify("not-a-jwt", "not-a-jwt", enforce_fapi_alg_policy: invalid)
+      end
+    end
+
+    for invalid <- [nil, 0, -1, 1.5, "300"] do
+      assert_raise ArgumentError, ~r/:max_age_seconds must be a positive integer/, fn ->
+        WalletAttestation.verify("not-a-jwt", "not-a-jwt", max_age_seconds: invalid)
+      end
+    end
+  end
+
   test "rejects an attestation not signed by a trusted wallet provider" do
     wallet_provider = ec_key()
     impostor = ec_key()
@@ -250,5 +264,24 @@ defmodule Attesto.WalletAttestationTest do
              ])
 
     assert is_binary(replay_key)
+  end
+
+  test "does not expose an unexpected replay-store return" do
+    wallet_provider = ec_key()
+    instance = ec_key()
+
+    att = attestation(wallet_provider, public_map(instance))
+    pop_jwt = pop(instance, %{"jti" => "fixed-jti"})
+
+    error =
+      assert_raise ArgumentError, ~r/:replay_check must return/, fn ->
+        WalletAttestation.verify(att, pop_jwt, [
+          {:replay_check, fn _key, _ttl -> {:error, "credential-sentinel-that-must-not-escape"} end},
+          {:trusted_wallet_provider_jwks, trusted(wallet_provider)}
+          | verify_opts()
+        ])
+      end
+
+    refute Exception.message(error) =~ "credential-sentinel"
   end
 end

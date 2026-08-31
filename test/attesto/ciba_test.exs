@@ -4,11 +4,63 @@ defmodule Attesto.CIBATest do
   alias Attesto.CIBA
   alias Attesto.CIBA.Grant
   alias Attesto.CIBA.Request
+  alias Attesto.CIBAStore.ETS
   alias Attesto.CIBAStore.ETS, as: Store
+  alias Attesto.Secret
 
   @now 1_700_000_000
   @client_id "ciba-client-1"
   @notification_token "8d67dc78-7faa-4d41-aabd-67707b374255"
+
+  defmodule ContractStore do
+    @moduledoc false
+    @behaviour Attesto.CIBAStore
+
+    @impl true
+    def put(record), do: fault(:put, ETS.put(record))
+
+    @impl true
+    def lookup(hash) do
+      result = ETS.lookup(hash)
+
+      case Process.get({__MODULE__, :approve_after_lookup}) do
+        {approval_hash, now} when approval_hash == hash ->
+          Process.delete({__MODULE__, :approve_after_lookup})
+
+          {:ok, _record} =
+            ETS.approve(
+              hash,
+              %{subject: "usr_1", acr: nil, auth_time: now, granted_scope: nil, granted_claims: %{}},
+              %{now: now}
+            )
+
+        _other ->
+          :ok
+      end
+
+      fault(:lookup, result)
+    end
+
+    @impl true
+    def approve(hash, approval, opts), do: fault(:approve, ETS.approve(hash, approval, opts))
+    @impl true
+    def deny(hash, opts), do: fault(:deny, ETS.deny(hash, opts))
+    @impl true
+    def poll(hash, opts), do: fault(:poll, ETS.poll(hash, opts))
+    @impl true
+    def consume(hash, opts), do: fault(:consume, ETS.consume(hash, opts))
+
+    defp fault(callback, result) do
+      case Process.get({__MODULE__, callback}) do
+        nil -> result
+        {:return, value} -> value
+        {:mutate_ok, mutator} -> mutate_ok(result, mutator)
+      end
+    end
+
+    defp mutate_ok({:ok, record}, mutator), do: {:ok, mutator.(record)}
+    defp mutate_ok(other, _mutator), do: other
+  end
 
   setup do
     start_supervised!(Store)
@@ -36,6 +88,17 @@ defmodule Attesto.CIBATest do
     {:ok, issued} = CIBA.issue(Store, request(request_overrides), attrs, Keyword.put_new(opts, :now, @now))
     issued
   end
+
+  defp fault(callback, mode) do
+    Process.put({ContractStore, callback}, mode)
+  end
+
+  defp clear_fault(callback) do
+    Process.delete({ContractStore, callback})
+  end
+
+  defp approve_after_lookup(auth_req_id, now),
+    do: Process.put({ContractStore, :approve_after_lookup}, {Secret.hash(auth_req_id), now})
 
   describe "issue/4 (§7.3 acknowledgement)" do
     test "returns an auth_req_id in the §7.3 charset with >=160 bits of entropy, plus expires_in and interval" do
@@ -67,6 +130,49 @@ defmodule Attesto.CIBATest do
     test "a push-mode request has no interval (nothing to poll)" do
       assert %{interval: nil} =
                issue(%{delivery_mode: :push, client_notification_token: @notification_token})
+    end
+
+    test "rejects forged request structs before storage" do
+      invalid_overrides = [
+        %{scope: []},
+        %{scope: ["accounts.read"]},
+        %{hint: {:login_hint, ""}},
+        %{hint: {:unknown, "user@example.com"}},
+        %{delivery_mode: :poll, client_notification_token: @notification_token},
+        %{delivery_mode: :ping, client_notification_token: nil},
+        %{delivery_mode: :unknown},
+        %{binding_message: ""},
+        %{binding_message: "line\nbreak"},
+        %{user_code: ""},
+        %{requested_expiry: 0},
+        %{signed?: true, request_jti: nil, request_exp: nil},
+        %{signed?: false, request_jti: "replay-id", request_exp: @now + 60},
+        %{signed?: true, request_jti: "replay-id", request_exp: @now}
+      ]
+
+      for overrides <- invalid_overrides do
+        result = CIBA.issue(Store, request(overrides), %{subject: "usr_1"}, now: @now)
+        assert result == {:error, :invalid_request}, "accepted forged request fields: #{inspect(overrides)}"
+      end
+    end
+
+    test "accepts a still-live validated signed request struct" do
+      signed = request(%{signed?: true, request_jti: "replay-id", request_exp: @now + 60})
+      assert {:ok, %{auth_req_id: id}} = CIBA.issue(Store, signed, %{subject: "usr_1"}, now: @now)
+      assert is_binary(id)
+    end
+
+    test "rejects negative clocks before put and leaves storage untouched" do
+      for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
+        fault(:put, {:return, {:private_put_sentinel, bad_now}})
+
+        assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+          CIBA.issue(ContractStore, request(), %{subject: "usr_1"}, now: bad_now)
+        end
+
+        clear_fault(:put)
+        assert :ets.tab2list(Store) == []
+      end
     end
   end
 
@@ -125,9 +231,199 @@ defmodule Attesto.CIBATest do
       assert {:error, :authorization_pending} = CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now)
     end
 
+    test "approval wins a poll race even inside the interval" do
+      %{auth_req_id: id} = issue(%{}, %{}, interval: 100)
+
+      assert {:error, :authorization_pending} =
+               CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 1)
+
+      approve_after_lookup(id, @now + 2)
+
+      assert {:ok, %Grant{subject: "usr_1"}} =
+               CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 3)
+    end
+
+    test "rejects negative clocks before lookup, approve, or deny and leaves the request untouched" do
+      %{auth_req_id: id} = issue()
+      hash = Secret.hash(id)
+
+      for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
+        fault(:lookup, {:return, {:private_lookup_sentinel, bad_now}})
+
+        assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: bad_now)
+        end
+
+        clear_fault(:lookup)
+        assert {:ok, %{status: :pending}} = ETS.lookup(hash)
+
+        fault(:lookup, {:return, {:private_lookup_sentinel, bad_now}})
+
+        assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+          CIBA.approve(ContractStore, id, %{subject: "usr_1"}, now: bad_now)
+        end
+
+        clear_fault(:lookup)
+        assert {:ok, %{status: :pending}} = ETS.lookup(hash)
+
+        fault(:lookup, {:return, {:private_lookup_sentinel, bad_now}})
+
+        assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+          CIBA.deny(ContractStore, id, now: bad_now)
+        end
+
+        clear_fault(:lookup)
+        assert {:ok, %{status: :pending}} = ETS.lookup(hash)
+      end
+    end
+
     test "an unknown auth_req_id is invalid_grant" do
       unknown = String.duplicate("a", 43)
       assert {:error, :invalid_grant} = CIBA.redeem(Store, unknown, %{client_id: @client_id}, now: @now)
+    end
+
+    test "a lookup result with an invalid stored status fails loudly without exposing it" do
+      %{auth_req_id: id} = issue()
+      sentinel = "ciba-store-private-sentinel"
+
+      fault(
+        :lookup,
+        {:mutate_ok, fn record -> Map.put(record, :status, {:invalid_status, sentinel}) end}
+      )
+
+      error =
+        assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ sentinel
+    end
+
+    test "an approved stored decision must retain the requested subject" do
+      %{auth_req_id: id} = issue()
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+
+      fault(:lookup, {:mutate_ok, fn record -> Map.put(record, :subject, "different-user") end})
+
+      assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+        CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 2)
+      end
+    end
+
+    test "an approved stored decision retains a reported ACR when one was requested" do
+      %{auth_req_id: id} = issue(%{acr_values: ["urn:mace:phr"]})
+
+      assert {:ok, _decision} =
+               CIBA.approve(Store, id, %{subject: "usr_1", acr: "urn:mace:phr"}, now: @now + 1)
+
+      fault(:lookup, {:mutate_ok, fn record -> Map.put(record, :acr, nil) end})
+
+      assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+        CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 2)
+      end
+    end
+
+    test "an approved stored decision cannot report authentication in the future" do
+      %{auth_req_id: id} = issue()
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+
+      fault(:lookup, {:mutate_ok, fn record -> Map.put(record, :auth_time, @now + 10) end})
+
+      assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+        CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 2)
+      end
+    end
+
+    test "one-second approval clock skew is safe for both poll and ping redemption" do
+      for {request_overrides, label} <- [
+            {%{}, :poll},
+            {%{client_notification_token: @notification_token, delivery_mode: :ping}, :ping}
+          ] do
+        %{auth_req_id: id} = issue(request_overrides)
+        assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+
+        assert {:ok, %Grant{auth_time: auth_time}} =
+                 CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now)
+
+        assert auth_time == @now + 1
+        assert label in [:poll, :ping]
+      end
+    end
+
+    test "poll rejects a changed issue-time context and unexpected outcomes" do
+      %{auth_req_id: id} = issue()
+      sentinel = "private-poll-sentinel"
+
+      fault(:poll, {:mutate_ok, fn record -> put_in(record, [:data, :client_id], sentinel) end})
+
+      error =
+        assert_raise RuntimeError, "CIBA store poll/2 violated its contract", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:poll)
+
+      %{auth_req_id: id} = issue()
+      fault(:poll, {:return, {:error, {:private_poll_sentinel, id}}})
+
+      error =
+        assert_raise RuntimeError, "CIBA store poll/2 violated its contract", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ id
+    end
+
+    test "consume rejects malformed or materially changed records after atomically burning the request" do
+      mutations = [
+        fn record -> Map.delete(record, :subject) end,
+        fn record -> Map.put(record, :auth_req_id_hash, "private-hash-sentinel") end,
+        fn record -> put_in(record, [:data, :client_id], "private-client-sentinel") end,
+        fn record -> Map.put(record, :granted_scope, ["private-scope-sentinel"]) end,
+        fn record -> Map.put(record, :auth_time, record.auth_time + 1) end,
+        fn record -> Map.put(record, :expires_at, record.expires_at + 1) end,
+        fn record -> Map.put(record, :status, :approved) end
+      ]
+
+      for mutate <- mutations do
+        %{auth_req_id: id} = issue()
+        assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+        fault(:consume, {:mutate_ok, mutate})
+
+        error =
+          assert_raise RuntimeError, "CIBA store consume/2 violated its contract", fn ->
+            CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 10)
+          end
+
+        refute Exception.message(error) =~ "private-"
+        clear_fault(:consume)
+
+        assert {:error, :invalid_grant} =
+                 CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now + 11)
+      end
+    end
+
+    test "consume rejects an unexpected callback outcome without exposing it" do
+      %{auth_req_id: id} = issue()
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+      fault(:consume, {:return, {:error, {:private_consume_sentinel, id}}})
+
+      error =
+        assert_raise RuntimeError, "CIBA store consume/2 violated its contract", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 10)
+        end
+
+      refute Exception.message(error) =~ id
+    end
+
+    test "consume permits a concurrently advanced poll timestamp" do
+      %{auth_req_id: id} = issue()
+      assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+      fault(:consume, {:mutate_ok, fn record -> Map.put(record, :last_polled_at, @now + 11) end})
+
+      assert {:ok, %Grant{subject: "usr_1"}} =
+               CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 10)
     end
 
     test "a malformed auth_req_id fails closed before any store lookup" do
@@ -216,14 +512,16 @@ defmodule Attesto.CIBATest do
 
   describe "DPoP holder-of-key pre-binding (RFC 9449 §10)" do
     test "a request bound to a dpop_jkt redeems only with the matching proof key" do
-      %{auth_req_id: id} = issue(%{}, %{dpop_jkt: "jkt-abc"})
+      bound = Secret.hash("bound-ciba-key")
+      wrong = Secret.hash("wrong-ciba-key")
+      %{auth_req_id: id} = issue(%{}, %{dpop_jkt: bound})
       assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
 
       assert {:error, :invalid_grant} =
-               CIBA.redeem(Store, id, %{client_id: @client_id, dpop_jkt: "jkt-wrong"}, now: @now + 10)
+               CIBA.redeem(Store, id, %{client_id: @client_id, dpop_jkt: wrong}, now: @now + 10)
 
-      assert {:ok, %Grant{dpop_jkt: "jkt-abc"}} =
-               CIBA.redeem(Store, id, %{client_id: @client_id, dpop_jkt: "jkt-abc"}, now: @now + 16)
+      assert {:ok, %Grant{dpop_jkt: ^bound}} =
+               CIBA.redeem(Store, id, %{client_id: @client_id, dpop_jkt: bound}, now: @now + 16)
     end
   end
 
@@ -249,6 +547,26 @@ defmodule Attesto.CIBATest do
       assert {:error, :subject_mismatch} = CIBA.approve(Store, id, %{subject: "usr_2"}, now: @now + 1)
       # The mismatch left the request pending for the right user.
       assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 2)
+    end
+
+    test "a requested ACR requires the host to report the achieved ACR" do
+      %{auth_req_id: id} = issue(%{acr_values: ["urn:mace:phr"]})
+
+      assert {:error, :invalid_acr} =
+               CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+
+      assert {:ok, _decision} =
+               CIBA.approve(Store, id, %{subject: "usr_1", acr: "urn:mace:phr"}, now: @now + 2)
+    end
+
+    test "rejects future auth_time without mutating the pending request" do
+      %{auth_req_id: id} = issue()
+
+      assert {:error, :invalid_auth_time} =
+               CIBA.approve(Store, id, %{subject: "usr_1", auth_time: @now + 2}, now: @now + 1)
+
+      assert {:ok, _decision} =
+               CIBA.approve(Store, id, %{subject: "usr_1", auth_time: @now}, now: @now + 2)
     end
 
     test "an unknown id is not_found; a malformed one is invalid_auth_req_id" do
@@ -281,6 +599,54 @@ defmodule Attesto.CIBATest do
       assert {:ok, %{client_notification_token: nil, delivery_mode: :poll}} =
                CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
     end
+
+    test "approve rejects changed transition records and unknown error reasons" do
+      %{auth_req_id: id} = issue()
+      sentinel = "private-approve-sentinel"
+      fault(:approve, {:mutate_ok, fn record -> put_in(record, [:data, :client_id], sentinel) end})
+
+      error =
+        assert_raise RuntimeError, "CIBA store approve/3 violated its contract", fn ->
+          CIBA.approve(ContractStore, id, %{subject: "usr_1"}, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:approve)
+
+      %{auth_req_id: id} = issue()
+      fault(:approve, {:return, {:error, {:private_approve_sentinel, id}}})
+
+      error =
+        assert_raise RuntimeError, "CIBA store approve/3 violated its contract", fn ->
+          CIBA.approve(ContractStore, id, %{subject: "usr_1"}, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ id
+    end
+
+    test "deny rejects malformed transition records and unknown error reasons" do
+      %{auth_req_id: id} = issue()
+      sentinel = "private-deny-sentinel"
+      fault(:deny, {:mutate_ok, fn record -> Map.put(record, :status, {sentinel, :denied}) end})
+
+      error =
+        assert_raise RuntimeError, "CIBA store deny/2 violated its contract", fn ->
+          CIBA.deny(ContractStore, id, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:deny)
+
+      %{auth_req_id: id} = issue()
+      fault(:deny, {:return, {:error, {:private_deny_sentinel, id}}})
+
+      error =
+        assert_raise RuntimeError, "CIBA store deny/2 violated its contract", fn ->
+          CIBA.deny(ContractStore, id, now: @now + 1)
+        end
+
+      refute Exception.message(error) =~ id
+    end
   end
 
   describe "lookup/2 (authentication-device view)" do
@@ -300,6 +666,29 @@ defmodule Attesto.CIBATest do
     test "malformed input is rejected before the store lookup; unknown is :error" do
       assert {:error, :invalid_auth_req_id} = CIBA.lookup(Store, "bad id")
       assert :error = CIBA.lookup(Store, String.duplicate("a", 43))
+    end
+
+    test "malformed and unexpected store results fail loudly without exposing adapter data" do
+      %{auth_req_id: id} = issue()
+      sentinel = "private-lookup-sentinel"
+      fault(:lookup, {:mutate_ok, fn record -> put_in(record, [:data, :scope], [sentinel, 7]) end})
+
+      error =
+        assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+          CIBA.lookup(ContractStore, id)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:lookup)
+
+      fault(:lookup, {:return, {:error, {sentinel, id}}})
+
+      error =
+        assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+          CIBA.lookup(ContractStore, id)
+        end
+
+      refute Exception.message(error) =~ id
     end
   end
 

@@ -417,10 +417,9 @@ if Code.ensure_loaded?(Plug.Conn) do
               Attesto.Telemetry.dpop_replay_detected(jti)
               {:dpop_error, :replay}
 
-            other ->
+            _other ->
               raise ArgumentError,
-                    "Attesto.Plug.Authenticate :replay_check must return :ok or {:error, :replay}; " <>
-                      "got #{inspect(other)}"
+                    "Attesto.Plug.Authenticate :replay_check must return :ok or {:error, :replay}"
           end
 
         _ ->

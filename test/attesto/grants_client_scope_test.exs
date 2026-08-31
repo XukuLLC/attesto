@@ -59,6 +59,20 @@ defmodule Attesto.GrantsClientScopeTest do
       assert {:ok, %Grant{}} =
                AuthorizationCode.redeem(CodeStore.ETS, code, params, allow_missing_client_id?: true)
     end
+
+    test "a non-boolean opt-out cannot bypass client binding", %{challenge: challenge} do
+      for invalid <- ["false", 1, {:error, :unavailable}] do
+        code = issue_code(challenge, "oc_app_a")
+        params = %{redirect_uri: "https://app.example.com/cb", code_verifier: @verifier}
+
+        assert_raise ArgumentError, ~r/:allow_missing_client_id\? must be true or false/, fn ->
+          AuthorizationCode.redeem(CodeStore.ETS, code, params, allow_missing_client_id?: invalid)
+        end
+
+        assert {:ok, %Grant{}} =
+                 AuthorizationCode.redeem(CodeStore.ETS, code, Map.put(params, :client_id, "oc_app_a"))
+      end
+    end
   end
 
   describe "refresh cross-client binding" do
@@ -76,6 +90,20 @@ defmodule Attesto.GrantsClientScopeTest do
       assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "oc_app_b")
       # Recoverable: the legitimate client can still rotate.
       assert {:ok, %{generation: 1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "oc_app_a")
+    end
+
+    test "a non-boolean opt-out cannot bypass refresh-token client binding" do
+      for invalid <- ["false", 1, {:error, :unavailable}] do
+        {:ok, %{token: token}} =
+          RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", client_id: "oc_app_a"})
+
+        assert_raise ArgumentError, ~r/:allow_missing_client_id\? must be true or false/, fn ->
+          RefreshToken.rotate(RefreshStore.ETS, token, allow_missing_client_id?: invalid)
+        end
+
+        assert {:ok, %{generation: 1}} =
+                 RefreshToken.rotate(RefreshStore.ETS, token, client_id: "oc_app_a")
+      end
     end
   end
 

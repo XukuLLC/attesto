@@ -20,6 +20,13 @@ defmodule Attesto.PresentationSession do
   Persistent stores must use static `{:issuer_jwks, jwks}` trust material (or
   define their own serializable trust-reference convention outside this core
   primitive).
+
+  Store callbacks are checked against `Attesto.PresentationSessionStore`'s
+  documented return contracts. An unexpected return or malformed stored entry
+  raises a constant `RuntimeError`; callback values are never copied into the
+  exception message. This is especially important for `result/2`, because
+  `take/1` may already have consumed the only copy before its return is
+  validated.
   """
 
   alias Attesto.{MapParams, NumericDate, Secret, VpToken}
@@ -49,23 +56,36 @@ defmodule Attesto.PresentationSession do
   @spec create(module(), create_attrs(), keyword()) ::
           {:ok, %{id: String.t(), nonce: String.t()}} | {:error, :invalid_attrs}
   def create(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
+    ttl = ttl_seconds!(opts)
+    now = NumericDate.non_negative_now!(opts)
+
     with {:ok, data} <- normalize_attrs(attrs) do
       id = Secret.generate()
       nonce = Secret.generate()
-      ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
 
-      :ok =
-        store.put(%{
-          id: id,
-          data:
-            data
-            |> Map.put(:nonce, nonce)
-            |> Map.put(:state, id)
-            |> Map.put(:status, :pending),
-          expires_at: NumericDate.now(opts) + ttl
-        })
+      entry = %{
+        id: id,
+        data:
+          data
+          |> Map.put(:nonce, nonce)
+          |> Map.put(:state, id)
+          |> Map.put(:status, :pending),
+        expires_at: now + ttl
+      }
+
+      case store.put(entry) do
+        :ok -> :ok
+        _unexpected -> store_contract_error(:put)
+      end
 
       {:ok, %{id: id, nonce: nonce}}
+    end
+  end
+
+  defp ttl_seconds!(opts) do
+    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
     end
   end
 
@@ -80,6 +100,9 @@ defmodule Attesto.PresentationSession do
           {:ok, map()}
           | {:error, :unknown_session | :expired | :already_completed | {:invalid_presentation, term()}}
   def verify_response(store, correlation, vp_token, opts \\ []) when is_atom(store) and is_list(opts) do
+    now = NumericDate.non_negative_now!(opts)
+    opts = Keyword.put(opts, :now, now)
+
     with {:ok, id} <- correlation_id(correlation),
          {:ok, entry} <- load_pending(store, id, opts),
          {:ok, results} <- verify(vp_token, entry.data, opts),
@@ -108,11 +131,18 @@ defmodule Attesto.PresentationSession do
   @spec result(module(), String.t()) :: {:ok, map()} | :error
   def result(store, id) when is_atom(store) and is_binary(id) do
     case store.take(id) do
-      {:ok, %{data: %{status: :completed, result: %{results: results}}}} when is_map(results) ->
-        {:ok, results}
+      {:ok, %{id: ^id, data: data, expires_at: expires_at}}
+      when is_map(data) and is_integer(expires_at) ->
+        # Re-check after the consuming callback returns. A slow take or a
+        # custom store that returns an entry at the expiry boundary must never
+        # hand the verified result to the caller.
+        if expires_at > NumericDate.now([]), do: completed_results(data, id), else: :error
 
-      _other ->
+      :error ->
         :error
+
+      _unexpected ->
+        store_contract_error(:take)
     end
   end
 
@@ -130,6 +160,7 @@ defmodule Attesto.PresentationSession do
     case store.attach_request_object(id, request_object) do
       :ok -> :ok
       :error -> {:error, :unavailable}
+      _unexpected -> store_contract_error(:attach_request_object)
     end
   end
 
@@ -143,6 +174,7 @@ defmodule Attesto.PresentationSession do
     case store.attach_response_encryption_jwk(id, jwk) do
       :ok -> :ok
       :error -> {:error, :unavailable}
+      _unexpected -> store_contract_error(:attach_response_encryption_jwk)
     end
   end
 
@@ -154,12 +186,18 @@ defmodule Attesto.PresentationSession do
   def response_encryption_jwk(store, id) when is_atom(store) and is_binary(id) do
     now = NumericDate.now([])
 
-    case store.get(id) do
-      {:ok, %{expires_at: expires_at, data: %{response_encryption_jwk: jwk}}}
-      when expires_at > now and is_map(jwk) ->
-        {:ok, jwk}
+    case get_session(store, id) do
+      {:ok, %{expires_at: expires_at, data: %{status: :pending} = data}} when expires_at > now ->
+        case Map.fetch(data, :response_encryption_jwk) do
+          {:ok, jwk} when is_map(jwk) -> {:ok, jwk}
+          :error -> :error
+          {:ok, _malformed} -> store_contract_error(:get)
+        end
 
-      _other ->
+      {:ok, _expired_or_completed} ->
+        :error
+
+      :error ->
         :error
     end
   end
@@ -174,12 +212,18 @@ defmodule Attesto.PresentationSession do
   def request_object(store, id) when is_atom(store) and is_binary(id) do
     now = NumericDate.now([])
 
-    case store.get(id) do
-      {:ok, %{expires_at: expires_at, data: %{request_object: request_object}}}
-      when expires_at > now and is_binary(request_object) ->
-        {:ok, request_object}
+    case get_session(store, id) do
+      {:ok, %{expires_at: expires_at, data: %{status: :pending} = data}} when expires_at > now ->
+        case Map.fetch(data, :request_object) do
+          {:ok, request_object} when is_binary(request_object) and request_object != "" -> {:ok, request_object}
+          :error -> :error
+          {:ok, _malformed} -> store_contract_error(:get)
+        end
 
-      _other ->
+      {:ok, _expired_or_completed} ->
+        :error
+
+      :error ->
         :error
     end
   end
@@ -236,18 +280,79 @@ defmodule Attesto.PresentationSession do
   defp load_pending(store, id, opts) do
     now = NumericDate.now(opts)
 
-    case store.get(id) do
+    case get_session(store, id) do
       {:ok, %{expires_at: expires_at}} when expires_at <= now ->
         {:error, :expired}
 
       {:ok, %{data: %{status: :pending}} = entry} ->
         {:ok, entry}
 
-      {:ok, _entry} ->
+      {:ok, %{data: %{status: :completed}}} ->
         {:error, :already_completed}
 
       :error ->
         {:error, :unknown_session}
+    end
+  end
+
+  defp get_session(store, id) do
+    case store.get(id) do
+      :error ->
+        :error
+
+      {:ok, %{id: ^id, data: data, expires_at: expires_at} = entry}
+      when is_map(data) and is_integer(expires_at) ->
+        if valid_session_context?(data, id) and not Map.has_key?(data, :result),
+          do: {:ok, entry},
+          else: store_contract_error(:get)
+
+      _unexpected ->
+        store_contract_error(:get)
+    end
+  end
+
+  defp completed_results(%{status: :completed, result: %{results: results}} = data, id) when is_map(results) do
+    if valid_session_context?(data, id),
+      do: {:ok, results},
+      else: store_contract_error(:take)
+  end
+
+  defp completed_results(_data, _id), do: store_contract_error(:take)
+
+  defp valid_session_context?(
+         %{
+           audience: audience,
+           expected_query_ids: expected_query_ids,
+           issuer_trust: issuer_trust,
+           nonce: nonce,
+           state: state,
+           status: status
+         } = data,
+         id
+       ) do
+    valid_session_required?(audience, expected_query_ids, issuer_trust) and
+      non_empty_string?(nonce) and state == id and status in [:pending, :completed] and
+      valid_session_optional?(data)
+  end
+
+  defp valid_session_context?(_data, _id), do: false
+
+  defp valid_session_required?(audience, expected_query_ids, issuer_trust) do
+    non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
+      valid_issuer_trust?(issuer_trust)
+  end
+
+  defp valid_session_optional?(data) do
+    valid_optional_field?(data, :request_object, &valid_request_object?/1) and
+      valid_optional_field?(data, :response_uri, &valid_response_uri?/1) and
+      valid_optional_field?(data, :query_constraints, &valid_query_constraints?/1) and
+      valid_optional_field?(data, :response_encryption_jwk, &is_map/1)
+  end
+
+  defp valid_optional_field?(data, key, validator) do
+    case Map.fetch(data, key) do
+      {:ok, value} -> validator.(value)
+      :error -> true
     end
   end
 
@@ -293,6 +398,18 @@ defmodule Attesto.PresentationSession do
     case store.complete(id, %{results: results}) do
       :ok -> :ok
       :error -> {:error, :already_completed}
+      _unexpected -> store_contract_error(:complete)
     end
   end
+
+  defp store_contract_error(callback) do
+    raise RuntimeError, "presentation session store #{callback_name(callback)} violated its contract"
+  end
+
+  defp callback_name(:put), do: "put/1"
+  defp callback_name(:get), do: "get/1"
+  defp callback_name(:take), do: "take/1"
+  defp callback_name(:complete), do: "complete/2"
+  defp callback_name(:attach_request_object), do: "attach_request_object/2"
+  defp callback_name(:attach_response_encryption_jwk), do: "attach_response_encryption_jwk/2"
 end

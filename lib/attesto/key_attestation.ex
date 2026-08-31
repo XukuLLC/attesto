@@ -121,6 +121,8 @@ defmodule Attesto.KeyAttestation do
   def verify(attestation, opts \\ [])
 
   def verify(attestation, opts) when is_binary(attestation) and is_list(opts) do
+    validate_options!(opts)
+
     with {:ok, header} <- parse_header(attestation),
          :ok <- check_crit(header),
          :ok <- check_typ(header),
@@ -143,6 +145,18 @@ defmodule Attesto.KeyAttestation do
   end
 
   def verify(_attestation, _opts), do: {:error, :invalid_attestation}
+
+  defp validate_options!(opts) do
+    Enum.each([:require_exp, :enforce_fapi_alg_policy], fn key ->
+      case Keyword.fetch(opts, key) do
+        :error -> :ok
+        {:ok, value} when is_boolean(value) -> :ok
+        {:ok, _value} -> raise ArgumentError, ":#{key} must be true or false"
+      end
+    end)
+
+    :ok
+  end
 
   @doc """
   Returns `true` iff `jwk` (a public JWK map) is among `attested_keys`,

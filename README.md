@@ -138,7 +138,7 @@ boundary, use the lower-level
 ```elixir
 def deps do
   [
-    {:attesto, "~> 1.5"}
+    {:attesto, "~> 2.0"}
   ]
 end
 ```
@@ -491,22 +491,27 @@ fixed plug.
 ## Security telemetry
 
 Most refusals are routine — an expired token, an unknown client, a scope
-that was not granted. Three are the shape a stolen credential makes, and
-each is emitted as a [`:telemetry`](https://hexdocs.pm/telemetry) event so
-it can reach a pager or a SIEM without wrapping every call site:
+that was not granted. Attesto emits the security indicators below, plus
+operational events when refresh rotation cannot commit, recover, or read
+trustworthy state and when introspection cannot read its store. Each is a
+[`telemetry`](https://hexdocs.pm/telemetry) event, so it can reach a pager
+or a SIEM without wrapping every call site:
 
 | Event | Fires when |
 |---|---|
-| `[:attesto, :refresh_token, :reuse_detected]` | a rotated refresh token is presented again — **the family has already been revoked**, so this is the only notice that the session ended for a reason |
+| `[:attesto, :refresh_token, :reuse_detected]` | a rotated refresh token is presented again outside its safe fixed-window retry conditions — family revocation is attempted first; inspect `metadata.revocation` to determine whether containment succeeded |
+| `[:attesto, :refresh_token, :rotation_state_failed]` | refresh rotation could not commit, recover, or read trustworthy state — the rotation is denied; `metadata.revocation` says whether containment succeeded, failed, was already completed atomically, or was unnecessary because nothing changed. This is an operational fault, **not** an allegation of reuse |
+| `[:attesto, :introspection, :refresh_store_failed]` | refresh-token introspection cannot read its store reliably; the response stays indistinguishable from an inactive token while this operational signal is emitted |
 | `[:attesto, :dpop, :replay_detected]` | a DPoP proof carries a `jti` the replay store already recorded |
 | `[:attesto, :token, :sender_constraint_mismatch]` | a DPoP- or mTLS-bound token is presented with the wrong proof of possession |
 
 **Indicators, not verdicts.** None of them proves theft. A client can
 present its own bound token under a second key as often as it likes, and a
 key rotation or a stale cached key produces the same mismatch innocently —
-so rate-limit and correlate before paging. `reuse_detected` is the one
-worth escalating fastest, because reaching it has already revoked the
-family. A rotation that finds its family revoked underneath it returns
+so rate-limit and correlate before paging. `reuse_detected` is the one worth
+escalating fastest, because family revocation is attempted; inspect
+`metadata.revocation` to determine whether containment succeeded. A
+rotation that finds its family revoked underneath it returns
 `:grant_revoked` and emits **nothing**: an ordinary logout can cause it,
 and the library cannot tell the two apart.
 
@@ -537,8 +542,8 @@ events as indicators to correlate rather than proof of theft;
 API.
 
 Routine failures are deliberately **not** events. Emitting them would bury
-the three above in traffic that is simply what a healthy authorization
-server looks like.
+these signals in traffic that is simply what a healthy authorization server
+looks like.
 
 ## Cluster safety
 
@@ -546,14 +551,49 @@ The engine is pure and stateless, so it is **cluster-safe by
 construction**: the same token/proof verifies to the same result on any
 node. All *state* (authorization codes, refresh-token families, seen DPoP
 `jti` values, DPoP nonces) lives behind storage behaviours whose contracts
-mandate the atomic primitives (atomic `take`, atomic compare-and-set
-`consume`, sticky family revocation). Implement those behaviours over a
+mandate the atomic primitives (atomic `take`, atomic refresh-family
+`rotate`, sticky family revocation). Implement those behaviours over a
 shared store (Postgres, Redis) and the whole system is cluster-safe — or
 take [`attesto_phoenix`](https://hex.pm/packages/attesto_phoenix), which
 ships Ecto implementations of all of them (including
 `AttestoPhoenix.Store.EctoReplayCheck`, whose unique constraint on `jti`
 makes the DPoP record-and-check atomic across nodes) with migrations and
 an expiry sweeper.
+
+Attesto 2 requires custom `Attesto.RefreshStore` adapters to implement
+`rotate/4`. That one family-serialized transaction consumes the parent,
+persists its complete fixed-window retry state, and inserts the child. It must
+also serialize against `revoke_family/1`; `get/1` must use strong primary reads,
+not an eventually consistent replica. A positive rotation grace requires the
+credential-equivalent successor state to be protected with authenticated
+encryption under stable key material shared by every serving node and
+deployment. Strict `rotation_grace_seconds: 0` stores only a non-secret
+tombstone. `insert/1` reports a token-hash or family-generation
+`{:error, :conflict}` without storing the candidate; successful `rotate/4`
+returns the exact committed parent and child snapshots. An expired ancestor
+can still revoke its family when the caller is authorized, protecting live
+descendants. See `Attesto.RefreshStore` for the complete callback contract and
+failure outcomes.
+
+Authorization-code `:family_id` is provenance only in Attesto 2: public
+`RefreshToken.issue/3` always creates a new family and rejects caller-supplied
+continuation IDs. After redeeming the code, call
+`AuthorizationCode.issue_refresh_and_finalize/6` with a refresh context whose
+subject and client match the redeemed grant and whose scope and resource lists
+are subsets of that grant. It owns `RefreshToken.issue/3`, captures the
+returned family ID, and binds replay containment to the family actually
+issued; no caller-supplied family ID can enter the flow. Keep
+`AuthorizationCode.finalize/3` for code flows that issue no refresh token; its
+replay marker records no family provenance. Construct all access-token and
+ID-token response fields first, then call the composition API and add its
+returned refresh token only after `{:ok, issued}`; issuance errors leave the
+code spent but unfinalized, while finalization errors never report success.
+
+The 2.0 stateful-grant adapters also keep their boundary rules explicit:
+device user-code lengths are restricted to 8..64; security-sensitive boolean
+options accept only `true` or `false` (omission uses the secure default and
+`nil` is not an opt-out); and CIBA approvals carry the achieved `acr` through
+to the redeemed grant.
 
 The bundled ETS reference stores are deliberately **single-node** - a
 captured credential would otherwise be replayable once per node. Rather
@@ -565,7 +605,7 @@ constraint.
 
 ## Status
 
-A stable `1.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, RFC 8705 mTLS client authentication and certificate-bound tokens, extractable and non-extractable signing, rotation health, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against the `Attesto.CodeStore` / `Attesto.RefreshStore` behaviours, with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own (the atomic-`take` and atomic-`consume` contracts are documented). Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 1.5`.
+A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, RFC 8705 mTLS client authentication and certificate-bound tokens, extractable and non-extractable signing, rotation health, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against documented storage behaviours with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own atomic adapters. Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 2.0`.
 
 ## Development
 

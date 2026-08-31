@@ -86,6 +86,16 @@ defmodule Attesto.NumericDateTest do
         NumericDate.now(now: :invalid)
       end
     end
+
+    test "non_negative_now!/2 rejects negative integer and DateTime overrides" do
+      for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
+        assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+          NumericDate.non_negative_now!(now: bad_now)
+        end
+      end
+
+      assert NumericDate.non_negative_now!(now: 0) == 0
+    end
   end
 
   defp fail_closed({:error, :invalid}), do: {:error, :invalid_claims}

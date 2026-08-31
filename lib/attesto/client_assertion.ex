@@ -82,6 +82,8 @@ defmodule Attesto.ClientAssertion do
 
   def verify(assertion, client_id, expected_audience, trusted_jwks, opts)
       when is_binary(assertion) and is_binary(client_id) and is_list(opts) do
+    opts = validate_policy_options!(opts)
+
     with {:ok, header} <- peek_header(assertion),
          :ok <- check_crit(header),
          {:ok, claims} <- verify_signature(assertion, header, trusted_jwks, opts),
@@ -115,6 +117,23 @@ defmodule Attesto.ClientAssertion do
       malformed_result: :halt,
       malformed_error: :invalid_assertion
     )
+  end
+
+  defp validate_policy_options!(opts) do
+    enforce_fapi_policy =
+      case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
+        :error -> not Keyword.has_key?(opts, :accepted_algs)
+        {:ok, value} when is_boolean(value) -> value
+        {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
+      end
+
+    case Keyword.fetch(opts, :max_lifetime) do
+      :error -> :ok
+      {:ok, value} when is_integer(value) and value > 0 -> :ok
+      {:ok, _invalid} -> raise ArgumentError, ":max_lifetime must be a positive integer"
+    end
+
+    Keyword.put(opts, :enforce_fapi_alg_policy, enforce_fapi_policy)
   end
 
   defp check_client_id(%{"iss" => id, "sub" => id}, id), do: :ok

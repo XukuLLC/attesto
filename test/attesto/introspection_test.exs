@@ -196,6 +196,19 @@ defmodule Attesto.IntrospectionTest do
                %{"active" => false}
     end
 
+    test "a throwing or exiting predicate also fails closed to inactive", %{config: config} do
+      now = 1_700_000_000
+      {:ok, %{access_token: jwt}} = Token.mint(config, client_principal(), now: now)
+
+      for authorize <- [
+            fn _ -> throw({:private, "authorize-throw-sentinel"}) end,
+            fn _ -> exit({:private, "authorize-exit-sentinel"}) end
+          ] do
+        assert Introspection.introspect(config, jwt, now: now, authorize: authorize) ==
+                 %{"active" => false}
+      end
+    end
+
     test "a non-boolean return value fails closed to inactive", %{config: config} do
       now = 1_700_000_000
       {:ok, %{access_token: jwt}} = Token.mint(config, client_principal(), now: now)
@@ -231,13 +244,60 @@ defmodule Attesto.IntrospectionTest do
       @impl true
       def insert(_entry), do: :ok
       @impl true
-      def consume(_hash, _opts), do: :error
-      @impl true
-      def remember_successor(_hash, _data, _opts), do: :ok
+      def rotate(_hash, _child, _successor, _opts), do: :error
       @impl true
       def revoke_family(_family_id), do: :ok
 
-      def put(token, entry), do: :persistent_term.put({__MODULE__, Secret.hash(token)}, entry)
+      def put(token, entry) do
+        token_hash = Secret.hash(token)
+
+        entry =
+          entry
+          |> Map.put_new(:token_hash, token_hash)
+          |> Map.put_new(:generation, 0)
+          |> Map.put_new(:consumed_at, if(Map.get(entry, :consumed) == true, do: 1))
+          |> Map.put_new(:successor, nil)
+
+        :persistent_term.put({__MODULE__, token_hash}, entry)
+      end
+    end
+
+    defmodule FaultingRefreshStore do
+      @moduledoc false
+      @behaviour Attesto.RefreshStore
+
+      @impl true
+      def get(_hash) do
+        case Process.get({__MODULE__, :fault}) do
+          {:return, value} -> value
+          {:raise, value} -> raise RuntimeError, value
+          {:throw, value} -> throw(value)
+          {:exit, value} -> exit(value)
+        end
+      end
+
+      @impl true
+      def insert(_entry), do: :ok
+      @impl true
+      def rotate(_hash, _child, _successor, _opts), do: :error
+      @impl true
+      def revoke_family(_family_id), do: :ok
+    end
+
+    setup context do
+      handler = "attesto-introspection-store-failure-#{inspect(context.test)}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:attesto, :introspection, :refresh_store_failed],
+          &__MODULE__.handle_introspection_store_failure/4,
+          test_pid
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok
     end
 
     defp introspect_refresh(config, token, now) do
@@ -292,6 +352,8 @@ defmodule Attesto.IntrospectionTest do
                now: 1_700_000_000,
                refresh_store: StubRefreshStore
              ) == %{"active" => false}
+
+      refute_received {:introspection_store_failure, _, _, _}
     end
 
     test "a malformed record missing :consumed is inactive (fail closed)", %{config: config} do
@@ -299,6 +361,87 @@ defmodule Attesto.IntrospectionTest do
       StubRefreshStore.put("refresh-malformed", %{family_id: "fam-1", expires_at: now + 1000, data: %{}})
 
       assert introspect_refresh(config, "refresh-malformed", now) == %{"active" => false}
+
+      assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], measurements,
+                       %{operation: :get, reason: :store_contract_violation}}
+
+      assert is_integer(measurements.system_time)
+    end
+
+    test "malformed security context is inactive instead of degrading to bearer or minimal", %{config: config} do
+      now = 1_700_000_000
+
+      for {suffix, data} <- [
+            {"scope", %{subject: "user-42", scope: ["openid", :invalid]}},
+            {"dpop", %{subject: "user-42", scope: [], dpop_jkt: "invalid"}},
+            {"subject", %{subject: "", scope: []}},
+            {"resource", %{subject: "user-42", scope: [], resource: [""]}},
+            {"claims", %{subject: "user-42", scope: [], claims: []}},
+            {"conflict", %{"subject" => "different", subject: "user-42", scope: []}}
+          ] do
+        token = "refresh-malformed-#{suffix}"
+
+        StubRefreshStore.put(token, %{
+          family_id: "fam-1",
+          expires_at: now + 1000,
+          consumed: false,
+          data: data
+        })
+
+        assert introspect_refresh(config, token, now) == %{"active" => false}
+
+        assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], _,
+                         %{operation: :get, reason: :store_contract_violation}}
+      end
+    end
+
+    test "a row for another token hash is inactive and reported as a store contract violation", %{config: config} do
+      now = 1_700_000_000
+
+      StubRefreshStore.put("refresh-wrong-row", %{
+        token_hash: Secret.hash("different-token"),
+        family_id: "fam-1",
+        generation: 0,
+        expires_at: now + 1000,
+        consumed: false,
+        data: %{}
+      })
+
+      assert introspect_refresh(config, "refresh-wrong-row", now) == %{"active" => false}
+
+      assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], _,
+                       %{operation: :get, reason: :store_contract_violation}}
+    end
+
+    test "an unexpected store return stays inactive and emits no callback data", %{config: config} do
+      Process.put(
+        {FaultingRefreshStore, :fault},
+        {:return, {:unexpected, "refresh-store-private-return"}}
+      )
+
+      assert introspect_fault(config) == %{"active" => false}
+
+      assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], _,
+                       %{operation: :get, reason: :store_contract_violation} = metadata}
+
+      refute inspect(metadata) =~ "refresh-store-private-return"
+    end
+
+    test "store raise, throw, and exit stay inactive with bounded operational reasons", %{config: config} do
+      for {fault, expected_reason, private_value} <- [
+            {:raise, :store_raised, "refresh-store-private-raise"},
+            {:throw, :store_threw, {:refresh_store_throw, "refresh-store-private-throw"}},
+            {:exit, :store_exited, {:refresh_store_exit, "refresh-store-private-exit"}}
+          ] do
+        Process.put({FaultingRefreshStore, :fault}, {fault, private_value})
+
+        assert introspect_fault(config) == %{"active" => false}
+
+        assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], _,
+                         %{operation: :get, reason: ^expected_reason} = metadata}
+
+        refute inspect(metadata) =~ "refresh-store-private"
+      end
     end
 
     test "surfaces sub/scope/client_id from the stored data (RFC 7662 §2.2)", %{config: config} do
@@ -383,5 +526,18 @@ defmodule Attesto.IntrospectionTest do
                authorize: deny
              ) == %{"active" => false}
     end
+
+    defp introspect_fault(config) do
+      Introspection.introspect(config, "opaque-refresh-token",
+        now: 1_700_000_000,
+        refresh_store: FaultingRefreshStore,
+        token_type_hint: "refresh_token"
+      )
+    end
+  end
+
+  @doc false
+  def handle_introspection_store_failure(event, measurements, metadata, test_pid) do
+    send(test_pid, {:introspection_store_failure, event, measurements, metadata})
   end
 end

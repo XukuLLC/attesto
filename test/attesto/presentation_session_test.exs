@@ -3,6 +3,7 @@ defmodule Attesto.PresentationSessionTest do
   use ExUnit.Case, async: false
 
   alias Attesto.{Cose, JWS, Mdoc, PresentationSession, SdJwtVc}
+  alias Attesto.PresentationSessionStore.ETS
   alias Attesto.PresentationSessionStore.ETS, as: Store
 
   @audience "verifier-client-1"
@@ -12,6 +13,34 @@ defmodule Attesto.PresentationSessionTest do
   @mdl_namespace "org.iso.18013.5.1"
   @response_uri "https://verifier.example.com/response"
   @racers 20
+
+  defmodule ContractStore do
+    @moduledoc false
+    @behaviour Attesto.PresentationSessionStore
+
+    @impl true
+    def put(entry), do: dispatch(:put, fn -> ETS.put(entry) end)
+    @impl true
+    def get(id), do: dispatch(:get, fn -> ETS.get(id) end)
+    @impl true
+    def complete(id, result), do: dispatch(:complete, fn -> ETS.complete(id, result) end)
+    @impl true
+    def take(id), do: dispatch(:take, fn -> ETS.take(id) end)
+    @impl true
+    def attach_request_object(id, request_object),
+      do: dispatch(:attach_request_object, fn -> ETS.attach_request_object(id, request_object) end)
+
+    @impl true
+    def attach_response_encryption_jwk(id, jwk),
+      do: dispatch(:attach_response_encryption_jwk, fn -> ETS.attach_response_encryption_jwk(id, jwk) end)
+
+    defp dispatch(operation, fallback) do
+      case Process.get({__MODULE__, operation}) do
+        nil -> fallback.()
+        {:return, value} -> value
+      end
+    end
+  end
 
   setup do
     start_supervised!(Store)
@@ -51,6 +80,56 @@ defmodule Attesto.PresentationSessionTest do
     refute Map.has_key?(entry.data, :result)
   end
 
+  test "invalid lifetime is rejected before the store is called", ctx do
+    attrs = %{
+      audience: @audience,
+      expected_query_ids: [@query_id],
+      issuer_trust: {:issuer_jwks, ctx.issuer_jwk}
+    }
+
+    Process.put({ContractStore, :put}, {:return, {:private, "store-was-called"}})
+
+    for invalid <- [0, -1, 1.5, "300", nil] do
+      assert_raise ArgumentError, ~r/:ttl must be a positive integer/, fn ->
+        PresentationSession.create(ContractStore, attrs, ttl: invalid, now: ctx.now)
+      end
+    end
+  end
+
+  test "negative clocks are rejected before put or get and leave the session untouched", ctx do
+    attrs = %{
+      audience: @audience,
+      expected_query_ids: [@query_id],
+      issuer_trust: {:issuer_jwks, ctx.issuer_jwk}
+    }
+
+    Process.put({ContractStore, :put}, {:return, {:private_put_sentinel, attrs}})
+
+    for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
+      assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+        PresentationSession.create(ContractStore, attrs, now: bad_now)
+      end
+    end
+
+    Process.delete({ContractStore, :put})
+    {:ok, session} = create_session(ctx)
+    Process.put({ContractStore, :get}, {:return, {:private_get_sentinel, session.id}})
+
+    for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
+      assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
+        PresentationSession.verify_response(
+          ContractStore,
+          {:state, session.id},
+          %{},
+          now: bad_now
+        )
+      end
+    end
+
+    Process.delete({ContractStore, :get})
+    assert_pending(session.id)
+  end
+
   test "persists and serves an optional signed request object", ctx do
     assert {:ok, %{id: id}} = create_session(ctx, request_object: "eyJ.signed.jar")
     assert {:ok, "eyJ.signed.jar"} = PresentationSession.request_object(Store, id)
@@ -59,6 +138,46 @@ defmodule Attesto.PresentationSessionTest do
     assert {:ok, %{id: bare_id}} = create_session(ctx)
     assert :error = PresentationSession.request_object(Store, bare_id)
     assert :error = PresentationSession.request_object(Store, "unknown")
+  end
+
+  test "request-object and response-key reads reject malformed store results without exposing them" do
+    future = System.system_time(:second) + 100
+
+    Process.put({ContractStore, :get}, {:return, {:unexpected, "presentation-get-private-sentinel"}})
+
+    assert_contract_error("get/1", fn ->
+      PresentationSession.request_object(ContractStore, "session-1")
+    end)
+
+    Process.put(
+      {ContractStore, :get},
+      {:return,
+       {:ok,
+        %{
+          id: "session-1",
+          expires_at: future,
+          data: %{status: :pending, request_object: {:invalid, "request-object-private-sentinel"}}
+        }}}
+    )
+
+    assert_contract_error("get/1", fn ->
+      PresentationSession.request_object(ContractStore, "session-1")
+    end)
+
+    Process.put(
+      {ContractStore, :get},
+      {:return,
+       {:ok,
+        %{
+          id: "session-1",
+          expires_at: future,
+          data: %{status: :pending, response_encryption_jwk: "response-key-private-sentinel"}
+        }}}
+    )
+
+    assert_contract_error("get/1", fn ->
+      PresentationSession.response_encryption_jwk(ContractStore, "session-1")
+    end)
   end
 
   test "attach_request_object/3 sets the request object on a pending session", ctx do
@@ -102,6 +221,89 @@ defmodule Attesto.PresentationSessionTest do
 
     # Single-use: a second read (e.g. a replayed response_code) gets nothing.
     assert :error = PresentationSession.result(Store, session.id)
+  end
+
+  test "a malformed or unexpected consuming result fails loudly without exposing store data" do
+    Process.put({ContractStore, :take}, {:return, {:unexpected, "take-private-sentinel"}})
+    assert_contract_error("take/1", fn -> PresentationSession.result(ContractStore, "session-1") end)
+
+    Process.put(
+      {ContractStore, :take},
+      {:return,
+       {:ok,
+        %{
+          id: "session-1",
+          expires_at: System.system_time(:second) + 100,
+          data: %{status: :completed, result: %{results: "result-private-sentinel"}}
+        }}}
+    )
+
+    assert_contract_error("take/1", fn -> PresentationSession.result(ContractStore, "session-1") end)
+
+    Process.put(
+      {ContractStore, :take},
+      {:return,
+       {:ok,
+        %{
+          id: "session-expired",
+          expires_at: System.system_time(:second) - 1,
+          data: %{status: :completed, result: %{results: %{expired: true}}}
+        }}}
+    )
+
+    assert :error = PresentationSession.result(ContractStore, "session-expired")
+  end
+
+  test "all presentation-store callback return contracts fail loudly with constant messages", ctx do
+    Process.put({ContractStore, :put}, {:return, {:unexpected, "put-private-sentinel"}})
+
+    assert_contract_error("put/1", fn ->
+      create_session_with_store(ContractStore, ctx)
+    end)
+
+    Process.delete({ContractStore, :put})
+    {:ok, session} = create_session(ctx)
+
+    Process.put(
+      {ContractStore, :attach_request_object},
+      {:return, {:unexpected, "attach-request-private-sentinel"}}
+    )
+
+    assert_contract_error("attach_request_object/2", fn ->
+      PresentationSession.attach_request_object(ContractStore, session.id, "x.y.z")
+    end)
+
+    Process.put(
+      {ContractStore, :attach_response_encryption_jwk},
+      {:return, {:unexpected, "attach-key-private-sentinel"}}
+    )
+
+    assert_contract_error("attach_response_encryption_jwk/2", fn ->
+      PresentationSession.attach_response_encryption_jwk(ContractStore, session.id, %{"kty" => "EC"})
+    end)
+
+    Process.put({ContractStore, :get}, {:return, {:unexpected, "load-private-sentinel"}})
+
+    assert_contract_error("get/1", fn ->
+      PresentationSession.verify_response(
+        ContractStore,
+        {:state, session.id},
+        valid_vp_token(ctx, session.nonce),
+        now: ctx.now
+      )
+    end)
+
+    Process.delete({ContractStore, :get})
+    Process.put({ContractStore, :complete}, {:return, {:unexpected, "complete-private-sentinel"}})
+
+    assert_contract_error("complete/2", fn ->
+      PresentationSession.verify_response(
+        ContractStore,
+        {:state, session.id},
+        valid_vp_token(ctx, session.nonce),
+        now: ctx.now
+      )
+    end)
   end
 
   test "an id correlation verifies the same state-keyed session", ctx do
@@ -391,6 +593,10 @@ defmodule Attesto.PresentationSessionTest do
   end
 
   defp create_session(ctx, overrides \\ []) do
+    create_session_with_store(Store, ctx, overrides)
+  end
+
+  defp create_session_with_store(store, ctx, overrides \\ []) do
     attrs =
       Map.merge(
         %{
@@ -401,7 +607,7 @@ defmodule Attesto.PresentationSessionTest do
         Map.new(overrides)
       )
 
-    PresentationSession.create(Store, attrs, now: ctx.now)
+    PresentationSession.create(store, attrs, now: ctx.now)
   end
 
   defp valid_vp_token(ctx, nonce, audience \\ @audience) do
@@ -413,6 +619,13 @@ defmodule Attesto.PresentationSessionTest do
     assert {:ok, %{data: data}} = Store.get(id)
     assert data.status == :pending
     refute Map.has_key?(data, :result)
+  end
+
+  defp assert_contract_error(callback, fun) do
+    error =
+      assert_raise RuntimeError, "presentation session store #{callback} violated its contract", fun
+
+    refute Exception.message(error) =~ "private-sentinel"
   end
 
   defp keypair do

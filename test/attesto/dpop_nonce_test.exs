@@ -107,8 +107,12 @@ defmodule Attesto.DPoPNonceTest do
 
       # The store-shaped check: nil -> {:error, :use_dpop_nonce}.
       check = fn
-        nonce when is_binary(nonce) -> :ok
-        nonce -> send(seen, {:nonce_seen, nonce}) && {:error, :use_dpop_nonce}
+        nonce when is_binary(nonce) ->
+          :ok
+
+        nonce ->
+          send(seen, {:nonce_seen, nonce})
+          {:error, :use_dpop_nonce}
       end
 
       assert {:error, :use_dpop_nonce} =
@@ -162,9 +166,15 @@ defmodule Attesto.DPoPNonceTest do
     test ":nonce_check returning an unexpected value raises ArgumentError" do
       proof = signed_proof(%{"nonce" => "n"})
 
-      assert_raise ArgumentError, fn ->
-        DPoP.verify_proof(proof, verify_opts(nonce_check: fn _ -> :yep end))
-      end
+      error =
+        assert_raise ArgumentError, fn ->
+          DPoP.verify_proof(
+            proof,
+            verify_opts(nonce_check: fn _ -> {:error, "credential-sentinel-that-must-not-escape"} end)
+          )
+        end
+
+      refute Exception.message(error) =~ "credential-sentinel"
 
       assert_raise ArgumentError, fn ->
         DPoP.verify_proof(proof, verify_opts(nonce_check: fn _ -> {:error, :some_other_reason} end))

@@ -215,6 +215,11 @@ defmodule Attesto.CredentialOfferTest do
       end
     end
 
+    defmodule RefusingStore do
+      @moduledoc false
+      def put(_entry), do: {:error, {:private, "credential-offer-store-sentinel"}}
+    end
+
     test "generates a 256-bit unguessable id the host never chooses" do
       offer = CredentialOffer.build(required_opts())
 
@@ -262,6 +267,17 @@ defmodule Attesto.CredentialOfferTest do
       # Boundaries: 1 and the max are accepted.
       assert {:ok, _} = CredentialOffer.store_by_reference(CapturingStore, offer, ttl: 1)
       assert {:ok, _} = CredentialOffer.store_by_reference(CapturingStore, offer, ttl: 3600)
+    end
+
+    test "an unexpected store return raises only the constant contract error" do
+      offer = CredentialOffer.build(required_opts())
+
+      error =
+        assert_raise RuntimeError, "credential offer store put/1 violated its contract", fn ->
+          CredentialOffer.store_by_reference(RefusingStore, offer)
+        end
+
+      refute Exception.message(error) =~ "sentinel"
     end
   end
 end

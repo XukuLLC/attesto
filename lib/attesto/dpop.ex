@@ -461,10 +461,10 @@ defmodule Attesto.DPoP do
           {:error, :use_dpop_nonce} ->
             {:error, :use_dpop_nonce}
 
-          other ->
+          _other ->
             raise ArgumentError,
                   "Attesto.DPoP.verify_proof/2 :nonce_check must return :ok or " <>
-                    "{:error, :use_dpop_nonce}; got #{inspect(other)}"
+                    "{:error, :use_dpop_nonce}"
         end
 
       other ->
@@ -493,10 +493,10 @@ defmodule Attesto.DPoP do
             Attesto.Telemetry.dpop_replay_detected(jti)
             {:error, :replay}
 
-          other ->
+          _other ->
             raise ArgumentError,
                   "Attesto.DPoP.verify_proof/2 :replay_check must return :ok or " <>
-                    "{:error, :replay}; got #{inspect(other)}"
+                    "{:error, :replay}"
         end
 
       other ->

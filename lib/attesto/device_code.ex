@@ -28,15 +28,28 @@ defmodule Attesto.DeviceCode do
   """
 
   alias Attesto.DeviceCode.Grant
-  alias Attesto.NumericDate
-  alias Attesto.Secret
+  alias Attesto.{NumericDate, Scope, Secret, Thumbprint}
 
   # RFC 8628 §6.1: a base-20 alphabet with no vowels (no accidental words) and no
   # visually ambiguous characters (0/O, 1/I/L). 20^8 ≈ 2.56e10 ≈ 34.6 bits.
   @user_code_alphabet ~c"BCDFGHJKLMNPQRSTVWXZ"
   @default_user_code_length 8
+  @minimum_user_code_length 8
+  @maximum_user_code_length 64
   @default_ttl_seconds 600
   @default_interval_seconds 5
+  @statuses [:pending, :approved, :denied, :consumed]
+  @decision_errors [:not_found, :already_decided, :expired]
+  @consume_bound_fields [
+    :device_code_hash,
+    :user_code,
+    :data,
+    :subject,
+    :granted_scope,
+    :granted_claims,
+    :expires_at
+  ]
+  @poll_bound_fields [:device_code_hash, :user_code, :data, :expires_at]
 
   @typedoc "What `issue/3` hands back: the secret device code and the display user code."
   @type issued :: %{device_code: String.t(), user_code: String.t()}
@@ -73,11 +86,15 @@ defmodule Attesto.DeviceCode do
   @user_code_collision_retries 5
 
   @spec issue(module(), issue_attrs(), keyword()) ::
-          {:ok, issued()} | {:error, :invalid_client_id | :user_code_unavailable}
+          {:ok, issued()}
+          | {:error, :invalid_client_id | :invalid_scope | :invalid_resource | :invalid_dpop_jkt}
+          | {:error, :user_code_unavailable}
   def issue(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
+    length = user_code_length!(opts)
+    ttl = ttl_seconds!(opts)
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
     with :ok <- validate_issue_attrs(attrs) do
-      length = Keyword.get(opts, :user_code_length, @default_user_code_length)
-      ttl = Keyword.get(opts, :ttl, @default_ttl_seconds)
       device_code = Secret.generate()
 
       data = %{
@@ -92,7 +109,7 @@ defmodule Attesto.DeviceCode do
         device_code,
         data,
         length,
-        NumericDate.now(opts, default: :system) + ttl,
+        now + ttl,
         @user_code_collision_retries
       )
     end
@@ -107,7 +124,7 @@ defmodule Attesto.DeviceCode do
       device_code_hash: Secret.hash(device_code),
       # Stored normalized (no separators); the display form is returned to the
       # client to show the user.
-      user_code: normalize!(user_code),
+      user_code: normalize!(user_code, length),
       data: data,
       status: :pending,
       subject: nil,
@@ -118,6 +135,7 @@ defmodule Attesto.DeviceCode do
     case store.put(record) do
       :ok -> {:ok, %{device_code: device_code, user_code: user_code}}
       {:error, :user_code_taken} -> put_with_retry(store, device_code, data, length, expires_at, attempts_left - 1)
+      _unexpected -> device_store_contract_error(:put)
     end
   end
 
@@ -144,43 +162,82 @@ defmodule Attesto.DeviceCode do
   @spec redeem(module(), String.t(), map(), keyword()) :: {:ok, Grant.t()} | {:error, redeem_error()}
   def redeem(store, device_code, params, opts \\ [])
       when is_atom(store) and is_binary(device_code) and is_map(params) and is_list(opts) do
+    interval = interval_seconds!(opts)
+    now = NumericDate.non_negative_now!(opts, default: :system)
     hash = Secret.hash(device_code)
 
-    poll_opts = %{
-      now: NumericDate.now(opts, default: :system),
-      interval: Keyword.get(opts, :interval, @default_interval_seconds)
-    }
-
-    case store.poll(hash, poll_opts) do
-      {:ok, record} -> redeem_polled(store, hash, record, params, opts)
-      {:error, :slow_down} -> {:error, :slow_down}
-      :error -> {:error, :invalid_grant}
-    end
-  end
-
-  # The poll was accepted. Apply the §3.5 precedence: expiry first (a stale
-  # approval must not mint), then the binding checks, then the status outcome.
-  # ALL validation runs on the polled record BEFORE `consume/2`, so a client- or
-  # DPoP-mismatched poll is rejected without burning the single-use code; only an
-  # approved, unexpired, correctly-bound code reaches the atomic consume.
-  defp redeem_polled(store, hash, record, params, opts) do
-    with :ok <- check_not_expired(record, opts),
+    with {:ok, record} <- read_record(store, hash),
+         :ok <- check_not_expired(record, now),
          :ok <- check_client(record, params),
-         :ok <- check_dpop(record, params),
-         :ok <- check_status(record) do
-      consume(store, hash, opts)
+         :ok <- check_dpop(record, params) do
+      resolve_status(store, hash, record, params, %{now: now, interval: interval})
     end
   end
 
-  defp consume(store, hash, opts) do
-    case store.consume(hash, %{now: NumericDate.now(opts, default: :system)}) do
+  defp read_record(store, hash) do
+    case store.get(hash) do
       {:ok, record} ->
-        {:ok, Grant.from_record(record)}
+        if valid_record?(record, hash), do: {:ok, record}, else: device_store_contract_error(:get)
+
+      :error ->
+        {:error, :invalid_grant}
+
+      _unexpected ->
+        device_store_contract_error(:get)
+    end
+  end
+
+  defp resolve_status(store, hash, %{status: :pending} = record, params, poll_opts) do
+    store.poll(hash, poll_opts)
+    |> handle_poll_result(store, hash, record, params, poll_opts)
+  end
+
+  defp resolve_status(store, hash, %{status: :approved} = record, _params, poll_opts),
+    do: consume(store, hash, record, poll_opts.now)
+
+  defp resolve_status(_store, _hash, %{status: :denied}, _params, _poll_opts), do: {:error, :access_denied}
+  defp resolve_status(_store, _hash, %{status: :consumed}, _params, _poll_opts), do: {:error, :invalid_grant}
+
+  defp handle_poll_result({:ok, record}, store, hash, trusted_record, params, poll_opts) do
+    if valid_poll_transition?(trusted_record, record, hash, poll_opts.now) do
+      with :ok <- check_not_expired(record, poll_opts.now),
+           :ok <- check_client(record, params),
+           :ok <- check_dpop(record, params) do
+        resolve_polled_status(store, hash, record, poll_opts.now)
+      end
+    else
+      device_store_contract_error(:poll)
+    end
+  end
+
+  defp handle_poll_result({:error, :slow_down}, _store, _hash, _trusted, _params, _poll_opts), do: {:error, :slow_down}
+
+  defp handle_poll_result(:error, _store, _hash, _trusted, _params, _poll_opts), do: {:error, :invalid_grant}
+
+  defp handle_poll_result(_unexpected, _store, _hash, _trusted, _params, _poll_opts),
+    do: device_store_contract_error(:poll)
+
+  defp resolve_polled_status(_store, _hash, %{status: :pending}, _now), do: {:error, :authorization_pending}
+  defp resolve_polled_status(store, hash, %{status: :approved} = record, now), do: consume(store, hash, record, now)
+  defp resolve_polled_status(_store, _hash, %{status: :denied}, _now), do: {:error, :access_denied}
+  defp resolve_polled_status(_store, _hash, %{status: :consumed}, _now), do: {:error, :invalid_grant}
+
+  defp consume(store, hash, trusted_record, now) do
+    case store.consume(hash, %{now: now}) do
+      {:ok, consumed_record} ->
+        if valid_consume_transition?(trusted_record, consumed_record, hash) do
+          {:ok, Grant.from_record(consumed_record)}
+        else
+          device_store_contract_error(:consume)
+        end
 
       # Lost the consume race (a concurrent poll consumed it), or the status
       # moved out from under us between poll and consume.
       :error ->
         {:error, :invalid_grant}
+
+      _unexpected ->
+        device_store_contract_error(:consume)
     end
   end
 
@@ -191,19 +248,31 @@ defmodule Attesto.DeviceCode do
   `approval` carries `:subject` (required), and the granted `:scope` /
   `:claims`. Atomic `pending` → `approved`. Returns `:ok`, or `{:error, reason}`
   (`:not_found` / `:already_decided` / `:expired` / `:invalid_user_code` /
-  `:invalid_subject`).
+  `:invalid_subject` / `:invalid_scope` / `:invalid_claims`). A granted scope
+  must be a subset of the scope bound to the device code.
   """
   @spec approve(module(), String.t(), map(), keyword()) ::
-          :ok | {:error, :not_found | :already_decided | :expired | :invalid_user_code | :invalid_subject}
-  def approve(store, user_code, approval, _opts \\ [])
-      when is_atom(store) and is_binary(user_code) and is_map(approval) do
-    with {:ok, normalized} <- normalize_user_code(user_code),
-         :ok <- require_subject(approval) do
-      store.approve(normalized, %{
-        subject: approval.subject,
-        granted_scope: Map.get(approval, :scope, []),
-        granted_claims: Map.get(approval, :claims, %{})
-      })
+          :ok
+          | {:error,
+             :not_found
+             | :already_decided
+             | :expired
+             | :invalid_user_code
+             | :invalid_subject
+             | :invalid_scope
+             | :invalid_claims}
+  def approve(store, user_code, approval, opts \\ [])
+      when is_atom(store) and is_binary(user_code) and is_map(approval) and is_list(opts) do
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
+    with {:ok, normalized} <- normalize_user_code(user_code, opts),
+         :ok <- require_subject(approval),
+         {:ok, fields} <- normalize_approval(approval),
+         {:ok, trusted_record} <- read_user_record(store, normalized),
+         :ok <- decision_available?(trusted_record, now),
+         :ok <- require_scope_subset(trusted_record, fields.granted_scope) do
+      store.approve(normalized, fields, %{now: now})
+      |> validate_approve_result(trusted_record, fields, normalized)
     end
   end
 
@@ -213,9 +282,14 @@ defmodule Attesto.DeviceCode do
   """
   @spec deny(module(), String.t(), keyword()) ::
           :ok | {:error, :not_found | :already_decided | :expired | :invalid_user_code}
-  def deny(store, user_code, _opts \\ []) when is_atom(store) and is_binary(user_code) do
-    with {:ok, normalized} <- normalize_user_code(user_code) do
-      store.deny(normalized)
+  def deny(store, user_code, opts \\ []) when is_atom(store) and is_binary(user_code) and is_list(opts) do
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
+    with {:ok, normalized} <- normalize_user_code(user_code, opts),
+         {:ok, trusted_record} <- read_user_record(store, normalized),
+         :ok <- decision_available?(trusted_record, now) do
+      store.deny(normalized, %{now: now})
+      |> validate_deny_result(trusted_record, normalized)
     end
   end
 
@@ -225,12 +299,26 @@ defmodule Attesto.DeviceCode do
   `{:error, :invalid_user_code}` for malformed input (before any store call) and
   `:error` for an unknown code.
   """
-  @spec lookup(module(), String.t()) ::
+  @spec lookup(module(), String.t(), keyword()) ::
           {:ok, Attesto.DeviceCodeStore.pending_view()} | :error | {:error, :invalid_user_code}
-  def lookup(store, user_code) when is_atom(store) and is_binary(user_code) do
-    case normalize_user_code(user_code) do
-      {:ok, normalized} -> store.lookup_user_code(normalized)
-      {:error, :invalid_user_code} = err -> err
+  def lookup(store, user_code, opts \\ []) when is_atom(store) and is_binary(user_code) and is_list(opts) do
+    with {:ok, normalized} <- normalize_user_code(user_code, opts) do
+      lookup_normalized(store, normalized)
+    end
+  end
+
+  defp lookup_normalized(store, normalized) do
+    case store.lookup_user_code(normalized) do
+      {:ok, record} ->
+        if valid_user_record?(record, normalized),
+          do: {:ok, pending_view(record)},
+          else: device_store_contract_error(:lookup_user_code)
+
+      :error ->
+        :error
+
+      _unexpected ->
+        device_store_contract_error(:lookup_user_code)
     end
   end
 
@@ -243,7 +331,7 @@ defmodule Attesto.DeviceCode do
   """
   @spec normalize_user_code(String.t(), keyword()) :: {:ok, String.t()} | {:error, :invalid_user_code}
   def normalize_user_code(user_code, opts \\ []) when is_binary(user_code) do
-    length = Keyword.get(opts, :user_code_length, @default_user_code_length)
+    length = user_code_length!(opts)
 
     normalized =
       user_code
@@ -266,7 +354,10 @@ defmodule Attesto.DeviceCode do
   not come from the VM's non-cryptographic PRNG.
   """
   @spec generate_user_code(pos_integer()) :: String.t()
-  def generate_user_code(length \\ @default_user_code_length) when is_integer(length) and length > 0 do
+  def generate_user_code(length \\ @default_user_code_length)
+
+  def generate_user_code(length)
+      when is_integer(length) and length >= @minimum_user_code_length and length <= @maximum_user_code_length do
     code = for _ <- 1..length, into: "", do: <<random_alphabet_char()>>
 
     # Hyphenate into groups of 4 for readability (purely a display affordance;
@@ -277,16 +368,102 @@ defmodule Attesto.DeviceCode do
     |> Enum.map_join("-", &Enum.join/1)
   end
 
+  def generate_user_code(_invalid) do
+    raise ArgumentError,
+          "user-code length must be an integer in #{@minimum_user_code_length}..#{@maximum_user_code_length}"
+  end
+
   # ----- internal -----
 
-  defp validate_issue_attrs(%{client_id: client_id}) when is_binary(client_id) and client_id != "", do: :ok
-  defp validate_issue_attrs(_attrs), do: {:error, :invalid_client_id}
+  defp validate_issue_attrs(attrs) do
+    cond do
+      not (is_binary(Map.get(attrs, :client_id)) and Map.get(attrs, :client_id) != "") ->
+        {:error, :invalid_client_id}
+
+      not valid_scope_list?(Map.get(attrs, :scope, [])) ->
+        {:error, :invalid_scope}
+
+      not valid_resource_list?(Map.get(attrs, :resource, [])) ->
+        {:error, :invalid_resource}
+
+      not valid_optional_jkt?(Map.get(attrs, :dpop_jkt)) ->
+        {:error, :invalid_dpop_jkt}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp ttl_seconds!(opts) do
+    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
+    end
+  end
+
+  defp interval_seconds!(opts) do
+    case Keyword.get(opts, :interval, @default_interval_seconds) do
+      interval when is_integer(interval) and interval >= 0 -> interval
+      _invalid -> raise ArgumentError, ":interval must be a non-negative integer"
+    end
+  end
+
+  defp user_code_length!(opts) do
+    case Keyword.get(opts, :user_code_length, @default_user_code_length) do
+      length
+      when is_integer(length) and length >= @minimum_user_code_length and
+             length <= @maximum_user_code_length ->
+        length
+
+      _invalid ->
+        raise ArgumentError,
+              ":user_code_length must be an integer in #{@minimum_user_code_length}..#{@maximum_user_code_length}"
+    end
+  end
 
   defp require_subject(%{subject: subject}) when is_binary(subject) and subject != "", do: :ok
   defp require_subject(_approval), do: {:error, :invalid_subject}
 
-  defp check_not_expired(%{expires_at: expires_at}, opts) do
-    if expires_at > NumericDate.now(opts, default: :system), do: :ok, else: {:error, :expired_token}
+  defp normalize_approval(approval) do
+    scope = Map.get(approval, :scope, [])
+    claims = Map.get(approval, :claims, %{})
+
+    cond do
+      not valid_scope_list?(scope) -> {:error, :invalid_scope}
+      not is_map(claims) -> {:error, :invalid_claims}
+      true -> {:ok, %{subject: approval.subject, granted_scope: scope, granted_claims: claims}}
+    end
+  end
+
+  defp read_user_record(store, user_code) do
+    case store.lookup_user_code(user_code) do
+      {:ok, record} ->
+        if valid_user_record?(record, user_code),
+          do: {:ok, record},
+          else: device_store_contract_error(:lookup_user_code)
+
+      :error ->
+        {:error, :not_found}
+
+      _unexpected ->
+        device_store_contract_error(:lookup_user_code)
+    end
+  end
+
+  defp decision_available?(%{status: :pending, expires_at: expires_at}, now) do
+    if expires_at > now, do: :ok, else: {:error, :expired}
+  end
+
+  defp decision_available?(_record, _now), do: {:error, :already_decided}
+
+  defp require_scope_subset(%{data: %{scope: requested_scope}}, granted_scope) do
+    if MapSet.subset?(MapSet.new(granted_scope), MapSet.new(requested_scope)),
+      do: :ok,
+      else: {:error, :invalid_scope}
+  end
+
+  defp check_not_expired(%{expires_at: expires_at}, now) do
+    if expires_at > now, do: :ok, else: {:error, :expired_token}
   end
 
   # RFC 8628 §3.4: the polling client must be the one the code was issued to.
@@ -295,12 +472,6 @@ defmodule Attesto.DeviceCode do
   end
 
   defp check_client(_record, _params), do: {:error, :invalid_grant}
-
-  defp check_status(%{status: :approved}), do: :ok
-  defp check_status(%{status: :pending}), do: {:error, :authorization_pending}
-  defp check_status(%{status: :denied}), do: {:error, :access_denied}
-  # consumed (or anything else) → already used.
-  defp check_status(_record), do: {:error, :invalid_grant}
 
   # RFC 9449 §10 holder-of-key: a code pre-bound to a DPoP key may be redeemed
   # only with a matching proof. An unbound code accepts any (or no) presented
@@ -311,8 +482,8 @@ defmodule Attesto.DeviceCode do
 
   defp check_dpop(_record, _params), do: :ok
 
-  defp normalize!(user_code) do
-    {:ok, normalized} = normalize_user_code(user_code)
+  defp normalize!(user_code, length) do
+    {:ok, normalized} = normalize_user_code(user_code, user_code_length: length)
     normalized
   end
 
@@ -331,5 +502,188 @@ defmodule Attesto.DeviceCode do
       <<b>> when b < @rejection_ceiling -> Enum.at(@user_code_alphabet, rem(b, @alphabet_size))
       _ -> random_alphabet_char()
     end
+  end
+
+  defp valid_record?(
+         %{
+           device_code_hash: record_hash,
+           user_code: user_code,
+           data: %{client_id: client_id, scope: scope, resource: resource, dpop_jkt: dpop_jkt},
+           status: status,
+           expires_at: expires_at
+         } = record,
+         expected_hash
+       ) do
+    valid_device_identity?(record_hash, expected_hash, user_code) and
+      valid_device_data?(client_id, scope, resource, dpop_jkt) and
+      valid_device_state?(status, expires_at) and valid_device_optional_fields?(record) and
+      valid_decision_fields?(record)
+  end
+
+  defp valid_record?(_record, _expected_hash), do: false
+
+  defp valid_device_identity?(record_hash, expected_hash, user_code),
+    do:
+      record_hash == expected_hash and is_binary(record_hash) and record_hash != "" and
+        valid_stored_user_code?(user_code)
+
+  defp valid_stored_user_code?(user_code) do
+    is_binary(user_code) and String.length(user_code) in @minimum_user_code_length..@maximum_user_code_length and
+      all_in_alphabet?(user_code)
+  end
+
+  defp valid_device_data?(client_id, scope, resource, dpop_jkt) do
+    is_binary(client_id) and client_id != "" and valid_scope_list?(scope) and
+      valid_resource_list?(resource) and valid_optional_jkt?(dpop_jkt)
+  end
+
+  defp valid_device_state?(status, expires_at), do: status in @statuses and is_integer(expires_at) and expires_at >= 0
+
+  defp valid_device_optional_fields?(record) do
+    valid_optional_field?(record, :subject, &valid_optional_binary?/1) and
+      valid_optional_field?(record, :granted_scope, &valid_optional_string_list?/1) and
+      valid_optional_field?(record, :granted_claims, &valid_optional_map?/1) and
+      valid_optional_field?(record, :last_polled_at, &valid_optional_non_negative_integer?/1)
+  end
+
+  defp valid_decision_fields?(%{status: status} = record) when status in [:approved, :consumed] do
+    case record do
+      %{subject: subject, granted_scope: granted_scope, granted_claims: granted_claims} ->
+        is_binary(subject) and subject != "" and valid_scope_list?(granted_scope) and
+          MapSet.subset?(MapSet.new(granted_scope), MapSet.new(record.data.scope)) and
+          is_map(granted_claims)
+
+      _missing_decision_fields ->
+        false
+    end
+  end
+
+  defp valid_decision_fields?(_record), do: true
+
+  defp valid_consume_transition?(trusted_record, consumed_record, hash) do
+    consumed_record.status == :consumed and valid_record?(consumed_record, hash) and
+      Enum.all?(@consume_bound_fields, fn field ->
+        Map.get(consumed_record, field) == Map.get(trusted_record, field)
+      end)
+  end
+
+  defp valid_poll_transition?(trusted_record, polled_record, hash, now) do
+    valid_record?(polled_record, hash) and Map.get(polled_record, :last_polled_at) == now and
+      Enum.all?(@poll_bound_fields, fn field ->
+        Map.get(polled_record, field) == Map.get(trusted_record, field)
+      end)
+  end
+
+  defp valid_approve_transition?(trusted_record, approved_record, fields, user_code) do
+    trusted_record.status == :pending and approved_record.status == :approved and
+      valid_user_record?(approved_record, user_code) and
+      Enum.all?(@poll_bound_fields, fn field ->
+        Map.get(approved_record, field) == Map.get(trusted_record, field)
+      end) and
+      Enum.all?([:subject, :granted_scope, :granted_claims], fn field ->
+        Map.get(approved_record, field) == Map.get(fields, field)
+      end)
+  end
+
+  defp valid_deny_transition?(trusted_record, denied_record, user_code) do
+    trusted_record.status == :pending and denied_record.status == :denied and
+      valid_user_record?(denied_record, user_code) and
+      Enum.all?(@poll_bound_fields, fn field ->
+        Map.get(denied_record, field) == Map.get(trusted_record, field)
+      end)
+  end
+
+  defp valid_user_record?(record, expected_user_code) when is_map(record) do
+    case Map.get(record, :device_code_hash) do
+      hash when is_binary(hash) and hash != "" ->
+        valid_record?(record, hash) and Map.get(record, :user_code) == expected_user_code
+
+      _invalid ->
+        false
+    end
+  end
+
+  defp valid_user_record?(_record, _expected_user_code), do: false
+
+  defp pending_view(record) do
+    %{
+      user_code: record.user_code,
+      client_id: record.data.client_id,
+      scope: record.data.scope,
+      resource: record.data.resource,
+      status: record.status,
+      expires_at: record.expires_at
+    }
+  end
+
+  defp validate_approve_result({:ok, record}, trusted_record, fields, user_code) do
+    if valid_approve_transition?(trusted_record, record, fields, user_code),
+      do: :ok,
+      else: device_store_contract_error(:approve)
+  end
+
+  defp validate_approve_result({:error, reason} = error, _trusted, _fields, _user_code) when reason in @decision_errors,
+    do: error
+
+  defp validate_approve_result(_unexpected, _trusted, _fields, _user_code), do: device_store_contract_error(:approve)
+
+  defp validate_deny_result({:ok, record}, trusted_record, user_code) do
+    if valid_deny_transition?(trusted_record, record, user_code),
+      do: :ok,
+      else: device_store_contract_error(:deny)
+  end
+
+  defp validate_deny_result({:error, reason} = error, _trusted, _user_code) when reason in @decision_errors, do: error
+
+  defp validate_deny_result(_unexpected, _trusted, _user_code), do: device_store_contract_error(:deny)
+
+  defp valid_optional_field?(record, field, validator) do
+    case Map.fetch(record, field) do
+      {:ok, value} -> validator.(value)
+      :error -> true
+    end
+  end
+
+  defp valid_scope_list?(value), do: Scope.valid_list?(value)
+
+  defp valid_resource_list?(value), do: is_list(value) and Enum.all?(value, &(is_binary(&1) and &1 != ""))
+
+  defp valid_optional_string_list?(nil), do: true
+  defp valid_optional_string_list?(value), do: valid_scope_list?(value)
+  defp valid_optional_binary?(nil), do: true
+  defp valid_optional_binary?(value), do: is_binary(value)
+  defp valid_optional_jkt?(nil), do: true
+  defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
+  defp valid_optional_map?(nil), do: true
+  defp valid_optional_map?(value), do: is_map(value)
+  defp valid_optional_non_negative_integer?(nil), do: true
+  defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  defp device_store_contract_error(:put) do
+    raise RuntimeError, "device code store put/1 violated its contract"
+  end
+
+  defp device_store_contract_error(:lookup_user_code) do
+    raise RuntimeError, "device code store lookup_user_code/1 violated its contract"
+  end
+
+  defp device_store_contract_error(:get) do
+    raise RuntimeError, "device code store get/1 violated its contract"
+  end
+
+  defp device_store_contract_error(:approve) do
+    raise RuntimeError, "device code store approve/3 violated its contract"
+  end
+
+  defp device_store_contract_error(:deny) do
+    raise RuntimeError, "device code store deny/2 violated its contract"
+  end
+
+  defp device_store_contract_error(:poll) do
+    raise RuntimeError, "device code store poll/2 violated its contract"
+  end
+
+  defp device_store_contract_error(:consume) do
+    raise RuntimeError, "device code store consume/2 violated its contract"
   end
 end

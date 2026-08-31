@@ -116,7 +116,7 @@ defmodule Attesto.AuthorizationCodeReuseTest do
   end
 
   describe "redeem/4 code-reuse detection (tracking store)" do
-    test "a second redeem of a redeemed code is {:error, {:reuse, meta}} carrying the family", %{
+    test "a no-refresh finalize marker never carries authorization provenance as a family", %{
       challenge: challenge
     } do
       {:ok, code} = AuthorizationCode.issue(TrackingStore, code_attrs(challenge, %{family_id: @family_id}))
@@ -129,7 +129,7 @@ defmodule Attesto.AuthorizationCodeReuseTest do
       # a reuse attack.
       assert :ok = AuthorizationCode.finalize(TrackingStore, code, grant)
 
-      assert {:error, {:reuse, %{family_id: @family_id, subject: @subject}}} =
+      assert {:error, {:reuse, %{family_id: nil, subject: @subject}}} =
                AuthorizationCode.redeem(TrackingStore, code, redeem_params())
     end
 

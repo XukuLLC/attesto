@@ -576,6 +576,17 @@ defmodule Attesto.AuthorizationRequestTest do
   end
 
   describe "validate/2 require_nonce (OIDC Core §3.1.2.1)" do
+    test "malformed nonce and PKCE policy cannot disable enforcement" do
+      for key <- [:require_nonce, :require_pkce], invalid <- [nil, 0, "false", :no] do
+        assert_raise ArgumentError, ~r/:#{key} must be true or false/, fn ->
+          AuthorizationRequest.validate(base_params(), [
+            {:registered_redirect_uris, @registered},
+            {key, invalid}
+          ])
+        end
+      end
+    end
+
     test "missing nonce with require_nonce: true redirects with invalid_request" do
       params = base_params() |> Map.delete("nonce")
       assert {:error, {:redirect, err}} = validate_require_nonce(params)

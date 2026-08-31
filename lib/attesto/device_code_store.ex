@@ -9,7 +9,7 @@ defmodule Attesto.DeviceCodeStore do
   transition is security-critical, so each MUST be a single atomic operation
   guarded on the current state, never an app-level read-then-write:
 
-    * `approve/2` / `deny/2` move `pending` → `approved` / `denied` only — an
+    * `approve/3` / `deny/2` move `pending` → `approved` / `denied` only — an
       already-decided or expired code is refused, so the user's decision is
       taken exactly once.
     * `poll/2` enforces the RFC 8628 §3.5 minimum poll interval as one atomic
@@ -75,26 +75,31 @@ defmodule Attesto.DeviceCodeStore do
   @callback put(entry()) :: :ok | {:error, :user_code_taken}
 
   @doc """
-  Non-consuming read of the record for `user_code`, for the verification page to
-  show the user what they are about to approve. Returns `:error` when unknown.
+  Non-consuming read of the full record for `user_code`, for approval/denial
+  validation and the verification-page view. Returns `:error` when unknown.
   """
-  @callback lookup_user_code(user_code()) :: {:ok, pending_view()} | :error
+  @callback lookup_user_code(user_code()) :: {:ok, entry()} | :error
+
+  @doc "Non-consuming read of the full record for a device-code hash."
+  @callback get(device_code_hash()) :: {:ok, entry()} | :error
 
   @doc """
   Atomically move a `pending` code to `approved`, binding the resolved
   `:subject`, `:granted_scope`, and `:granted_claims`. MUST refuse a code that
   is not currently `pending` (`{:error, :already_decided}`) or unknown
   (`{:error, :not_found}`); `{:error, :expired}` for an expired pending code.
-  Implement as one guarded `UPDATE ... WHERE status = 'pending' RETURNING`.
+  Implement as one guarded `UPDATE ... WHERE status = 'pending' AND
+  expires_at > now RETURNING`.
   """
-  @callback approve(user_code(), approval :: map()) ::
-              :ok | {:error, :not_found | :already_decided | :expired}
+  @callback approve(user_code(), approval :: map(), opts :: map()) ::
+              {:ok, entry()} | {:error, :not_found | :already_decided | :expired}
 
   @doc """
   Atomically move a `pending` code to `denied`. Same guard/return contract as
-  `approve/2`.
+  `approve/3`.
   """
-  @callback deny(user_code()) :: :ok | {:error, :not_found | :already_decided | :expired}
+  @callback deny(user_code(), opts :: map()) ::
+              {:ok, entry()} | {:error, :not_found | :already_decided | :expired}
 
   @doc """
   Enforce the RFC 8628 §3.5 minimum poll interval and return the code's current

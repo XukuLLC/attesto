@@ -155,6 +155,8 @@ defmodule Attesto.WalletAttestation do
   def verify(attestation, pop, opts \\ [])
 
   def verify(attestation, pop, opts) when is_binary(attestation) and is_binary(pop) and is_list(opts) do
+    opts = validate_policy_options!(opts)
+
     with {:ok, attestation_claims, jwk_map, jkt} <- verify_attestation(attestation, opts),
          {:ok, pop_claims, replay_key} <- verify_pop(pop, jwk_map, jkt, opts) do
       {:ok,
@@ -169,6 +171,25 @@ defmodule Attesto.WalletAttestation do
   end
 
   def verify(_attestation, _pop, _opts), do: {:error, :invalid_attestation}
+
+  defp validate_policy_options!(opts) do
+    enforce_fapi_policy =
+      case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
+        :error -> not Keyword.has_key?(opts, :accepted_algs)
+        {:ok, value} when is_boolean(value) -> value
+        {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
+      end
+
+    max_age =
+      case Keyword.get(opts, :max_age_seconds, @default_pop_max_age_seconds) do
+        value when is_integer(value) and value > 0 -> value
+        _invalid -> raise ArgumentError, ":max_age_seconds must be a positive integer"
+      end
+
+    opts
+    |> Keyword.put(:enforce_fapi_alg_policy, enforce_fapi_policy)
+    |> Keyword.put(:max_age_seconds, max_age)
+  end
 
   # ── Client Attestation JWT ───────────────────────────────────────────────
 
@@ -322,7 +343,7 @@ defmodule Attesto.WalletAttestation do
         case fun.(replay_key, replay_ttl(opts)) do
           :ok -> :ok
           {:error, :replay} -> {:error, :replay}
-          other -> raise ArgumentError, ":replay_check must return :ok or {:error, :replay}; got #{inspect(other)}"
+          _other -> raise ArgumentError, ":replay_check must return :ok or {:error, :replay}"
         end
 
       other ->

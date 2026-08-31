@@ -40,7 +40,7 @@ defmodule Attesto.Introspection do
   unmatched hint still falls through to the other.
   """
 
-  alias Attesto.{Config, NumericDate, Secret, Token}
+  alias Attesto.{Config, NumericDate, Scope, Secret, Thumbprint, Token}
 
   @inactive %{"active" => false}
 
@@ -96,10 +96,12 @@ defmodule Attesto.Introspection do
   """
   @spec introspect(Config.t(), String.t(), opts()) :: response()
   def introspect(%Config{} = config, token, opts \\ []) when is_binary(token) and is_list(opts) do
+    authorize = authorize_option!(opts)
+
     opts
     |> ordered_attempts()
     |> Enum.find_value(@inactive, fn attempt -> attempt.(config, token, opts) end)
-    |> authorize_caller(opts)
+    |> authorize_caller(authorize)
   end
 
   # RFC 7662 §4 / RFC 9701 §5: an active response is returned to the caller only
@@ -108,19 +110,28 @@ defmodule Attesto.Introspection do
   # inactive to this caller. An inactive result (no token, or not active) is
   # never passed to the predicate: there is nothing to leak and nothing to
   # authorize.
-  defp authorize_caller(%{"active" => true} = response, opts) do
-    case Keyword.get(opts, :authorize) do
-      fun when is_function(fun, 1) -> if safe_authorize(fun, response), do: response, else: @inactive
-      _ -> response
-    end
+  defp authorize_caller(%{"active" => true} = response, nil), do: response
+
+  defp authorize_caller(%{"active" => true} = response, authorize) do
+    if safe_authorize(authorize, response), do: response, else: @inactive
   end
 
-  defp authorize_caller(response, _opts), do: response
+  defp authorize_caller(response, _authorize), do: response
+
+  defp authorize_option!(opts) do
+    case Keyword.get(opts, :authorize) do
+      nil -> nil
+      authorize when is_function(authorize, 1) -> authorize
+      _invalid -> raise ArgumentError, ":authorize must be a one-argument function or nil"
+    end
+  end
 
   defp safe_authorize(fun, response) do
     fun.(response) == true
   rescue
     _ -> false
+  catch
+    _kind, _value -> false
   end
 
   # RFC 7662 §2.1: the hint is an optimisation, not a constraint - try the hinted
@@ -161,12 +172,113 @@ defmodule Attesto.Introspection do
 
   defp refresh_token_response(_config, token, opts) do
     with store when is_atom(store) and not is_nil(store) <- Keyword.get(opts, :refresh_store),
-         {:ok, entry} <- store.get(Secret.hash(token)),
+         token_hash = Secret.hash(token),
+         {:ok, entry} <- refresh_store_get(store, token_hash),
          true <- active_refresh?(entry, NumericDate.now(opts)) do
       rfc7662_refresh_response(entry)
     else
       _ -> nil
     end
+  end
+
+  # RFC 7662's inactive response must not distinguish an absent token from an
+  # unavailable or broken refresh store. Keep that wire-level privacy while
+  # emitting a bounded operational event for the host. Adapter return values
+  # and exception/throw/exit payloads never enter the event.
+  defp refresh_store_get(store, token_hash) do
+    case call_refresh_store(store, token_hash) do
+      {:returned, :error} ->
+        :error
+
+      {:returned, {:ok, entry}} ->
+        if valid_refresh_entry?(entry, token_hash) do
+          {:ok, entry}
+        else
+          report_refresh_store_failure(:store_contract_violation)
+        end
+
+      {:returned, _unexpected} ->
+        report_refresh_store_failure(:store_contract_violation)
+
+      {:failed, reason} ->
+        report_refresh_store_failure(reason)
+    end
+  end
+
+  defp call_refresh_store(store, token_hash) do
+    {:returned, store.get(token_hash)}
+  rescue
+    _exception -> {:failed, :store_raised}
+  catch
+    :throw, _value -> {:failed, :store_threw}
+    :exit, _value -> {:failed, :store_exited}
+  end
+
+  # Bind the returned row to the presented token hash and validate every
+  # security-relevant field before trusting its activity state. A custom store
+  # may still return an empty `data` map for the documented minimal response;
+  # present members may never be silently discarded because they are malformed.
+  defp valid_refresh_entry?(entry, expected_hash) when is_map(entry) do
+    Map.get(entry, :token_hash) == expected_hash and
+      non_empty_binary?(Map.get(entry, :family_id)) and
+      non_negative_integer?(Map.get(entry, :generation)) and
+      non_negative_integer?(Map.get(entry, :expires_at)) and
+      is_boolean(Map.get(entry, :consumed)) and
+      valid_refresh_state?(entry) and
+      valid_refresh_data?(Map.get(entry, :data))
+  end
+
+  defp valid_refresh_entry?(_entry, _expected_hash), do: false
+
+  defp valid_refresh_state?(%{consumed: false} = entry) do
+    Map.get(entry, :consumed_at) == nil and Map.get(entry, :successor) == nil
+  end
+
+  defp valid_refresh_state?(%{consumed: true} = entry) do
+    non_negative_integer?(Map.get(entry, :consumed_at))
+  end
+
+  defp valid_refresh_state?(_entry), do: false
+
+  defp valid_refresh_data?(data) when is_map(data) do
+    valid_optional_data_member?(data, :subject, &non_empty_binary?/1) and
+      valid_optional_data_member?(data, :client_id, &nil_or_non_empty_binary?/1) and
+      valid_optional_data_member?(data, :scope, &Scope.valid_list?/1) and
+      valid_optional_data_member?(data, :resource, &valid_resource?/1) and
+      valid_optional_data_member?(data, :dpop_jkt, &nil_or_thumbprint?/1) and
+      valid_optional_data_member?(data, :acr, &nil_or_non_empty_binary?/1) and
+      valid_optional_data_member?(data, :auth_time, &nil_or_non_negative_integer?/1) and
+      valid_optional_data_member?(data, :claims, &is_map/1)
+  end
+
+  defp valid_refresh_data?(_data), do: false
+
+  defp valid_optional_data_member?(data, key, validator) do
+    atom_value = Map.fetch(data, key)
+    string_value = Map.fetch(data, Atom.to_string(key))
+
+    case {atom_value, string_value} do
+      {:error, :error} -> true
+      {{:ok, value}, :error} -> validator.(value)
+      {:error, {:ok, value}} -> validator.(value)
+      {{:ok, value}, {:ok, value}} -> validator.(value)
+      {{:ok, _atom}, {:ok, _string}} -> false
+    end
+  end
+
+  defp non_empty_binary?(value), do: is_binary(value) and value != ""
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
+  defp nil_or_non_empty_binary?(nil), do: true
+  defp nil_or_non_empty_binary?(value), do: non_empty_binary?(value)
+  defp nil_or_non_negative_integer?(nil), do: true
+  defp nil_or_non_negative_integer?(value), do: non_negative_integer?(value)
+  defp nil_or_thumbprint?(nil), do: true
+  defp nil_or_thumbprint?(value), do: Thumbprint.valid?(value)
+  defp valid_resource?(value), do: is_list(value) and Enum.all?(value, &non_empty_binary?/1)
+
+  defp report_refresh_store_failure(reason) do
+    Attesto.Telemetry.introspection_refresh_store_failed(reason)
+    :error
   end
 
   # A refresh token is active only while it is explicitly unconsumed and

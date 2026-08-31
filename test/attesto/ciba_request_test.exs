@@ -69,6 +69,40 @@ defmodule Attesto.CIBA.RequestTest do
     test "request_uri is rejected (undefined at this endpoint)" do
       assert {:error, :invalid_request} = Request.validate(client(), params(%{"request_uri" => "https://x"}))
     end
+
+    test "malformed policy options raise before request processing" do
+      for key <- [
+            :require_signed_request,
+            :require_binding_message,
+            :user_code_supported,
+            :enforce_fapi_alg_policy
+          ],
+          invalid <- [nil, 0, "true", :yes] do
+        assert_raise ArgumentError, ~r/:#{key} must be true or false/, fn ->
+          Request.validate(client(), %{}, [{key, invalid}])
+        end
+      end
+
+      for key <- [
+            :max_request_lifetime_seconds,
+            :binding_message_max_length,
+            :min_client_notification_token_length
+          ],
+          invalid <- [nil, 0, -1, 1.5, "22"] do
+        assert_raise ArgumentError, ~r/:#{key} must be a positive integer/, fn ->
+          Request.validate(client(), %{}, [{key, invalid}])
+        end
+      end
+
+      assert_raise ArgumentError, ~r/must not exceed 1024/, fn ->
+        Request.validate(client(), %{}, min_client_notification_token_length: 1025)
+      end
+    end
+
+    test "malformed client user-code policy is rejected" do
+      assert {:error, :unauthorized_client} =
+               Request.validate(client(%{user_code_parameter: "true"}), params())
+    end
   end
 
   describe "client_notification_token (§7.1: required for ping and push)" do

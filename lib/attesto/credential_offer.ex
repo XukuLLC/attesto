@@ -99,8 +99,11 @@ defmodule Attesto.CredentialOffer do
   def store_by_reference(store, offer, opts \\ []) when is_atom(store) and is_map(offer) and is_list(opts) do
     ttl = validate_ttl!(Keyword.get(opts, :ttl, @default_reference_ttl))
     id = Secret.generate()
-    :ok = store.put(%{id: id, offer: offer, expires_at: System.system_time(:second) + ttl})
-    {:ok, id}
+
+    case store.put(%{id: id, offer: offer, expires_at: System.system_time(:second) + ttl}) do
+      :ok -> {:ok, id}
+      _unexpected -> raise RuntimeError, "credential offer store put/1 violated its contract"
+    end
   end
 
   defp validate_ttl!(ttl) when is_integer(ttl) and ttl > 0 and ttl <= @max_reference_ttl, do: ttl

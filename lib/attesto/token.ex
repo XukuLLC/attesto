@@ -350,6 +350,8 @@ defmodule Attesto.Token do
   def verify(config, jwt, opts \\ [])
 
   def verify(%Config{} = config, jwt, opts) when is_binary(jwt) and is_list(opts) do
+    _require_confirmation_binding = require_confirmation_binding!(opts)
+
     with {:ok, claims} <- verify_signature(config, jwt),
          :ok <- check_confirmation_shape(claims),
          :ok <- check_issuer(config, claims),
@@ -387,10 +389,18 @@ defmodule Attesto.Token do
   # never holds the proof key - passes `require_confirmation_binding: false` to
   # skip the binding match while keeping every other check, including `cnf` shape.
   defp maybe_check_confirmation_binding(claims, opts) do
-    if Keyword.get(opts, :require_confirmation_binding, true) do
+    if require_confirmation_binding!(opts) do
       check_confirmation_binding(claims, opts)
     else
       :ok
+    end
+  end
+
+  defp require_confirmation_binding!(opts) do
+    case Keyword.fetch(opts, :require_confirmation_binding) do
+      :error -> true
+      {:ok, value} when is_boolean(value) -> value
+      {:ok, _value} -> raise ArgumentError, ":require_confirmation_binding must be true or false"
     end
   end
 

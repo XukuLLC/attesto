@@ -165,6 +165,7 @@ defmodule Attesto.CIBAStore.ETS do
   # CIBA Core §7.3: enforce the record's minimum token-request interval. The
   # first poll (last_polled_at nil) is always allowed; interval 0 disables
   # enforcement.
+  defp poll_allowed?(%{status: status}, _opts) when status != :pending, do: true
   defp poll_allowed?(%{last_polled_at: nil}, _opts), do: true
   defp poll_allowed?(%{interval: 0}, _opts), do: true
   defp poll_allowed?(%{interval: interval, last_polled_at: last}, %{now: now}), do: last <= now - interval

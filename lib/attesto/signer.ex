@@ -26,7 +26,7 @@ defmodule Attesto.Signer do
   publication.
 
   A signer using an algorithm that cannot be inferred from its public key,
-  such as `PS256`, also implements the optional `Attesto.Keystore.signing_alg/0`
+  such as `PS256`, also implements the optional `c:Attesto.Keystore.signing_alg/0`
   callback or publishes an `"alg"` member in `signing_jwk/0`.
   """
 

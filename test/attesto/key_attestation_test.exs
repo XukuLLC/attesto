@@ -82,6 +82,15 @@ defmodule Attesto.KeyAttestationTest do
              KeyAttestation.verify(jwt, trusted_jwks: trusted(signer), now: @now, require_exp: false)
   end
 
+  test "rejects malformed security booleans before parsing or verification" do
+    for key <- [:require_exp, :enforce_fapi_alg_policy],
+        invalid <- [nil, 0, "false", []] do
+      assert_raise ArgumentError, ~r/^:#{key} must be true or false$/, fn ->
+        KeyAttestation.verify("not-a-jwt", [{key, invalid}])
+      end
+    end
+  end
+
   test "rejects a missing or empty attested_keys" do
     signer = ec_key()
 

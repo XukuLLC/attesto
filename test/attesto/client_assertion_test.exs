@@ -178,6 +178,20 @@ defmodule Attesto.ClientAssertionTest do
              ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [public_jwk(key)]})
   end
 
+  test "malformed security policy options raise before assertion parsing" do
+    for invalid <- [nil, 0, "true", :yes] do
+      assert_raise ArgumentError, ~r/:enforce_fapi_alg_policy must be true or false/, fn ->
+        ClientAssertion.verify("not-a-jwt", @client_id, @audience, %{}, enforce_fapi_alg_policy: invalid)
+      end
+    end
+
+    for invalid <- [nil, 0, -1, 1.5, "60"] do
+      assert_raise ArgumentError, ~r/:max_lifetime must be a positive integer/, fn ->
+        ClientAssertion.verify("not-a-jwt", @client_id, @audience, %{}, max_lifetime: invalid)
+      end
+    end
+  end
+
   test "explicitly narrowing :accepted_algs rejects an otherwise-accepted alg" do
     key = ec_key()
     jwt = assertion(key)

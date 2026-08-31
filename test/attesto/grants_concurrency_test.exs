@@ -73,38 +73,35 @@ defmodule Attesto.GrantsConcurrencyTest do
       # through the idempotent retry path; that is safe. What must never happen
       # is a fork where two different successors are minted from one parent.
       #
-      # A racer that passed the initial non-consuming `get` but whose
-      # `consume` call arrives after `revoke_family` has already deleted the
-      # token row from ETS will see `{:error, :invalid_grant}` (the store
-      # returns `:error` for an absent row). Both `:reuse_detected` and
-      # `:invalid_grant` are safe terminal outcomes: neither produces a
-      # successor, and the family is revoked either way.
+      # The atomic store commits the parent, retry state, and child together,
+      # so matching losers recover the same successor rather than observing a
+      # partially rotated family.
       assert length(successors) <= 1,
              "at most one distinct successor may be minted; got #{length(successors)}"
 
       assert Enum.all?(results, fn r ->
                match?({:ok, _}, r) or
-                 r in [{:error, :reuse_detected}, {:error, :grant_revoked}, {:error, :invalid_grant}]
+                 r in [
+                   {:error, :reuse_detected},
+                   {:error, :grant_revoked},
+                   {:error, :invalid_grant},
+                   {:error, :temporarily_unavailable}
+                 ]
              end)
 
       # Whichever way the race resolved, the family must not be left in a
       # FORKED state. That is the invariant; "the next rotation fails" is not,
       # and asserting it made this test load-dependent.
       #
-      # Within `:rotation_grace_seconds` (10s by default) a matching retry of
-      # an already-consumed parent is documented to return the SAME successor,
-      # so whether this call fails depends on which way the racers resolved: if
-      # a loser tripped reuse detection the family is revoked and the row is
-      # gone (`:invalid_grant`), but if every loser landed on the idempotent
-      # path there is nothing to revoke and the original successor is returned
-      # again. Both are correct. Only a NEW successor would be a fork.
+      # A post-race retry either returns that same successor or a terminal
+      # refusal; it must never mint a new child.
       case RefreshToken.rotate(RefreshStore.ETS, t0) do
         {:ok, %{token: token}} ->
           assert token in successors,
                  "a post-race rotation minted a successor no racer saw, forking the family"
 
         {:error, reason} ->
-          assert reason in [:reuse_detected, :grant_revoked, :invalid_grant]
+          assert reason in [:reuse_detected, :grant_revoked, :invalid_grant, :temporarily_unavailable]
       end
     end
 
@@ -116,22 +113,7 @@ defmodule Attesto.GrantsConcurrencyTest do
     # What it can and cannot catch, stated plainly because the difference is
     # not obvious:
     #
-    #   * It CAN catch a successor that reaches storage without reaching a
-    #     caller. `rotate/3` returns `{:ok, _}` unconditionally once `issue/3`
-    #     has inserted and the `remember_successor/3` RESULT is discarded, so a
-    #     store that merely returns an error there cannot strand a child - but
-    #     one that RAISES leaves the child persisted while the caller gets an
-    #     exception, and a host writes those stores.
-    #
-    #   * It does NOT prove `consume/2` is atomic, though it can catch some
-    #     non-atomic implementations. A store whose `consume` only reads and
-    #     reports success produces 25 distinct persisted successors, which the
-    #     fork assertion rejects. A different break does not: rewiring
-    #     `{:reuse, _}` to `{:ok, _}` yields ZERO successors instead of two,
-    #     because the extra claimants revoke the family and the winner's own
-    #     insert is then refused. Passing here means no fork was observed in
-    #     this run, not that the claim is atomic - that is the store's
-    #     contract, tested where the stores are.
+    #   * It observes what the atomic rotate contract actually committed.
     #
     # The vacuity guard below matters for the same reason: without it, "no
     # successors were persisted" would satisfy a fork assertion perfectly.
@@ -156,9 +138,7 @@ defmodule Attesto.GrantsConcurrencyTest do
 
       # Guard against a vacuous pass: an empty store satisfies "at most one
       # successor" perfectly, so require evidence the race reached the claim at
-      # all. Zero persisted successors is itself legitimate - a loser can
-      # revoke the family in the window between the winner's `consume` and its
-      # `insert`, so the winner's child is refused - which is why this asserts
+      # all.
       # that the claim was REACHED rather than that a child exists.
       assert Enum.any?(results, &(match?({:ok, _}, &1) or &1 in [{:error, :reuse_detected}, {:error, :grant_revoked}])),
              "no racer won the claim or tripped reuse detection, so nothing was ruled out " <>
@@ -167,27 +147,31 @@ defmodule Attesto.GrantsConcurrencyTest do
                  {:error, r} -> r
                end))})"
 
-      # Both inclusions, because either alone is satisfiable while the other
-      # fails. Every successor handed out must be in the store (nobody holds a
-      # credential the store does not know), AND every successor in the store
-      # must have been handed out (nothing is stranded there unclaimed, which
-      # is the case a `remember_successor/3` that raises would produce).
+      # Every successor handed out must have landed in the store. Conversely,
+      # every live successor must have been handed out.
       returned = for({:ok, %{token: token}} <- results, do: Attesto.Secret.hash(token)) |> Enum.uniq()
 
       for hash <- returned do
         assert hash in persisted, "a racer was handed a successor that is not in the store"
       end
 
-      for hash <- persisted do
+      live_persisted = Enum.filter(persisted, &match?({:ok, _}, RefreshStore.ETS.get(&1)))
+
+      for hash <- live_persisted do
         assert hash in returned,
-               "a successor is in the store that no racer received; a stranded child is still a usable credential"
+               "a live successor is in the store that no racer received; a stranded child is still a usable credential"
       end
 
       # Every outcome must be terminal-and-safe: a successor, or one of the
       # refusals that leaves no successor behind.
       assert Enum.all?(results, fn r ->
                match?({:ok, _}, r) or
-                 r in [{:error, :reuse_detected}, {:error, :grant_revoked}, {:error, :invalid_grant}]
+                 r in [
+                   {:error, :reuse_detected},
+                   {:error, :grant_revoked},
+                   {:error, :invalid_grant},
+                   {:error, :temporarily_unavailable}
+                 ]
              end)
     end
   end
@@ -227,11 +211,16 @@ defmodule Attesto.GrantsConcurrencyTest do
     def get(token_hash), do: RefreshStore.ETS.get(token_hash)
 
     @impl true
-    def consume(token_hash, opts), do: RefreshStore.ETS.consume(token_hash, opts)
+    def rotate(parent_hash, child, successor, opts) do
+      case RefreshStore.ETS.rotate(parent_hash, child, successor, opts) do
+        {:ok, _parent, committed_child} = result ->
+          :ets.insert(@table, {:persisted, committed_child})
+          result
 
-    @impl true
-    def remember_successor(token_hash, successor, opts),
-      do: RefreshStore.ETS.remember_successor(token_hash, successor, opts)
+        other ->
+          other
+      end
+    end
 
     @impl true
     def revoke_family(family_id), do: RefreshStore.ETS.revoke_family(family_id)

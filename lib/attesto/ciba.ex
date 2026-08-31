@@ -45,8 +45,7 @@ defmodule Attesto.CIBA do
 
   alias Attesto.CIBA.Grant
   alias Attesto.CIBA.Request
-  alias Attesto.NumericDate
-  alias Attesto.Secret
+  alias Attesto.{NumericDate, Scope, Secret, Thumbprint}
 
   @grant_type "urn:openid:params:grant-type:ciba"
 
@@ -68,6 +67,26 @@ defmodule Attesto.CIBA do
 
   # §7.3: the default minimum token-request interval.
   @default_interval 5
+  # Approval and redemption may land on nodes whose whole-second clocks differ
+  # by one second. Keep the tolerance narrow; larger future timestamps indicate
+  # impossible persisted state or a badly skewed deployment and fail closed.
+  @decision_clock_skew_seconds 1
+  @notification_token_pattern ~r/\A[A-Za-z0-9\-._~+\/]+=*\z/
+  @notification_token_max_length 1024
+  @statuses [:pending, :approved, :denied, :consumed]
+  @decision_errors [:not_found, :already_decided, :expired]
+  @consume_bound_fields [
+    :auth_req_id_hash,
+    :data,
+    :subject,
+    :acr,
+    :auth_time,
+    :granted_scope,
+    :granted_claims,
+    :interval,
+    :expires_at
+  ]
+  @poll_bound_fields [:auth_req_id_hash, :data, :interval, :expires_at]
 
   @typedoc "What `issue/4` hands back: the §7.3 authentication request acknowledgement."
   @type issued :: %{
@@ -161,10 +180,16 @@ defmodule Attesto.CIBA do
   (there is no token-endpoint polling to pace); the caller omits it from the
   JSON response.
   """
-  @spec issue(module(), Request.t(), issue_attrs(), keyword()) :: {:ok, issued()} | {:error, :invalid_subject}
+  @spec issue(module(), Request.t(), issue_attrs(), keyword()) ::
+          {:ok, issued()}
+          | {:error, :invalid_subject | :invalid_request | :invalid_resource | :invalid_dpop_jkt}
   def issue(store, %Request{} = request, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
-    with :ok <- require_subject(attrs) do
-      now = NumericDate.now(opts, default: :system)
+    validate_issue_options!(opts)
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
+    with :ok <- require_subject(attrs),
+         :ok <- validate_request_for_issue(request, now),
+         :ok <- validate_issue_attrs(attrs) do
       expires_in = effective_expires_in(request, opts)
       interval = if request.delivery_mode != :push, do: Keyword.get(opts, :interval, @default_interval)
       auth_req_id = Secret.generate(@auth_req_id_bytes)
@@ -189,8 +214,10 @@ defmodule Attesto.CIBA do
         last_polled_at: nil
       }
 
-      :ok = store.put(record)
-      {:ok, %{auth_req_id: auth_req_id, expires_in: expires_in, interval: interval}}
+      case store.put(record) do
+        :ok -> {:ok, %{auth_req_id: auth_req_id, expires_in: expires_in, interval: interval}}
+        _unexpected -> ciba_store_contract_error(:put)
+      end
     end
   end
 
@@ -231,9 +258,13 @@ defmodule Attesto.CIBA do
   @spec redeem(module(), String.t(), map(), keyword()) :: {:ok, Grant.t()} | {:error, redeem_error()}
   def redeem(store, auth_req_id, params, opts \\ [])
       when is_atom(store) and is_binary(auth_req_id) and is_map(params) and is_list(opts) do
+    now = NumericDate.non_negative_now!(opts, default: :system)
+    opts = Keyword.put(opts, :now, now)
+
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_grant),
          {:ok, record} <- read_record(store, hash),
          :ok <- check_not_expired(record, opts),
+         :ok <- check_decision_time(record, opts),
          :ok <- check_client(record, params),
          :ok <- check_dpop(record, params),
          :ok <- check_not_push(record) do
@@ -242,7 +273,7 @@ defmodule Attesto.CIBA do
   end
 
   defp read_record(store, hash) do
-    case store.lookup(hash) do
+    case lookup_record(store, hash) do
       {:ok, record} -> {:ok, record}
       :error -> {:error, :invalid_grant}
     end
@@ -258,11 +289,10 @@ defmodule Attesto.CIBA do
   # unauthorized caller.
   defp resolve_status(store, hash, record, opts) do
     case record.status do
-      :approved -> consume(store, hash, opts)
+      :approved -> consume(store, hash, record, opts)
       :denied -> {:error, :access_denied}
-      :pending -> throttle_pending(store, hash, opts)
-      # consumed (or anything else) → already used.
-      _other -> {:error, :invalid_grant}
+      :pending -> throttle_pending(store, hash, record, opts)
+      :consumed -> {:error, :invalid_grant}
     end
   end
 
@@ -270,25 +300,53 @@ defmodule Attesto.CIBA do
   # A poll accepted at the interval is `authorization_pending`; one inside the
   # interval is its `slow_down` variant. `poll/2` re-reads inside the store's
   # serialized transition, so a concurrent approval is not clobbered (its
-  # status is preserved; the next redeem observes it and mints).
-  defp throttle_pending(store, hash, opts) do
-    case store.poll(hash, %{now: NumericDate.now(opts, default: :system)}) do
-      {:ok, _record} -> {:error, :authorization_pending}
-      {:error, :slow_down} -> {:error, :slow_down}
+  # status is preserved; terminal status is resolved by this same call).
+  defp throttle_pending(store, hash, trusted_record, opts) do
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
+    case store.poll(hash, %{now: now}) do
+      {:ok, polled_record} ->
+        if valid_record?(polled_record, hash) and
+             Map.get(polled_record, :last_polled_at) == now and
+             fields_match?(trusted_record, polled_record, @poll_bound_fields) do
+          resolve_polled_status(store, hash, polled_record, opts)
+        else
+          ciba_store_contract_error(:poll)
+        end
+
+      {:error, :slow_down} ->
+        {:error, :slow_down}
+
       # Vanished between the read and the poll (e.g. swept): treat as unknown.
-      :error -> {:error, :invalid_grant}
+      :error ->
+        {:error, :invalid_grant}
+
+      _unexpected ->
+        ciba_store_contract_error(:poll)
     end
   end
 
-  defp consume(store, hash, opts) do
-    case store.consume(hash, %{now: NumericDate.now(opts, default: :system)}) do
-      {:ok, record} ->
-        {:ok, Grant.from_record(record)}
+  defp resolve_polled_status(_store, _hash, %{status: :pending}, _opts), do: {:error, :authorization_pending}
+  defp resolve_polled_status(store, hash, %{status: :approved} = record, opts), do: consume(store, hash, record, opts)
+  defp resolve_polled_status(_store, _hash, %{status: :denied}, _opts), do: {:error, :access_denied}
+  defp resolve_polled_status(_store, _hash, %{status: :consumed}, _opts), do: {:error, :invalid_grant}
+
+  defp consume(store, hash, trusted_record, opts) do
+    case store.consume(hash, %{now: Keyword.fetch!(opts, :now)}) do
+      {:ok, consumed_record} ->
+        if valid_consume_transition?(trusted_record, consumed_record, hash) do
+          {:ok, Grant.from_record(consumed_record)}
+        else
+          ciba_store_contract_error(:consume)
+        end
 
       # Lost the consume race (a concurrent token request consumed it), or the
       # status/expiry moved out from under us between poll and consume.
       :error ->
         {:error, :invalid_grant}
+
+      _unexpected ->
+        ciba_store_contract_error(:consume)
     end
   end
 
@@ -313,30 +371,40 @@ defmodule Attesto.CIBA do
   @spec approve(module(), String.t(), map(), keyword()) ::
           {:ok, decision()}
           | {:error,
-             :not_found | :already_decided | :expired | :invalid_auth_req_id | :invalid_subject | :subject_mismatch}
+             :not_found
+             | :already_decided
+             | :expired
+             | :invalid_auth_req_id
+             | :invalid_subject
+             | :subject_mismatch
+             | :invalid_acr
+             | :invalid_auth_time
+             | :invalid_scope
+             | :invalid_claims}
   def approve(store, auth_req_id, approval, opts \\ [])
       when is_atom(store) and is_binary(auth_req_id) and is_map(approval) and is_list(opts) do
-    now = NumericDate.now(opts, default: :system)
+    now = NumericDate.non_negative_now!(opts, default: :system)
 
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id),
          :ok <- require_subject(approval),
-         :ok <- check_subject_matches(store, hash, approval) do
-      fields = %{
-        acr: Map.get(approval, :acr),
-        auth_time: Map.get(approval, :auth_time, now),
-        granted_claims: Map.get(approval, :claims, %{}),
-        # nil means "as requested": Grant.from_record falls back to the
-        # request's scope; an explicit list (even []) narrows it.
-        granted_scope: Map.get(approval, :scope),
-        subject: approval.subject
-      }
-
-      case store.approve(hash, fields, %{now: now}) do
-        {:ok, record} -> {:ok, decision_view(record)}
-        {:error, _reason} = err -> err
+         {:ok, trusted_record} <- check_subject_matches(store, hash, approval) do
+      with {:ok, fields} <- approval_fields(approval, trusted_record, now) do
+        store.approve(hash, fields, %{now: now})
+        |> validate_approve_result(trusted_record, fields, hash)
       end
     end
   end
+
+  defp validate_approve_result({:ok, record}, trusted_record, fields, hash) do
+    if valid_approve_transition?(trusted_record, record, fields, hash),
+      do: {:ok, decision_view(record)},
+      else: ciba_store_contract_error(:approve)
+  end
+
+  defp validate_approve_result({:error, reason} = error, _trusted_record, _fields, _hash)
+       when reason in @decision_errors, do: error
+
+  defp validate_approve_result(_unexpected, _trusted_record, _fields, _hash), do: ciba_store_contract_error(:approve)
 
   @doc """
   Record a denial (the user refused, failed authentication, or the OP denied)
@@ -349,13 +417,24 @@ defmodule Attesto.CIBA do
   @spec deny(module(), String.t(), keyword()) ::
           {:ok, decision()} | {:error, :not_found | :already_decided | :expired | :invalid_auth_req_id}
   def deny(store, auth_req_id, opts \\ []) when is_atom(store) and is_binary(auth_req_id) and is_list(opts) do
-    with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id) do
-      case store.deny(hash, %{now: NumericDate.now(opts, default: :system)}) do
-        {:ok, record} -> {:ok, decision_view(record)}
-        {:error, _reason} = err -> err
-      end
+    now = NumericDate.non_negative_now!(opts, default: :system)
+
+    with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id),
+         {:ok, trusted_record} <- decision_record(store, hash) do
+      store.deny(hash, %{now: now})
+      |> validate_deny_result(trusted_record, hash)
     end
   end
+
+  defp validate_deny_result({:ok, %{status: :denied} = record}, trusted_record, hash) do
+    if valid_deny_transition?(trusted_record, record, hash),
+      do: {:ok, decision_view(record)},
+      else: ciba_store_contract_error(:deny)
+  end
+
+  defp validate_deny_result({:error, reason} = error, _trusted_record, _hash) when reason in @decision_errors, do: error
+
+  defp validate_deny_result(_unexpected, _trusted_record, _hash), do: ciba_store_contract_error(:deny)
 
   @doc """
   Non-consuming lookup of an authentication request, for the
@@ -368,7 +447,7 @@ defmodule Attesto.CIBA do
   def lookup(store, auth_req_id) when is_atom(store) and is_binary(auth_req_id) do
     case presented_hash(auth_req_id, :invalid_auth_req_id) do
       {:ok, hash} ->
-        case store.lookup(hash) do
+        case lookup_record(store, hash) do
           {:ok, record} -> {:ok, pending_view(record)}
           :error -> :error
         end
@@ -422,13 +501,108 @@ defmodule Attesto.CIBA do
   defp require_subject(%{subject: subject}) when is_binary(subject) and subject != "", do: :ok
   defp require_subject(_attrs), do: {:error, :invalid_subject}
 
+  defp validate_request_for_issue(%Request{} = request, now) do
+    if valid_ciba_request_data?(
+         request.acr_values,
+         request.binding_message,
+         request.client_id,
+         request.client_notification_token,
+         request.delivery_mode
+       ) and valid_ciba_hint?(request.hint) and valid_ciba_scope?(request.scope) and
+         valid_optional_display_text?(request.user_code) and
+         valid_requested_expiry?(request.requested_expiry) and
+         valid_signed_request_state?(request, now) do
+      :ok
+    else
+      {:error, :invalid_request}
+    end
+  end
+
+  defp validate_issue_attrs(attrs) do
+    cond do
+      not valid_resource_list?(Map.get(attrs, :resource, [])) -> {:error, :invalid_resource}
+      not valid_optional_jkt?(Map.get(attrs, :dpop_jkt)) -> {:error, :invalid_dpop_jkt}
+      true -> :ok
+    end
+  end
+
+  defp validate_issue_options!(opts) do
+    positive_option!(opts, :expires_in, @default_expires_in)
+    positive_option!(opts, :max_expires_in, @max_expires_in)
+    positive_option!(opts, :interval, @default_interval)
+    :ok
+  end
+
+  defp positive_option!(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> raise ArgumentError, ":#{key} must be a positive integer"
+    end
+  end
+
+  defp approval_fields(approval, trusted_record, now) do
+    fields = %{
+      acr: Map.get(approval, :acr),
+      auth_time: Map.get(approval, :auth_time, now),
+      granted_claims: Map.get(approval, :claims, %{}),
+      # nil means "as requested": Grant.from_record falls back to the
+      # request's scope; an explicit list (even []) narrows it.
+      granted_scope: Map.get(approval, :scope),
+      subject: approval.subject
+    }
+
+    with :ok <- validate_approval_types(fields, now),
+         :ok <- require_requested_acr(fields.acr, trusted_record.data.acr_values),
+         :ok <- validate_granted_scope(fields.granted_scope, trusted_record.data.scope) do
+      {:ok, fields}
+    end
+  end
+
+  defp validate_approval_types(fields, now) do
+    cond do
+      not valid_optional_non_empty_binary?(fields.acr) ->
+        {:error, :invalid_acr}
+
+      not (is_integer(fields.auth_time) and fields.auth_time >= 0 and fields.auth_time <= now) ->
+        {:error, :invalid_auth_time}
+
+      not valid_optional_scope_list?(fields.granted_scope) ->
+        {:error, :invalid_scope}
+
+      not is_map(fields.granted_claims) ->
+        {:error, :invalid_claims}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp require_requested_acr(acr, [_requested | _]) when not (is_binary(acr) and acr != ""), do: {:error, :invalid_acr}
+
+  defp require_requested_acr(_acr, _requested), do: :ok
+
+  defp validate_granted_scope(nil, _requested_scope), do: :ok
+
+  defp validate_granted_scope(granted_scope, requested_scope) do
+    if MapSet.subset?(MapSet.new(granted_scope), MapSet.new(requested_scope)),
+      do: :ok,
+      else: {:error, :invalid_scope}
+  end
+
+  defp decision_record(store, hash) do
+    case lookup_record(store, hash) do
+      {:ok, record} -> {:ok, record}
+      :error -> {:error, :not_found}
+    end
+  end
+
   # The approving subject must be the end-user the request was issued for.
   # This read-then-approve is race-free for security purposes: `data` is
   # immutable after `put`, and the store's `approve` remains the single
   # pending→approved gate.
   defp check_subject_matches(store, hash, %{subject: subject}) do
-    case store.lookup(hash) do
-      {:ok, %{data: %{subject: ^subject}}} -> :ok
+    case lookup_record(store, hash) do
+      {:ok, %{data: %{subject: ^subject}} = record} -> {:ok, record}
       {:ok, _record} -> {:error, :subject_mismatch}
       :error -> {:error, :not_found}
     end
@@ -437,6 +611,16 @@ defmodule Attesto.CIBA do
   defp check_not_expired(%{expires_at: expires_at}, opts) do
     if expires_at > NumericDate.now(opts, default: :system), do: :ok, else: {:error, :expired_token}
   end
+
+  defp check_decision_time(%{status: status, auth_time: auth_time}, opts) when status in [:approved, :consumed] do
+    now = NumericDate.now(opts, default: :system)
+
+    if auth_time <= now or auth_time - now <= @decision_clock_skew_seconds,
+      do: :ok,
+      else: ciba_store_contract_error(:lookup)
+  end
+
+  defp check_decision_time(_record, _opts), do: :ok
 
   # §11: an auth_req_id "issued to another Client" is invalid_grant.
   defp check_client(%{data: %{client_id: bound}}, %{client_id: presented}) do
@@ -486,5 +670,226 @@ defmodule Attesto.CIBA do
       status: record.status,
       subject: Map.get(data, :subject)
     }
+  end
+
+  defp lookup_record(store, hash) do
+    case store.lookup(hash) do
+      {:ok, record} ->
+        if valid_record?(record, hash),
+          do: {:ok, record},
+          else: ciba_store_contract_error(:lookup)
+
+      :error ->
+        :error
+
+      _unexpected ->
+        ciba_store_contract_error(:lookup)
+    end
+  end
+
+  defp valid_record?(
+         %{
+           auth_req_id_hash: record_hash,
+           data: %{
+             acr_values: acr_values,
+             binding_message: binding_message,
+             client_id: client_id,
+             client_notification_token: client_notification_token,
+             delivery_mode: delivery_mode,
+             dpop_jkt: dpop_jkt,
+             resource: resource,
+             scope: scope,
+             subject: requested_subject
+           },
+           status: status,
+           interval: interval,
+           expires_at: expires_at
+         } = record,
+         expected_hash
+       ) do
+    record_hash == expected_hash and
+      valid_ciba_request_data?(
+        acr_values,
+        binding_message,
+        client_id,
+        client_notification_token,
+        delivery_mode
+      ) and
+      valid_ciba_grant_data?(dpop_jkt, resource, scope, requested_subject) and
+      valid_ciba_state?(status, interval, expires_at) and valid_ciba_optional_fields?(record) and
+      valid_decision_fields?(record)
+  end
+
+  defp valid_record?(_record, _expected_hash), do: false
+
+  defp valid_ciba_request_data?(acr_values, binding_message, client_id, notification_token, delivery_mode) do
+    valid_non_empty_string_list?(acr_values) and valid_optional_display_text?(binding_message) and
+      is_binary(client_id) and client_id != "" and
+      valid_notification_binding?(delivery_mode, notification_token)
+  end
+
+  defp valid_notification_binding?(:poll, nil), do: true
+
+  defp valid_notification_binding?(mode, token) when mode in [:ping, :push],
+    do:
+      is_binary(token) and token != "" and byte_size(token) <= @notification_token_max_length and
+        Regex.match?(@notification_token_pattern, token)
+
+  defp valid_notification_binding?(_mode, _token), do: false
+
+  defp valid_ciba_hint?({kind, value}) when kind in [:login_hint, :login_hint_token, :id_token_hint],
+    do: is_binary(value) and value != ""
+
+  defp valid_ciba_hint?(_hint), do: false
+
+  defp valid_ciba_scope?(scope), do: Scope.valid_list?(scope, allow_empty?: false) and "openid" in scope
+
+  defp valid_optional_display_text?(nil), do: true
+
+  defp valid_optional_display_text?(value) when is_binary(value) and value != "",
+    do: String.valid?(value) and not Regex.match?(~r/[\x00-\x1F\x7F]/u, value)
+
+  defp valid_optional_display_text?(_value), do: false
+
+  defp valid_requested_expiry?(nil), do: true
+  defp valid_requested_expiry?(value), do: is_integer(value) and value > 0
+
+  defp valid_signed_request_state?(%Request{signed?: false, request_jti: nil, request_exp: nil}, _now), do: true
+
+  defp valid_signed_request_state?(%Request{signed?: true, request_jti: jti, request_exp: request_exp}, now),
+    do: is_binary(jti) and jti != "" and is_integer(request_exp) and request_exp > now
+
+  defp valid_signed_request_state?(_request, _now), do: false
+
+  defp valid_ciba_grant_data?(dpop_jkt, resource, scope, requested_subject) do
+    valid_optional_jkt?(dpop_jkt) and valid_resource_list?(resource) and
+      valid_scope_list?(scope) and is_binary(requested_subject) and requested_subject != ""
+  end
+
+  defp valid_ciba_state?(status, interval, expires_at) do
+    status in @statuses and is_integer(interval) and interval >= 0 and
+      is_integer(expires_at) and expires_at >= 0
+  end
+
+  defp valid_ciba_optional_fields?(record) do
+    valid_optional_field?(record, :subject, &valid_optional_binary?/1) and
+      valid_optional_field?(record, :acr, &valid_optional_binary?/1) and
+      valid_optional_field?(record, :auth_time, &valid_optional_non_negative_integer?/1) and
+      valid_optional_field?(record, :granted_scope, &valid_optional_scope_list?/1) and
+      valid_optional_field?(record, :granted_claims, &valid_optional_map?/1) and
+      valid_optional_field?(record, :last_polled_at, &valid_optional_non_negative_integer?/1)
+  end
+
+  defp valid_decision_fields?(%{status: status} = record) when status in [:approved, :consumed] do
+    case record do
+      %{
+        subject: subject,
+        acr: acr,
+        auth_time: auth_time,
+        granted_scope: granted_scope,
+        granted_claims: granted_claims
+      } ->
+        valid_decision_subject?(subject, record.data.subject) and
+          valid_decision_authentication?(acr, record.data.acr_values, auth_time, record.expires_at) and
+          valid_decision_grant?(granted_scope, record.data.scope, granted_claims)
+
+      _missing_decision_fields ->
+        false
+    end
+  end
+
+  defp valid_decision_fields?(_record), do: true
+
+  defp valid_decision_subject?(subject, requested_subject),
+    do: is_binary(subject) and subject != "" and subject == requested_subject
+
+  defp valid_decision_authentication?(acr, requested_acrs, auth_time, expires_at) do
+    valid_decision_acr?(acr, requested_acrs) and is_integer(auth_time) and
+      auth_time >= 0 and auth_time <= expires_at
+  end
+
+  defp valid_decision_grant?(granted_scope, requested_scope, granted_claims) do
+    valid_optional_scope_list?(granted_scope) and
+      valid_granted_scope?(granted_scope, requested_scope) and is_map(granted_claims)
+  end
+
+  defp valid_decision_acr?(acr, [_requested | _]), do: is_binary(acr) and acr != ""
+  defp valid_decision_acr?(acr, []), do: valid_optional_non_empty_binary?(acr)
+
+  defp valid_consume_transition?(trusted_record, consumed_record, hash) do
+    trusted_record.status == :approved and consumed_record.status == :consumed and
+      valid_record?(consumed_record, hash) and
+      fields_match?(trusted_record, consumed_record, @consume_bound_fields)
+  end
+
+  defp valid_approve_transition?(trusted_record, approved_record, approval_fields, hash) do
+    trusted_record.status == :pending and approved_record.status == :approved and
+      valid_record?(approved_record, hash) and
+      fields_match?(trusted_record, approved_record, @poll_bound_fields) and
+      Enum.all?([:subject, :acr, :auth_time, :granted_scope, :granted_claims], fn field ->
+        Map.get(approved_record, field) == Map.get(approval_fields, field)
+      end)
+  end
+
+  defp valid_deny_transition?(trusted_record, denied_record, hash) do
+    trusted_record.status == :pending and denied_record.status == :denied and
+      valid_record?(denied_record, hash) and
+      fields_match?(trusted_record, denied_record, @poll_bound_fields)
+  end
+
+  defp fields_match?(left, right, fields) do
+    Enum.all?(fields, fn field -> Map.get(left, field) == Map.get(right, field) end)
+  end
+
+  defp valid_optional_field?(record, field, validator) do
+    case Map.fetch(record, field) do
+      {:ok, value} -> validator.(value)
+      :error -> true
+    end
+  end
+
+  defp valid_non_empty_string_list?(value), do: is_list(value) and Enum.all?(value, &(is_binary(&1) and &1 != ""))
+
+  defp valid_scope_list?(value), do: Scope.valid_list?(value)
+  defp valid_resource_list?(value), do: valid_non_empty_string_list?(value)
+  defp valid_optional_scope_list?(nil), do: true
+  defp valid_optional_scope_list?(value), do: valid_scope_list?(value)
+  defp valid_granted_scope?(nil, _requested), do: true
+
+  defp valid_granted_scope?(granted, requested), do: MapSet.subset?(MapSet.new(granted), MapSet.new(requested))
+
+  defp valid_optional_binary?(nil), do: true
+  defp valid_optional_binary?(value), do: is_binary(value)
+  defp valid_optional_non_empty_binary?(nil), do: true
+  defp valid_optional_non_empty_binary?(value), do: is_binary(value) and value != ""
+  defp valid_optional_jkt?(nil), do: true
+  defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
+  defp valid_optional_map?(nil), do: true
+  defp valid_optional_map?(value), do: is_map(value)
+  defp valid_optional_non_negative_integer?(nil), do: true
+  defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  defp ciba_store_contract_error(:put) do
+    raise RuntimeError, "CIBA store put/1 violated its contract"
+  end
+
+  defp ciba_store_contract_error(:lookup) do
+    raise RuntimeError, "CIBA store lookup/1 violated its contract"
+  end
+
+  defp ciba_store_contract_error(:approve) do
+    raise RuntimeError, "CIBA store approve/3 violated its contract"
+  end
+
+  defp ciba_store_contract_error(:deny) do
+    raise RuntimeError, "CIBA store deny/2 violated its contract"
+  end
+
+  defp ciba_store_contract_error(:poll) do
+    raise RuntimeError, "CIBA store poll/2 violated its contract"
+  end
+
+  defp ciba_store_contract_error(:consume) do
+    raise RuntimeError, "CIBA store consume/2 violated its contract"
   end
 end

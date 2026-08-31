@@ -506,6 +506,36 @@ defmodule Attesto.RequestObjectTest do
     end
   end
 
+  describe "security policy option validation" do
+    test "rejects malformed boolean options before parsing or verification" do
+      for key <- [
+            :enforce_fapi_alg_policy,
+            :require_nbf,
+            :require_exp,
+            :require_iat,
+            :require_jti,
+            :require_client_id_claim
+          ],
+          invalid <- [nil, 0, "false", []] do
+        assert_raise ArgumentError, ~r/^:#{key} must be true or false$/, fn ->
+          RequestObject.verify("not-a-jwt", %{}, [{key, invalid}])
+        end
+      end
+    end
+
+    test "rejects malformed age and lifetime bounds before parsing or verification" do
+      for key <- [:max_nbf_age_seconds, :max_lifetime_seconds],
+          invalid <- [0, -1, 1.0, "60", false] do
+        assert_raise ArgumentError, ~r/^:#{key} must be a positive integer or nil$/, fn ->
+          RequestObject.verify("not-a-jwt", %{}, [{key, invalid}])
+        end
+      end
+
+      assert {:error, :invalid_request_object} =
+               RequestObject.verify("not-a-jwt", %{}, max_nbf_age_seconds: nil, max_lifetime_seconds: nil)
+    end
+  end
+
   describe ":accepted_typ" do
     test "default accepts any typ including absence" do
       key = ec_key()

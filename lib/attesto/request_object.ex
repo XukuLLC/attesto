@@ -118,6 +118,8 @@ defmodule Attesto.RequestObject do
   def verify_with_claims(jwt, trusted_jwks, opts \\ [])
 
   def verify_with_claims(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
+    validate_options!(opts)
+
     with {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
          :ok <- check_supported_alg(header),
@@ -138,6 +140,44 @@ defmodule Attesto.RequestObject do
   end
 
   def verify_with_claims(_jwt, _trusted_jwks, _opts), do: {:error, :invalid_request_object}
+
+  defp validate_options!(opts) do
+    Enum.each(
+      [
+        :enforce_fapi_alg_policy,
+        :require_nbf,
+        :require_exp,
+        :require_iat,
+        :require_jti,
+        :require_client_id_claim
+      ],
+      &validate_boolean_option!(opts, &1)
+    )
+
+    Enum.each(
+      [:max_nbf_age_seconds, :max_lifetime_seconds],
+      &validate_positive_integer_option!(opts, &1)
+    )
+
+    :ok
+  end
+
+  defp validate_boolean_option!(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _value} -> raise ArgumentError, ":#{key} must be true or false"
+    end
+  end
+
+  defp validate_positive_integer_option!(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error -> :ok
+      {:ok, nil} -> :ok
+      {:ok, value} when is_integer(value) and value > 0 -> :ok
+      {:ok, _value} -> raise ArgumentError, ":#{key} must be a positive integer or nil"
+    end
+  end
 
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())

@@ -13,12 +13,17 @@ defmodule Attesto.AuthorizationCode.Grant do
   ## `family_id`
 
   When the authorization request supplied a `:family_id` to
-  `Attesto.AuthorizationCode.issue/3`, it rides through to this struct so
-  the host can mint the refresh-token family with that id. Linking the
-  code to the family it spawns is what lets code-reuse detection revoke the
-  right descendants (OAuth 2.0 Security BCP §4.13): a store that tracks
-  reuse records this `family_id` at redemption and replays it if the code
-  is presented again. `nil` when no family id was supplied.
+  `Attesto.AuthorizationCode.issue/3`, it rides through to this struct as
+  provenance metadata. Public `Attesto.RefreshToken.issue/3` rejects that
+  value and creates a fresh family. After the host successfully issues that
+  refresh token, it should use
+  `Attesto.AuthorizationCode.issue_refresh_and_finalize/6`, which captures the
+  returned family ID so code-reuse detection can revoke the actual descendants
+  (OAuth 2.0 Security BCP §4.13). That helper also requires the issued refresh
+  context to retain this grant's subject and client and to narrow, never widen,
+  its scope/resource authorization. `AuthorizationCode.finalize/3` is for
+  no-refresh flows and records a nil family in its replay marker. `nil` when no
+  provenance ID was supplied.
   """
 
   @enforce_keys [:client_id, :redirect_uri, :subject]

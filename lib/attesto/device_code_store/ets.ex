@@ -3,13 +3,13 @@ defmodule Attesto.DeviceCodeStore.ETS do
   Single-node ETS implementation of `Attesto.DeviceCodeStore`.
 
   Device-code records live in an ETS table owned by a `GenServer`. The
-  state-changing callbacks (`approve/2`, `deny/2`, `poll/2`, `consume/2`) run
+  state-changing callbacks (`approve/3`, `deny/2`, `poll/2`, `consume/2`) run
   inside `GenServer.call/2`, so they are serialized through the owner process —
   that is how this reference store gets the atomic, single-winner state
   transitions `Attesto.DeviceCodeStore` requires (a production multi-node
   deployment uses the Ecto store, whose transitions are single conditional
   `UPDATE ... RETURNING` statements). Reads that do not transition state
-  (`lookup_user_code/1`) hit the table directly.
+  (`lookup_user_code/1`, `get/1`) hit the table directly.
 
   ## Start options
 
@@ -47,7 +47,7 @@ defmodule Attesto.DeviceCodeStore.ETS do
     case :ets.lookup(@user_index, user_code) do
       [{^user_code, hash}] ->
         case :ets.lookup(@table, hash) do
-          [{^hash, _expires_at, record}] -> {:ok, pending_view(record)}
+          [{^hash, _expires_at, record}] -> {:ok, record}
           [] -> :error
         end
 
@@ -57,13 +57,21 @@ defmodule Attesto.DeviceCodeStore.ETS do
   end
 
   @impl Attesto.DeviceCodeStore
-  def approve(user_code, approval) when is_binary(user_code) and is_map(approval) do
-    GenServer.call(__MODULE__, {:decide, user_code, :approved, approval})
+  def get(hash) when is_binary(hash) do
+    case :ets.lookup(@table, hash) do
+      [{^hash, _expires_at, record}] -> {:ok, record}
+      [] -> :error
+    end
   end
 
   @impl Attesto.DeviceCodeStore
-  def deny(user_code) when is_binary(user_code) do
-    GenServer.call(__MODULE__, {:decide, user_code, :denied, %{}})
+  def approve(user_code, approval, opts) when is_binary(user_code) and is_map(approval) and is_map(opts) do
+    GenServer.call(__MODULE__, {:decide, user_code, :approved, approval, opts})
+  end
+
+  @impl Attesto.DeviceCodeStore
+  def deny(user_code, opts) when is_binary(user_code) and is_map(opts) do
+    GenServer.call(__MODULE__, {:decide, user_code, :denied, %{}, opts})
   end
 
   @impl Attesto.DeviceCodeStore
@@ -91,17 +99,19 @@ defmodule Attesto.DeviceCodeStore.ETS do
     end
   end
 
-  def handle_call({:decide, user_code, new_status, approval}, _from, state) do
+  def handle_call({:decide, user_code, new_status, approval, opts}, _from, state) do
+    now = Map.get(opts, :now, System.system_time(:second))
+
     reply =
       with {:ok, hash, record} <- fetch_by_user_code(user_code),
-           :ok <- require_pending(record) do
+           :ok <- require_pending(record, now) do
         updated =
           record
           |> Map.put(:status, new_status)
           |> Map.merge(approval_fields(new_status, approval))
 
         :ets.insert(@table, {hash, record.expires_at, updated})
-        :ok
+        {:ok, updated}
       end
 
     {:reply, reply, state}
@@ -165,8 +175,9 @@ defmodule Attesto.DeviceCodeStore.ETS do
     end
   end
 
-  defp require_pending(%{status: :pending}), do: :ok
-  defp require_pending(_record), do: {:error, :already_decided}
+  defp require_pending(%{status: :pending, expires_at: expires_at}, now) when expires_at > now, do: :ok
+  defp require_pending(%{status: :pending}, _now), do: {:error, :expired}
+  defp require_pending(_record, _now), do: {:error, :already_decided}
 
   defp approval_fields(:approved, approval) do
     %{
@@ -180,21 +191,9 @@ defmodule Attesto.DeviceCodeStore.ETS do
 
   # RFC 8628 §3.5: enforce the minimum poll interval. The first poll
   # (last_polled_at nil) is always allowed.
+  defp poll_allowed?(%{status: status}, _opts) when status != :pending, do: true
   defp poll_allowed?(%{last_polled_at: nil}, _opts), do: true
   defp poll_allowed?(%{last_polled_at: last}, %{now: now, interval: interval}), do: last <= now - interval
-
-  defp pending_view(record) do
-    data = Map.get(record, :data, %{})
-
-    %{
-      user_code: record.user_code,
-      client_id: Map.get(data, :client_id),
-      scope: Map.get(data, :scope, []),
-      resource: Map.get(data, :resource, []),
-      status: record.status,
-      expires_at: record.expires_at
-    }
-  end
 
   defp drop(hash, user_code) do
     :ets.delete(@table, hash)
