@@ -106,6 +106,17 @@ defmodule Attesto.AuthorizationCode do
   alias Attesto.Thumbprint
 
   @default_ttl_seconds 60
+  @canonical_data_keys [
+    :client_id,
+    :code_challenge,
+    :claims,
+    :dpop_jkt,
+    :family_id,
+    :redirect_uri,
+    :resource,
+    :scope,
+    :subject
+  ]
 
   @type issue_attrs :: %{
           required(:client_id) => String.t(),
@@ -607,22 +618,24 @@ defmodule Attesto.AuthorizationCode do
   defp valid_record?(
          %{
            code_hash: record_hash,
-           data: %{
-             client_id: client_id,
-             redirect_uri: redirect_uri,
-             code_challenge: code_challenge,
-             subject: subject,
-             scope: scope,
-             resource: resource,
-             dpop_jkt: dpop_jkt,
-             family_id: family_id,
-             claims: claims
-           },
+           data:
+             %{
+               client_id: client_id,
+               redirect_uri: redirect_uri,
+               code_challenge: code_challenge,
+               subject: subject,
+               scope: scope,
+               resource: resource,
+               dpop_jkt: dpop_jkt,
+               family_id: family_id,
+               claims: claims
+             } = data,
            expires_at: expires_at
          },
          expected_hash
        ) do
-    valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) and
+    exact_canonical_data_keys?(data) and
+      valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) and
       valid_code_grant?(code_challenge, subject, scope, resource) and
       valid_code_context?(dpop_jkt, family_id, claims, expires_at)
   end
@@ -642,6 +655,12 @@ defmodule Attesto.AuthorizationCode do
     valid_optional_jkt?(dpop_jkt) and valid_optional_family_id?(family_id) and
       is_map(claims) and is_integer(expires_at)
   end
+
+  # The authorization-code grant context is canonical. Host-specific values
+  # belong inside `:claims`, so extra sibling keys make a persisted record
+  # malformed rather than being silently ignored.
+  defp exact_canonical_data_keys?(data),
+    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
 
   defp code_store_contract_error(:put) do
     raise RuntimeError, "authorization code store put/1 violated its contract"

@@ -296,6 +296,25 @@ defmodule Attesto.RefreshTokenTest do
         assert Enum.empty?(:ets.tab2list(ETS))
       end
     end
+
+    test "an extra persisted context key fails closed without issuing a child" do
+      :ok = ETS.reset()
+      {:ok, %{token: token}} = RefreshToken.issue(ETS, context(), now: 1_000)
+
+      Process.put({MalformedContextStore, :mutator}, fn record ->
+        Map.update!(record, :data, &Map.put(&1, :unexpected, :private_context_sentinel))
+      end)
+
+      error =
+        assert_raise RuntimeError, "refresh store get/1 violated its contract", fn ->
+          RefreshToken.rotate(MalformedContextStore, token, now: 1_001)
+        end
+
+      Process.delete({MalformedContextStore, :mutator})
+      refute Exception.message(error) =~ "private_context_sentinel"
+      assert :error = ETS.get(Secret.hash(token))
+      assert Enum.empty?(:ets.tab2list(ETS))
+    end
   end
 
   describe "rotate/3 success and chaining" do

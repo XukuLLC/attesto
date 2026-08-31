@@ -124,7 +124,7 @@ defmodule Attesto.RefreshStore do
           required(:family_id) => family_id(),
           required(:generation) => non_neg_integer(),
           required(:data) => stored_context(),
-          required(:expires_at) => integer(),
+          required(:expires_at) => non_neg_integer(),
           required(:consumed) => boolean(),
           optional(:consumed_at) => integer() | nil,
           optional(:successor) => map() | nil

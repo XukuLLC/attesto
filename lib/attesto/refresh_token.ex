@@ -45,6 +45,7 @@ defmodule Attesto.RefreshToken do
   # 14 days. Refresh lifetime is a host policy; this is a sane default.
   @default_ttl_seconds 14 * 24 * 60 * 60
   @default_rotation_grace_seconds 10
+  @stored_context_keys [:acr, :auth_time, :claims, :client_id, :dpop_jkt, :resource, :scope, :subject]
 
   @typedoc """
   Context for issuing an initial refresh token.
@@ -809,22 +810,32 @@ defmodule Attesto.RefreshToken do
     end)
   end
 
-  defp valid_stored_context?(%{
-         subject: subject,
-         scope: scope,
-         resource: resource,
-         client_id: client_id,
-         dpop_jkt: dpop_jkt,
-         acr: acr,
-         auth_time: auth_time,
-         claims: claims
-       }) do
-    non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
+  defp valid_stored_context?(
+         %{
+           subject: subject,
+           scope: scope,
+           resource: resource,
+           client_id: client_id,
+           dpop_jkt: dpop_jkt,
+           acr: acr,
+           auth_time: auth_time,
+           claims: claims
+         } = context
+       ) do
+    # The adapter contract calls this the canonical context: all and only these
+    # keys must survive a round trip. Host-specific values belong inside
+    # `:claims`, so an extra sibling key is a malformed record, not ignored data.
+    exact_context_keys?(context) and
+      non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
       valid_optional_client_id?(client_id) and valid_optional_jkt?(dpop_jkt) and is_map(claims) and
       valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time)
   end
 
   defp valid_stored_context?(_malformed), do: false
+
+  defp exact_context_keys?(context),
+    do:
+      map_size(context) == length(@stored_context_keys) and Enum.all?(@stored_context_keys, &Map.has_key?(context, &1))
 
   defp retry_window(record, opts) do
     grace = Keyword.fetch!(opts, :rotation_grace_seconds)

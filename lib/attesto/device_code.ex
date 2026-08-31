@@ -40,6 +40,7 @@ defmodule Attesto.DeviceCode do
   @default_interval_seconds 5
   @statuses [:pending, :approved, :denied, :consumed]
   @decision_errors [:not_found, :already_decided, :expired]
+  @canonical_data_keys [:client_id, :dpop_jkt, :resource, :scope]
   @consume_bound_fields [
     :device_code_hash,
     :user_code,
@@ -508,14 +509,14 @@ defmodule Attesto.DeviceCode do
          %{
            device_code_hash: record_hash,
            user_code: user_code,
-           data: %{client_id: client_id, scope: scope, resource: resource, dpop_jkt: dpop_jkt},
+           data: %{client_id: client_id, scope: scope, resource: resource, dpop_jkt: dpop_jkt} = data,
            status: status,
            expires_at: expires_at
          } = record,
          expected_hash
        ) do
     valid_device_identity?(record_hash, expected_hash, user_code) and
-      valid_device_data?(client_id, scope, resource, dpop_jkt) and
+      valid_device_data?(data, client_id, scope, resource, dpop_jkt) and
       valid_device_state?(status, expires_at) and valid_device_optional_fields?(record) and
       valid_decision_fields?(record)
   end
@@ -532,10 +533,16 @@ defmodule Attesto.DeviceCode do
       all_in_alphabet?(user_code)
   end
 
-  defp valid_device_data?(client_id, scope, resource, dpop_jkt) do
-    is_binary(client_id) and client_id != "" and valid_scope_list?(scope) and
+  defp valid_device_data?(data, client_id, scope, resource, dpop_jkt) do
+    exact_canonical_data_keys?(data) and is_binary(client_id) and client_id != "" and valid_scope_list?(scope) and
       valid_resource_list?(resource) and valid_optional_jkt?(dpop_jkt)
   end
+
+  # The issue-time device context is canonical. Host-specific values do not
+  # belong beside these protocol fields, so extra keys make a persisted record
+  # malformed rather than being silently ignored.
+  defp exact_canonical_data_keys?(data),
+    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
 
   defp valid_device_state?(status, expires_at), do: status in @statuses and is_integer(expires_at) and expires_at >= 0
 

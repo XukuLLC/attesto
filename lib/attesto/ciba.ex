@@ -75,6 +75,17 @@ defmodule Attesto.CIBA do
   @notification_token_max_length 1024
   @statuses [:pending, :approved, :denied, :consumed]
   @decision_errors [:not_found, :already_decided, :expired]
+  @canonical_data_keys [
+    :acr_values,
+    :binding_message,
+    :client_id,
+    :client_notification_token,
+    :delivery_mode,
+    :dpop_jkt,
+    :resource,
+    :scope,
+    :subject
+  ]
   @consume_bound_fields [
     :auth_req_id_hash,
     :data,
@@ -690,17 +701,18 @@ defmodule Attesto.CIBA do
   defp valid_record?(
          %{
            auth_req_id_hash: record_hash,
-           data: %{
-             acr_values: acr_values,
-             binding_message: binding_message,
-             client_id: client_id,
-             client_notification_token: client_notification_token,
-             delivery_mode: delivery_mode,
-             dpop_jkt: dpop_jkt,
-             resource: resource,
-             scope: scope,
-             subject: requested_subject
-           },
+           data:
+             %{
+               acr_values: acr_values,
+               binding_message: binding_message,
+               client_id: client_id,
+               client_notification_token: client_notification_token,
+               delivery_mode: delivery_mode,
+               dpop_jkt: dpop_jkt,
+               resource: resource,
+               scope: scope,
+               subject: requested_subject
+             } = data,
            status: status,
            interval: interval,
            expires_at: expires_at
@@ -716,6 +728,7 @@ defmodule Attesto.CIBA do
         delivery_mode
       ) and
       valid_ciba_grant_data?(dpop_jkt, resource, scope, requested_subject) and
+      exact_canonical_data_keys?(data) and
       valid_ciba_state?(status, interval, expires_at) and valid_ciba_optional_fields?(record) and
       valid_decision_fields?(record)
   end
@@ -765,6 +778,12 @@ defmodule Attesto.CIBA do
     valid_optional_jkt?(dpop_jkt) and valid_resource_list?(resource) and
       valid_scope_list?(scope) and is_binary(requested_subject) and requested_subject != ""
   end
+
+  # The issue-time CIBA context is canonical. Host-specific values belong in a
+  # separate host record, not beside these protocol fields, so extra keys make
+  # a persisted record malformed rather than being silently ignored.
+  defp exact_canonical_data_keys?(data),
+    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
 
   defp valid_ciba_state?(status, interval, expires_at) do
     status in @statuses and is_integer(interval) and interval >= 0 and

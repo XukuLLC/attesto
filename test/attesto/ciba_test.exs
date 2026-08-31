@@ -375,6 +375,21 @@ defmodule Attesto.CIBATest do
       refute Exception.message(error) =~ id
     end
 
+    test "a persisted CIBA context with an extra key violates the store contract" do
+      %{auth_req_id: id} = issue()
+      sentinel = "private-ciba-context-sentinel"
+
+      fault(:lookup, {:mutate_ok, fn record -> put_in(record, [:data, :unexpected], sentinel) end})
+
+      error =
+        assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
+          CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:lookup)
+    end
+
     test "consume rejects malformed or materially changed records after atomically burning the request" do
       mutations = [
         fn record -> Map.delete(record, :subject) end,

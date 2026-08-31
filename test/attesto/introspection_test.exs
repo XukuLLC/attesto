@@ -368,6 +368,18 @@ defmodule Attesto.IntrospectionTest do
       assert is_integer(measurements.system_time)
     end
 
+    test "a malformed record missing :data is inactive (fail closed)", %{config: config} do
+      now = 1_700_000_000
+      StubRefreshStore.put("refresh-missing-data", %{family_id: "fam-1", expires_at: now + 1000, consumed: false})
+
+      assert introspect_refresh(config, "refresh-missing-data", now) == %{"active" => false}
+
+      assert_received {:introspection_store_failure, [:attesto, :introspection, :refresh_store_failed], measurements,
+                       %{operation: :get, reason: :store_contract_violation}}
+
+      assert is_integer(measurements.system_time)
+    end
+
     test "malformed security context is inactive instead of degrading to bearer or minimal", %{config: config} do
       now = 1_700_000_000
 

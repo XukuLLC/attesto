@@ -29,8 +29,9 @@ defmodule Attesto.Introspection do
       presenting client, and optional DPoP binding, so those RFC 7662 members
       are surfaced when present (`sub`/`scope`/`client_id`/`cnf`) - for a
       resource server, and so an `:authorize` policy can decide per token. A
-      store that does not populate them yields the minimal `active`+`exp`
-      response.
+      store may use an empty `:data` map for the documented minimal
+      `active`+`exp` response, but a record that omits `:data` is malformed and
+      is reported inactive.
 
     * Anything else - a malformed token, a forged signature, an expired token,
       or one absent from the store - is reported inactive (`%{"active" => false}`),
@@ -217,7 +218,8 @@ defmodule Attesto.Introspection do
   # Bind the returned row to the presented token hash and validate every
   # security-relevant field before trusting its activity state. A custom store
   # may still return an empty `data` map for the documented minimal response;
-  # present members may never be silently discarded because they are malformed.
+  # omitting `data`, or presenting a malformed member, fails closed instead of
+  # silently degrading to a minimal response.
   defp valid_refresh_entry?(entry, expected_hash) when is_map(entry) do
     Map.get(entry, :token_hash) == expected_hash and
       non_empty_binary?(Map.get(entry, :family_id)) and
@@ -295,8 +297,9 @@ defmodule Attesto.Introspection do
   # safe RFC 7662 members are surfaced - both for a resource server and so an
   # `:authorize` policy can make a per-token decision (RFC 7662 §4 / RFC 9701
   # §5) rather than allow/deny every refresh token wholesale. Each member is
-  # copied only when present and well-typed, so a custom store that does not
-  # populate it (or omits `:data` entirely) simply yields the minimal response.
+  # copied only when present and well-typed. A custom store may use an empty
+  # `:data` map for the minimal response; `valid_refresh_entry?/2` rejects a
+  # record that omits `:data`.
   defp rfc7662_refresh_response(entry) do
     data = entry_data(entry)
 

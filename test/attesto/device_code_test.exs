@@ -329,6 +329,21 @@ defmodule Attesto.DeviceCodeTest do
       refute Exception.message(error) =~ dc
     end
 
+    test "a persisted device context with an extra key violates the store contract" do
+      %{device_code: dc} = issue()
+      sentinel = "device-code-context-private-sentinel"
+
+      fault(:get, {:mutate_ok, fn record -> put_in(record, [:data, :unexpected], sentinel) end})
+
+      error =
+        assert_raise RuntimeError, "device code store get/1 violated its contract", fn ->
+          DeviceCode.redeem(ContractStore, dc, %{client_id: "cli-1"}, now: @now)
+        end
+
+      refute Exception.message(error) =~ sentinel
+      clear_fault(:get)
+    end
+
     test "a poll result with an invalid stored status fails loudly without exposing it" do
       %{device_code: dc} = issue()
       sentinel = "device-code-store-private-sentinel"

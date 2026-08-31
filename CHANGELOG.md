@@ -102,6 +102,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loudly, including a refused successor-persistence callback that older code
   could ignore. Constant contract errors no longer copy adapter return data
   into exception messages or telemetry.
+- Persisted Refresh, CIBA, device-code, and authorization-code contexts now
+  reject unexpected sibling keys at validation; host-specific values remain
+  inside the documented opaque `:claims` map.
 - Refresh-reuse telemetry is emitted even when family revocation raises,
   throws, exits, or violates its return contract. The event carries only a
   bounded cleanup status, and the original cleanup failure is preserved.

@@ -420,6 +420,7 @@ defmodule Attesto.AuthorizationCodeTest do
         fn record -> Map.put(record, :code_hash, "private-hash-sentinel") end,
         fn record -> update_in(record.data, &Map.delete(&1, :subject)) end,
         fn record -> update_in(record.data, &Map.delete(&1, :family_id)) end,
+        fn record -> put_in(record.data, &Map.put(&1, :unexpected, :private_context_sentinel)) end,
         fn record -> put_in(record, [:data, :code_challenge], "private-challenge-sentinel") end,
         fn record -> put_in(record, [:data, :dpop_jkt], {:private, "jkt-sentinel"}) end,
         fn record -> put_in(record, [:data, :scope], ["documents.read", 7]) end,
