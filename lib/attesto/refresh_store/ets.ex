@@ -163,7 +163,9 @@ defmodule Attesto.RefreshStore.ETS do
     end
   end
 
-  defp valid_rotation_time?(parent_exp, now), do: is_integer(now) and now >= 0 and parent_exp > now
+  # `handle_call/3` admits rotation messages only with a validated,
+  # non-negative integer clock value.
+  defp valid_rotation_time?(parent_exp, now), do: parent_exp > now
 
   defp commit_rotation(parent_hash, family, parent_exp, parent, child, successor, now) do
     consumed_parent =
@@ -284,7 +286,7 @@ defmodule Attesto.RefreshStore.ETS do
 
   defp valid_child_lifetime?(child, now) do
     child_expiry = Map.get(child, :expires_at)
-    is_integer(now) and now >= 0 and is_integer(child_expiry) and child_expiry > now
+    is_integer(child_expiry) and child_expiry > now
   end
 
   defp valid_child_context?(child, successor) do
