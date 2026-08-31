@@ -127,6 +127,45 @@ defmodule Attesto.RefreshTokenPropertyTest do
         assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, live.token)
       end
     end
+
+    property "a consumed parent expiry caps every persisted retry deadline" do
+      check all(
+              issued_grace <- integer(1..60),
+              parent_ttl <- integer(1..issued_grace),
+              max_runs: 80
+            ) do
+        :ok = RefreshStore.ETS.reset()
+        now = 1_000
+
+        assert {:ok, %{token: parent_token}} =
+                 RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_expiry", scope: ["openid"]},
+                   ttl: parent_ttl,
+                   now: now
+                 )
+
+        # Make the child live well beyond both candidate deadlines, ensuring
+        # the persisted retry deadline is later than the parent expiry.
+        assert {:ok, %{token: child_token}} =
+                 RefreshToken.rotate(RefreshStore.ETS, parent_token,
+                   now: now,
+                   ttl: issued_grace + 2,
+                   rotation_grace_seconds: issued_grace
+                 )
+
+        assert {:ok, parent} = RefreshStore.ETS.get(Secret.hash(parent_token))
+        assert parent.successor.retry_until >= parent.expires_at
+
+        # A later, larger configured grace cannot make the consumed parent
+        # retryable at its exact (strict) expiry boundary.
+        assert {:error, :reuse_detected} =
+                 RefreshToken.rotate(RefreshStore.ETS, parent_token,
+                   now: parent.expires_at,
+                   rotation_grace_seconds: issued_grace + 60
+                 )
+
+        assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, child_token)
+      end
+    end
   end
 
   defp suffix_generator do

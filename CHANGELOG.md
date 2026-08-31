@@ -31,9 +31,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which owns issuance, requires the refresh context's subject and client to
   match the grant, permits only scope/resource subsets, and binds the exact
   returned family ID; the three-arity `finalize/3` remains for flows that issue
-  no refresh token and records a nil family marker. A DPoP-bound grant requires
-  the exact same refresh binding; token-endpoint DPoP initiation may differ
-  only when the redeemed grant is unbound. Build the access/ID-token response
+  no refresh token and records a nil family marker. Under RFC 9449 §5, hosts
+  classify clients and choose a nil refresh binding for confidential clients
+  or a DPoP binding for public clients; a DPoP-bound grant accepts nil or its
+  exact JKT and rejects a different one. Build the access/ID-token response
   before calling the composition API, and add its refresh token only after
   successful return.
 - `c:Attesto.RefreshStore.insert/1` reports `{:error, :conflict}` for an existing
@@ -85,9 +86,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redacts retry credentials after their deadline; strict zero-grace rotation
   stores only an exact non-secret tombstone, and revoked-family markers are
   retained for the store lifetime rather than expiring after a fixed 30-day
-  interval. A backward clock difference between serving nodes, no larger than
-  the configured grace, is tolerated during that fixed retry window; larger
-  rollback remains fail-closed. Generation lookup is
+  interval. A consumed parent's own expiry is also authoritative, so retained
+  rows and later grace configuration cannot extend successor recovery beyond
+  that boundary. A backward clock difference between serving nodes, no larger
+  than the configured grace, is tolerated during that fixed retry window;
+  larger rollback remains fail-closed. Generation lookup is
   constant-time, and a pre-existing sibling generation atomically revokes the
   corrupt family. An expired ancestor remains a valid family-revocation handle
   when the caller is authorized, so live descendants cannot survive revocation.

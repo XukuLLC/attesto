@@ -358,6 +358,32 @@ defmodule Attesto.RefreshTokenTest do
                )
     end
 
+    test "a consumed parent cannot retry after its expiry even while its persisted deadline is live" do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RefreshStore.ETS, context(), ttl: 5, now: 1_000)
+
+      assert {:ok, %{token: t1}} =
+               RefreshToken.rotate(RefreshStore.ETS, t0,
+                 now: 1_000,
+                 ttl: 100,
+                 rotation_grace_seconds: 10
+               )
+
+      assert {:ok, parent} = RefreshStore.ETS.get(Secret.hash(t0))
+      assert parent.expires_at == 1_005
+      assert parent.successor.retry_until == 1_010
+
+      # The persisted retry deadline is still live, and a larger current grace
+      # must not bypass the parent's strict expiry boundary.
+      assert {:error, :reuse_detected} =
+               RefreshToken.rotate(RefreshStore.ETS, t0,
+                 now: parent.expires_at,
+                 rotation_grace_seconds: 60
+               )
+
+      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1)
+    end
+
     test "rotation grace is capped so an expired successor cannot remain recoverable" do
       {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, context(), now: 1_000)
 

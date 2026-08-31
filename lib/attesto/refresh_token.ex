@@ -6,11 +6,13 @@ defmodule Attesto.RefreshToken do
   Each refresh token is single-use: presenting it (`rotate/3`) consumes it
   and mints a successor in the same *family*. A short idempotency window
   (10 seconds by default) lets the same client retry the just-consumed
-  parent after a lost response and receive the same successor. Outside
-  that window, or when the retry does not match the original client,
-  binding, and scope, a rotated token is a captured-token signal and the
-  entire family is revoked so neither the attacker nor the victim can
-  continue, forcing a fresh authorization.
+  parent after a lost response and receive the same successor. The parent
+  expiry remains authoritative: a cached successor is never returned after
+  the consumed parent expires, even when the persisted retry deadline is
+  later. Outside the intersection of those two fixed deadlines, or when the
+  retry does not match the original client, binding, and scope, a rotated
+  token is a captured-token signal and the entire family is revoked so neither
+  the attacker nor the victim can continue, forcing a fresh authorization.
 
   This module is pure logic over a `Attesto.RefreshStore`; the store
   provides the atomic family-level `rotate/4` transaction on which reuse
@@ -44,6 +46,18 @@ defmodule Attesto.RefreshToken do
   @default_ttl_seconds 14 * 24 * 60 * 60
   @default_rotation_grace_seconds 10
 
+  @typedoc """
+  Context for issuing an initial refresh token.
+
+  `:dpop_jkt` is optional because the host must classify the client before
+  issuing the token: RFC 9449 §5 requires DPoP-bound refresh tokens for public
+  clients and prohibits DPoP binding for confidential clients. When this
+  context is passed through
+  `Attesto.AuthorizationCode.issue_refresh_and_finalize/6` for a
+  DPoP-bound authorization grant, `nil` is the confidential-client choice and
+  the grant's exact JKT is the public-client choice; a different JKT is
+  rejected. Core does not determine the client class.
+  """
   @type context :: %{
           required(:subject) => String.t(),
           optional(:scope) => [String.t()],
@@ -823,6 +837,27 @@ defmodule Attesto.RefreshToken do
 
       consumed_at < 0 ->
         {:state_error, :consumed_at_invalid}
+
+      true ->
+        retry_window_after_consumption_validation(record, consumed_at, now, grace)
+    end
+  end
+
+  defp retry_window_after_consumption_validation(record, consumed_at, now, grace) do
+    cond do
+      # A valid store can only consume a live parent, so its committed
+      # consumption instant must precede the parent's expiry. Treat a broken
+      # persisted relation as an operational state fault rather than evidence
+      # of token reuse.
+      Map.get(record, :expires_at) <= consumed_at ->
+        {:state_error, :consumed_at_after_expiry}
+
+      # The parent expiry is independent of the successor's persisted retry
+      # deadline. A sweeper may retain an expired consumed parent so a replay
+      # can still revoke its family, but that retention must never make the
+      # cached successor usable after the parent's strict expiry boundary.
+      Map.get(record, :expires_at) <= max(now, consumed_at) ->
+        :outside
 
       now < consumed_at and consumed_at - now > grace ->
         {:state_error, :clock_before_consumption}

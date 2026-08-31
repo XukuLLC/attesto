@@ -566,6 +566,38 @@ defmodule Attesto.TelemetryTest do
       end
     end
 
+    test "a consumed record at its expiry is an operational state failure" do
+      {:ok, %{token: token}} =
+        RefreshToken.issue(MutationFaultStore, %{subject: "expired-consumption"}, ttl: 1, now: 1_000)
+
+      assert {:ok, _successor} =
+               RefreshToken.rotate(MutationFaultStore, token,
+                 now: 1_000,
+                 rotation_grace_seconds: 10
+               )
+
+      parent_hash = Attesto.Secret.hash(token)
+      assert {:ok, parent} = ETS.get(parent_hash)
+      forged_parent = %{parent | consumed_at: parent.expires_at}
+
+      Process.put({MutationFaultStore, :get_override}, fn
+        ^parent_hash, _actual -> {:ok, forged_parent}
+        _other_hash, actual -> actual
+      end)
+
+      assert {:error, :grant_revoked} =
+               RefreshToken.rotate(MutationFaultStore, token,
+                 now: parent.expires_at,
+                 rotation_grace_seconds: 60
+               )
+
+      assert_received {:telemetry, [:attesto, :refresh_token, :rotation_state_failed], _, metadata}
+      assert metadata.operation == :recover_successor
+      assert metadata.reason == :consumed_at_after_expiry
+      refute_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, _}
+      Process.delete({MutationFaultStore, :get_override})
+    end
+
     test "recovery rejects successor context that changes any security-relevant parent field" do
       variants = [
         subject: "other-subject",

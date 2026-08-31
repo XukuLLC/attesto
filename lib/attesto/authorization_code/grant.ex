@@ -24,6 +24,13 @@ defmodule Attesto.AuthorizationCode.Grant do
   its scope/resource authorization. `AuthorizationCode.finalize/3` is for
   no-refresh flows and records a nil family in its replay marker. `nil` when no
   provenance ID was supplied.
+
+  Under RFC 9449 §5, public-client refresh tokens must be DPoP-bound while
+  confidential-client refresh tokens must not be DPoP-bound. The host performs
+  that client classification because core cannot know it. For a DPoP-bound
+  grant, the composition helper accepts a refresh context with either a nil
+  `dpop_jkt` (confidential refresh) or this grant's exact JKT (public refresh),
+  and rejects a different JKT.
   """
 
   @enforce_keys [:client_id, :redirect_uri, :subject]

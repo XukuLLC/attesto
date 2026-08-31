@@ -15,8 +15,9 @@ defmodule Attesto.RefreshStore.ETS do
   revocation, or reuse detection only holds per node.
 
   Start options: `:sweep_interval_ms` (default `60_000`). The sweeper
-  deletes tokens past their expiry; consumed-but-unexpired tokens are
-  retained so reuse within the TTL window is still detected. Plaintext
+  deletes tokens past their expiry; consumed parents may be retained until
+  their persisted retry deadline so replay is still detected, but that
+  retention never permits a retry after the parent's expiry. Plaintext
   successor retry data is redacted after its `:retry_until` deadline.
   Revoked-family markers are retained for the lifetime of the store, as
   required by the sticky-revocation contract, including after all token rows

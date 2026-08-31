@@ -74,6 +74,15 @@ defmodule Attesto.AuthorizationCode do
   subject and client to match the redeemed grant and permits only
   scope/resource narrowing.
 
+  RFC 9449 §5 requires a public client's refresh token to be DPoP-bound and
+  prohibits binding a confidential client's refresh token. The host knows the
+  client classification and must choose the refresh context's `:dpop_jkt`
+  accordingly; core cannot infer it. For a DPoP-bound grant,
+  `issue_refresh_and_finalize/6` therefore permits either `nil` (confidential
+  refresh) or the grant's exact JKT (public refresh), and rejects any other
+  JKT. For an unbound grant, the host may still select a token-endpoint DPoP
+  binding as described below.
+
   ## DPoP-bound codes
 
   If `issue/3` is given a `:dpop_jkt`, the code is bound to that DPoP key
@@ -344,13 +353,16 @@ defmodule Attesto.AuthorizationCode do
   `refresh_context` must carry the redeemed grant's `:subject` and
   `:client_id`, and its `:scope` and `:resource` lists must be subsets of the
   grant's authorization. If the redeemed grant is DPoP-bound, the context's
-  `:dpop_jkt` must exactly match that binding; a missing or different key is
-  rejected. A token-endpoint DPoP binding may differ from the
-  authorization-request binding only when the redeemed grant itself is
-  unbound, which permits token-endpoint DPoP initiation without weakening a
-  holder-of-key grant. The context must not contain top-level `:family_id` or
-  `:generation` continuation fields. Those are internal rotation state, not
-  caller input; put authorization provenance inside `:claims` when needed.
+  `:dpop_jkt` may be `nil` for a confidential-client refresh or must exactly
+  match that binding for a public-client refresh; a different key is rejected.
+  The host is responsible for that public/confidential classification and for
+  choosing the context binding required by RFC 9449 §5. A token-endpoint DPoP
+  binding may differ from the authorization-request binding only when the
+  redeemed grant itself is unbound, which permits token-endpoint DPoP
+  initiation without weakening a holder-of-key grant. The context must not
+  contain top-level `:family_id` or `:generation` continuation fields. Those
+  are internal rotation state, not caller input; put authorization provenance
+  inside `:claims` when needed.
   """
   @spec issue_refresh_and_finalize(
           module(),
@@ -392,7 +404,7 @@ defmodule Attesto.AuthorizationCode do
     require_subset_context!(context, :resource, grant.resource)
 
     if not is_nil(grant.dpop_jkt) do
-      require_matching_context!(context, :dpop_jkt, grant.dpop_jkt)
+      require_optional_matching_context!(context, :dpop_jkt, grant.dpop_jkt)
     end
 
     :ok
@@ -408,6 +420,14 @@ defmodule Attesto.AuthorizationCode do
   defp require_matching_context!(context, key, expected) do
     if Map.get(context, key) != expected do
       raise ArgumentError, "refresh context :#{key} must match the redeemed grant"
+    end
+  end
+
+  defp require_optional_matching_context!(context, key, expected) do
+    case Map.get(context, key) do
+      nil -> :ok
+      ^expected -> :ok
+      _different -> raise ArgumentError, "refresh context :#{key} must match the redeemed grant"
     end
   end
 

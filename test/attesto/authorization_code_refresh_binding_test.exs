@@ -240,7 +240,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
              })
   end
 
-  test "a DPoP-bound grant can only issue a refresh token for the bound key", %{challenge: challenge} do
+  test "a DPoP-bound grant permits confidential or bound public refresh tokens", %{challenge: challenge} do
     bound_jkt = Secret.hash("authorization-request-key")
 
     {:ok, code} =
@@ -268,10 +268,84 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
         code,
         grant,
         RefreshETS,
-        Map.delete(refresh_context, :dpop_jkt),
+        %{refresh_context | dpop_jkt: Secret.hash("different-key")},
         now: 1_000
       )
     end
+
+    assert {:ok, %{family_id: confidential_family_id}} =
+             AuthorizationCode.issue_refresh_and_finalize(
+               TrackingStore,
+               code,
+               grant,
+               RefreshETS,
+               Map.delete(refresh_context, :dpop_jkt),
+               now: 1_000
+             )
+
+    assert {:error, {:reuse, %{family_id: ^confidential_family_id}}} =
+             AuthorizationCode.redeem(TrackingStore, code, %{
+               client_id: @client_id,
+               redirect_uri: @redirect_uri,
+               code_verifier: @verifier,
+               dpop_jkt: bound_jkt
+             })
+
+    {:ok, public_code} =
+      AuthorizationCode.issue(TrackingStore, %{
+        client_id: @client_id,
+        redirect_uri: @redirect_uri,
+        code_challenge: challenge,
+        subject: "usr_42",
+        dpop_jkt: bound_jkt
+      })
+
+    assert {:ok, %Grant{dpop_jkt: ^bound_jkt} = public_grant} =
+             AuthorizationCode.redeem(TrackingStore, public_code, %{
+               client_id: @client_id,
+               redirect_uri: @redirect_uri,
+               code_verifier: @verifier,
+               dpop_jkt: bound_jkt
+             })
+
+    assert {:ok, %{family_id: public_family_id}} =
+             AuthorizationCode.issue_refresh_and_finalize(
+               TrackingStore,
+               public_code,
+               public_grant,
+               RefreshETS,
+               %{subject: public_grant.subject, client_id: public_grant.client_id, dpop_jkt: bound_jkt},
+               now: 1_000
+             )
+
+    assert {:error, {:reuse, %{family_id: ^public_family_id}}} =
+             AuthorizationCode.redeem(TrackingStore, public_code, %{
+               client_id: @client_id,
+               redirect_uri: @redirect_uri,
+               code_verifier: @verifier,
+               dpop_jkt: bound_jkt
+             })
+  end
+
+  test "a DPoP-bound grant rejects a different refresh binding", %{challenge: challenge} do
+    bound_jkt = Secret.hash("authorization-request-key")
+
+    {:ok, code} =
+      AuthorizationCode.issue(TrackingStore, %{
+        client_id: @client_id,
+        redirect_uri: @redirect_uri,
+        code_challenge: challenge,
+        subject: "usr_42",
+        dpop_jkt: bound_jkt
+      })
+
+    assert {:ok, %Grant{dpop_jkt: ^bound_jkt} = grant} =
+             AuthorizationCode.redeem(TrackingStore, code, %{
+               client_id: @client_id,
+               redirect_uri: @redirect_uri,
+               code_verifier: @verifier,
+               dpop_jkt: bound_jkt
+             })
 
     assert_raise ArgumentError, "refresh context :dpop_jkt must match the redeemed grant", fn ->
       AuthorizationCode.issue_refresh_and_finalize(
@@ -279,28 +353,10 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
         code,
         grant,
         RefreshETS,
-        %{refresh_context | dpop_jkt: Secret.hash("different-key")},
+        %{subject: grant.subject, client_id: grant.client_id, dpop_jkt: Secret.hash("different-key")},
         now: 1_000
       )
     end
-
-    assert {:ok, %{family_id: issued_family_id}} =
-             AuthorizationCode.issue_refresh_and_finalize(
-               TrackingStore,
-               code,
-               grant,
-               RefreshETS,
-               refresh_context,
-               now: 1_000
-             )
-
-    assert {:error, {:reuse, %{family_id: ^issued_family_id}}} =
-             AuthorizationCode.redeem(TrackingStore, code, %{
-               client_id: @client_id,
-               redirect_uri: @redirect_uri,
-               code_verifier: @verifier,
-               dpop_jkt: bound_jkt
-             })
   end
 
   test "refresh-store contract errors do not finalize the code", %{challenge: challenge} do

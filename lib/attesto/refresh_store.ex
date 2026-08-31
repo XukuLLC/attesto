@@ -74,10 +74,14 @@ defmodule Attesto.RefreshStore do
       and each `(family_id, generation)` pair is unique.
     * `:data` - the canonical context below; adapters MUST preserve all keys
       and values exactly through `get/1` and rotation.
-    * `:expires_at` - an absolute non-negative Unix-second expiry.
+    * `:expires_at` - an absolute non-negative Unix-second expiry. A consumed
+      parent cannot be used for retry after this boundary, even if its
+      persisted successor retry deadline is later; stores may retain the
+      expired row for replay detection until that deadline.
     * `:consumed` - a boolean. An unconsumed record has `consumed_at: nil` and
       `successor: nil`; a consumed record has a non-negative integer
-      `consumed_at` and the committed successor state.
+      `consumed_at` strictly before `expires_at` and the committed successor
+      state.
     * `:successor` - `nil` before rotation, or the complete credential-
       equivalent retry bundle for the immediately issued successor, or the
       non-secret strict-mode tombstone `%{retry_until: now, recoverable: false}`.
