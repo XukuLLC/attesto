@@ -33,10 +33,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@v1.24.1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
@@ -49,7 +49,7 @@ jobs:
       # must have joserfc + cryptography importable. We pin 3.14 here, install
       # the packages into it, and rebuild erlang_python against it below.
       - name: Set up Python 3.14 (in-process parity stack)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.14"
 
@@ -64,7 +64,7 @@ jobs:
         run: npm install --no-audit --no-fund --prefix test/support/js
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: deps
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-${{ hashFiles('**/mix.lock') }}
@@ -72,7 +72,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-mix-
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: _build
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-build-${{ hashFiles('**/mix.lock') }}-${{ hashFiles('**/mix.exs') }}
@@ -117,7 +117,7 @@ jobs:
 
       - name: Restore PLT cache
         if: ${{ matrix.lint }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: priv/plts
           key: ${{ runner.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-plt-${{ hashFiles('**/mix.lock') }}
@@ -146,10 +146,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@v1.24.1
         with:
           elixir-version: "1.20.1"
           otp-version: "29.0.2"
