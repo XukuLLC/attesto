@@ -71,6 +71,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   malformed records with constant contract errors. Return the documented
   tuples, maps, and atoms exactly, preserve the required record bindings, and
   keep state transitions atomic before deploying a custom adapter.
+- **Persisted-claims upgrade note:** Attesto 1.x accepted arbitrary maps for
+  authorization-code and refresh-token context claims and device/CIBA approval
+  claims. Attesto 2 requires the exact portable JSON subset described above.
+  Before a rolling upgrade, quiesce every 1.x writer or otherwise prevent it
+  from creating records with atom keys, floats, out-of-range integers, invalid
+  strings, or other VM terms. Audit records as they are returned by the
+  adapter: a nonportable authorization code is atomically removed by
+  `CodeStore.take/1` before validation; a nonportable refresh record fails
+  closed and may revoke its family when its identity is trustworthy; and an
+  approved device/CIBA record is rejected before consumption. Migrate only with
+  an explicit collision/precision policy; otherwise expire and reissue those
+  records. Records already returned as canonical portable JSON continue to
+  work.
 
 ### Security
 

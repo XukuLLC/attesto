@@ -163,6 +163,8 @@ defmodule Attesto.RefreshStore do
   expiry. `successor`
   is either the complete retry bundle (`:token`, `:generation`, `:context`,
   `:retry_until`) or `%{retry_until: now, recoverable: false}` for strict mode.
+  The keyword list MUST contain `:now` as a non-negative integer Unix second;
+  callers should use `Attesto.RefreshToken.rotate/3`, which supplies it.
 
   A complete retry bundle contains a live plaintext credential. Persistent
   stores MUST protect it with authenticated encryption at rest using stable

@@ -83,6 +83,27 @@ defmodule Attesto.RefreshStore.ETSTest do
              ETS.rotate("tok-never-inserted", candidate, successor("tok-never-inserted-child", candidate), now: 1_000)
   end
 
+  test "invalid direct rotation options do not stop or mutate the store" do
+    refute function_exported?(ETS, :rotate, 3)
+
+    rec = record("tok-invalid-direct")
+    assert :ok = ETS.insert(rec)
+    pid = Process.whereis(ETS)
+    candidate = child("tok-invalid-direct-child")
+    retry = successor("tok-invalid-direct-child", candidate)
+
+    for opts <- [[], [now: -1], [now: "not-a-clock"], [now: 1.0], [{:now, 1, 2}]] do
+      assert {:error, :invalid_rotation} = ETS.rotate(rec.token_hash, candidate, retry, opts)
+      assert Process.whereis(ETS) == pid
+      assert Process.alive?(pid)
+      assert {:ok, ^rec} = ETS.get(rec.token_hash)
+    end
+
+    assert {:ok, _parent, ^candidate} = ETS.rotate(rec.token_hash, candidate, retry, now: 1_000)
+    assert Process.whereis(ETS) == pid
+    assert Process.alive?(pid)
+  end
+
   test "revoke_family removes every record sharing a family_id, leaving others" do
     assert :ok = ETS.insert(record("tok-fam1-a", family_id: "fam-1", generation: 0))
     assert :ok = ETS.insert(record("tok-fam1-b", family_id: "fam-1", generation: 1))

@@ -63,9 +63,9 @@ defmodule Attesto.RefreshStore.ETS do
   end
 
   @impl Attesto.RefreshStore
-  def rotate(parent_hash, child, successor, opts \\ [])
+  def rotate(parent_hash, child, successor, opts)
       when is_binary(parent_hash) and is_map(child) and is_map(successor) and is_list(opts),
-      do: GenServer.call(__MODULE__, {:rotate, parent_hash, child, successor, opts})
+      do: rotate_with_validated_now(parent_hash, child, successor, opts)
 
   @impl Attesto.RefreshStore
   def revoke_family(family_id) when is_binary(family_id), do: GenServer.call(__MODULE__, {:revoke_family, family_id})
@@ -91,8 +91,7 @@ defmodule Attesto.RefreshStore.ETS do
     {:reply, reply, state}
   end
 
-  def handle_call({:rotate, parent_hash, child, successor, opts}, _from, state) do
-    now = Keyword.fetch!(opts, :now)
+  def handle_call({:rotate, parent_hash, child, successor, now}, _from, state) when is_integer(now) and now >= 0 do
     reply = rotate_result(:ets.lookup(@table, parent_hash), parent_hash, child, successor, now)
 
     {:reply, reply, state}
@@ -101,6 +100,16 @@ defmodule Attesto.RefreshStore.ETS do
   def handle_call({:revoke_family, family_id}, _from, state) do
     revoke_family_rows(family_id)
     {:reply, :ok, state}
+  end
+
+  defp rotate_with_validated_now(parent_hash, child, successor, opts) do
+    with true <- Keyword.keyword?(opts),
+         {:ok, now} <- Keyword.fetch(opts, :now),
+         true <- is_integer(now) and now >= 0 do
+      GenServer.call(__MODULE__, {:rotate, parent_hash, child, successor, now})
+    else
+      _invalid_now -> {:error, :invalid_rotation}
+    end
   end
 
   defp rotate_result([], _parent_hash, child, _successor, _now) do
