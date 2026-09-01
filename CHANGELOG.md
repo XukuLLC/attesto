@@ -160,6 +160,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transition, so malformed host input cannot burn an otherwise valid one-time
   grant.
 
+### Fixed
+
+- Accept the optional `JWT` and `oauth-authz-req+jwt` media types on signed
+  CIBA authentication requests case-insensitively, including their
+  `application/`-prefixed forms, while continuing to reject unrelated explicit
+  types. This restores interoperability with the FAPI-CIBA two-client flow.
+
 ## [1.15.0] - 2026-08-13
 
 ### Added

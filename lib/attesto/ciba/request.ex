@@ -32,6 +32,11 @@ defmodule Attesto.CIBA.Request do
   `nbf`→`exp` lifetime to 60 minutes (the `:max_request_lifetime_seconds`
   default).
 
+  The JOSE `typ` header is optional. When present, the verifier accepts the
+  generic `JWT` media type and `oauth-authz-req+jwt`, including their
+  case-insensitive and `application/`-prefixed forms; an unrelated type is
+  rejected.
+
   Each known CIBA authentication-request parameter carried in the signed JWT
   (`scope`, the hints, `binding_message`, `user_code`, `acr_values`,
   `client_notification_token`) MUST be a JSON string per §7.1.1; a non-string
@@ -342,17 +347,15 @@ defmodule Attesto.CIBA.Request do
         require_client_id_claim: false,
         # §7.1.1: `aud` MUST contain the OP's Issuer Identifier.
         audience: issuer,
-        # Explicit typing (RFC 9101 §10.8): a CIBA signed authentication request
-        # and an authorization-endpoint JAR both require `aud` = this issuer and
-        # `iss` = the client, so `aud` cannot tell them apart. CIBA §7.1.1
-        # defines no `typ`, so accept an absent header or the generic `JWT`
-        # media type (RFC 7519 §5.1; the value JOSE-family signers emit by
-        # default) and reject a request bearing the authorization endpoint's
-        # `oauth-authz-req+jwt` - that explicit type must not be honoured as a
-        # backchannel request. Defence-in-depth: the client is separately
-        # authenticated before we get here, so a cross-context request object
-        # already cannot arrive without the client's own credentials.
-        accepted_typ: [nil, "JWT"],
+        # Explicit typing (RFC 9101 §10.8): CIBA §7.1.1 does not require a
+        # `typ`, but the OIDF FAPI-CIBA conformance suite sends
+        # `oauth-authz-req+jwt`. Keep the optional absent value and generic
+        # `JWT` media type (RFC 7519 §5.1; the value JOSE-family signers emit by
+        # default), and accept the authorization-request media type as well.
+        # RequestObject applies case-insensitive media-type matching and the
+        # RFC 7515 §4.1.9 `application/` bare-subtype convention; an unrelated
+        # explicit type remains rejected.
+        accepted_typ: [nil, "JWT", "oauth-authz-req+jwt"],
         accepted_algs: algs,
         enforce_fapi_alg_policy:
           Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs)),

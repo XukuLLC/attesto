@@ -315,17 +315,21 @@ defmodule Attesto.CIBA.RequestTest do
                Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
     end
 
-    test "cross-context typing: a request typed as an authorization-endpoint JAR is rejected" do
-      # RFC 9101 §10.8 explicit typing. A CIBA signed request and an authorize
-      # JAR share `aud` (this issuer) and `iss` (the client), so a JAR carrying
-      # `typ: oauth-authz-req+jwt` otherwise satisfies every CIBA claim check.
-      # CIBA §7.1.1 defines no typ, so it must not be honoured as a backchannel
-      # authentication request.
+    test "accepts oauth-authz-req+jwt media types case-insensitively" do
       key = ec_key()
-      jwt = signed_request(key, %{}, %{"typ" => "oauth-authz-req+jwt"})
 
-      assert {:error, :invalid_request} =
-               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+      for typ <- [
+            "oauth-authz-req+jwt",
+            "OautH-auThZ-REQ+jWt",
+            "application/oauth-authz-req+jwt",
+            "APPLICATION/OAUTH-AUTHZ-REQ+JWT"
+          ] do
+        jwt = signed_request(key, %{}, %{"typ" => typ})
+
+        assert {:ok, %Request{}} =
+                 Request.validate(signing_client(key), %{"request" => jwt}, signed_opts()),
+               "expected accepted typ #{inspect(typ)}"
+      end
     end
 
     test "the generic JWT media type is accepted with or without the application/ prefix" do
@@ -340,9 +344,9 @@ defmodule Attesto.CIBA.RequestTest do
       end
     end
 
-    test "cross-context typing is rejected in its application/-prefixed spelling too" do
+    test "rejects an unrelated typ" do
       key = ec_key()
-      jwt = signed_request(key, %{}, %{"typ" => "application/oauth-authz-req+jwt"})
+      jwt = signed_request(key, %{}, %{"typ" => "some-other+jwt"})
 
       assert {:error, :invalid_request} =
                Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())

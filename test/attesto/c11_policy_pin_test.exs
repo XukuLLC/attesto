@@ -222,30 +222,24 @@ defmodule Attesto.C11PolicyPinTest do
     }
   end
 
-  test "CIBA pins accepted_typ to nil/JWT and rejects authorization JAR types" do
+  test "CIBA accepts the valid typ media types and rejects unrelated types" do
     key = ec_key()
 
-    assert {:ok, _request} =
-             CIBARequest.validate(
-               ciba_client(key),
-               %{"request" => ciba_request(key, nil)},
-               issuer: @ciba_issuer
-             )
-
-    assert {:ok, _request} =
-             CIBARequest.validate(
-               ciba_client(key),
-               %{"request" => ciba_request(key, "application/JWT")},
-               issuer: @ciba_issuer
-             )
-
-    for typ <- ["oauth-authz-req+jwt", "application/oauth-authz-req+jwt"] do
-      assert {:error, :invalid_request} =
+    for typ <- [nil, "application/JWT", "OautH-auThZ-REQ+jWt", "application/oauth-authz-req+jwt"] do
+      assert {:ok, _request} =
                CIBARequest.validate(
                  ciba_client(key),
                  %{"request" => ciba_request(key, typ)},
                  issuer: @ciba_issuer
-               )
+               ),
+             "expected accepted typ #{inspect(typ)}"
     end
+
+    assert {:error, :invalid_request} =
+             CIBARequest.validate(
+               ciba_client(key),
+               %{"request" => ciba_request(key, "some-other+jwt")},
+               issuer: @ciba_issuer
+             )
   end
 end
