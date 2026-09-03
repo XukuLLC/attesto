@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Make `Attesto.Claims.portable_json_object?/1` return `false` for structs at
+  any nesting level instead of raising while attempting to enumerate them.
+
 ## [2.0.0] - 2026-08-31
 
 ### Breaking

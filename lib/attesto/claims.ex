@@ -63,6 +63,8 @@ defmodule Attesto.Claims do
 
   defp portable_json_array_tail?(_improper_tail, _depth), do: false
 
+  defp portable_json_object?(value, _depth) when is_struct(value), do: false
+
   defp portable_json_object?(value, depth) when is_map(value) and depth <= @max_portable_json_depth do
     Enum.all?(value, fn {key, member} -> portable_json_string?(key) and portable_json_value?(member, depth) end)
   end
