@@ -34,6 +34,14 @@ defmodule Attesto.ClaimsTest do
       refute Claims.portable_json_object?(%{"bitstring" => <<1::size(1)>>})
     end
 
+    test "returns false for structs at the root or nested in otherwise portable values" do
+      for struct <- [~D[2026-09-02], ~U[2026-09-02 00:00:00Z], MapSet.new(["member"])] do
+        refute Claims.portable_json_object?(struct)
+        refute Claims.portable_json_object?(%{"nested" => struct})
+        refute Claims.portable_json_object?(%{"nested" => [%{"value" => struct}]})
+      end
+    end
+
     test "rejects invalid UTF-8 binaries while accepting empty objects and arrays" do
       assert Claims.portable_json_object?(%{"empty_object" => %{}, "empty_array" => []})
       refute Claims.portable_json_object?(%{"invalid_utf8" => <<255>>})
