@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-02
+
 ### Fixed
 
 - Make `Attesto.Claims.portable_json_object?/1` return `false` for structs at
