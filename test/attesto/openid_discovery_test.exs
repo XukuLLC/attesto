@@ -82,8 +82,13 @@ defmodule Attesto.OpenIDDiscoveryTest do
       assert meta["claims_parameter_supported"] == false
     end
 
-    test "does not duplicate openid when host already supplied it" do
+    test "preserves a valid host-supplied scope catalog" do
       meta = OpenIDDiscovery.metadata(config(), scopes_supported: ["openid", "profile"])
+      assert meta["scopes_supported"] == ["openid", "profile"]
+    end
+
+    test "normalizes a catalog that omits the required openid scope" do
+      meta = OpenIDDiscovery.metadata(config(), scopes_supported: ["profile"])
       assert meta["scopes_supported"] == ["openid", "profile"]
     end
 

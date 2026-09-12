@@ -46,9 +46,11 @@ defmodule Attesto.OpenIDDiscovery do
   `userinfo_endpoint`, and the catalog of `scopes_supported` and
   `claims_supported` the host actually serves - is supplied through
   `opts` and merged in. `nil` opt values are dropped so the document only
-  advertises what the host actually implements. The library guarantees
-  only that, when `scopes_supported` is provided, it includes the
-  reserved `"openid"` scope (OpenID Connect Core §3.1.2.1).
+  advertises what the host actually implements. When `scopes_supported` is
+  provided, the reserved `"openid"` scope is added when absent (OpenID Connect
+  Core §3.1.2.1). This normalization applies only to the returned metadata;
+  integrations remain responsible for using a matching effective catalog in
+  registration and authorization policy.
 
   The result is a string-keyed map ready to serialise as the endpoint's
   JSON body.
@@ -95,9 +97,8 @@ defmodule Attesto.OpenIDDiscovery do
     * `:response_types_supported` - defaults to
       `#{inspect(@default_response_types)}` (Authorization Code Flow).
     * `:request_parameter_supported` - defaults to `false`.
-    * `:scopes_supported` - if given, the reserved `"openid"` scope is
-      added when absent (OpenID Connect Core §3.1.2.1). Included only if
-      given.
+    * `:scopes_supported` - if given, the reserved `"openid"` scope is added
+      when absent (OpenID Connect Core §3.1.2.1). Included only if given.
     * `:claims_supported`, `:acr_values_supported`,
       `:display_values_supported`, `:claims_locales_supported`,
       `:ui_locales_supported`, `:claims_parameter_supported`,
@@ -143,10 +144,10 @@ defmodule Attesto.OpenIDDiscovery do
   end
 
   # OpenID Connect Core §3.1.2.1: "openid" is REQUIRED in an OIDC
-  # authentication request. If the host advertises a scope catalog it must
-  # therefore include "openid"; ensure it without disturbing host order or
-  # introducing duplicates. When no catalog is given we add nothing, so the
-  # field is omitted entirely (Discovery drops the nil).
+  # authentication request. Provider Metadata that advertises a scope catalog
+  # must therefore include it. Integrations should normalize their catalog
+  # centrally before calling this builder; this local normalization remains for
+  # direct callers and backwards compatibility.
   defp normalize_scopes_supported(opts) do
     case Keyword.get(opts, :scopes_supported) do
       nil ->
