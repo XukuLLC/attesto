@@ -1,6 +1,6 @@
 defmodule Attesto.SdJwt do
   @moduledoc """
-  Selective Disclosure for JWTs (SD-JWT), draft-ietf-oauth-selective-disclosure-jwt.
+  Selective Disclosure for JWTs (SD-JWT), RFC 9901.
 
   An SD-JWT lets an issuer sign a set of claims where individual claims are
   *selectively disclosable*: the signed JWT carries only the SHA-256 digest of

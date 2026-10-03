@@ -89,7 +89,7 @@ defmodule Attesto.Discovery do
       `:require_pushed_authorization_requests` - the PAR endpoint URL and
       whether the server mandates PAR; included only if given.
     * `:client_id_metadata_document_supported`
-      (`draft-ietf-oauth-client-id-metadata-document-01` §6) - a boolean
+      (`draft-ietf-oauth-client-id-metadata-document-02` §6) - a boolean
       advertising whether the server dereferences an HTTPS `client_id` URL to a
       client metadata document; included only if given.
     * `:backchannel_authentication_endpoint`,

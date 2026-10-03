@@ -24,6 +24,11 @@ defmodule Attesto.RefreshToken do
   be protected as described by
   `c:Attesto.RefreshStore.rotate/4`.
 
+  `:ttl` bounds inactivity between refreshes. An optional `:family_ttl` on
+  initial issuance also fixes an absolute family deadline, which every
+  successor inherits. Rotation and lost-response retries cannot extend it
+  (RFC 10017 §6.3.2.3).
+
   ## DPoP binding
 
   A refresh token can be bound to a DPoP key (its issuing context carries
@@ -35,6 +40,11 @@ defmodule Attesto.RefreshToken do
   `Attesto.AuthorizationCode`, which permits an unbound code to be redeemed
   alongside a token-request proof (the proof there binds the new access
   token, not the code); rotation is deliberately the stricter of the two.
+
+  An attested client's verified Client Instance Key is bound independently as
+  `:attestation_jkt`. Every rotation and retry requires that same instance key,
+  even when its DPoP key differs. An unbound legacy token rejects a presented
+  instance key; its original binding cannot be reconstructed after issuance.
   """
 
   alias Attesto.Claims
@@ -68,19 +78,22 @@ defmodule Attesto.RefreshToken do
           optional(:auth_time) => non_neg_integer() | nil,
           optional(:client_id) => String.t(),
           optional(:dpop_jkt) => String.t() | nil,
+          optional(:attestation_jkt) => String.t() | nil,
           optional(:claims) => map()
         }
 
   @type issued :: %{
           token: String.t(),
           family_id: String.t(),
-          generation: non_neg_integer()
+          generation: non_neg_integer(),
+          expires_at: non_neg_integer()
         }
 
   @type rotated :: %{
           token: String.t(),
           family_id: String.t(),
           generation: non_neg_integer(),
+          expires_at: non_neg_integer(),
           context: map()
         }
 
@@ -90,6 +103,7 @@ defmodule Attesto.RefreshToken do
           | :invalid_resource
           | :invalid_client_id
           | :invalid_dpop_jkt
+          | :invalid_attestation_jkt
           | :invalid_claims
           | :invalid_acr
           | :invalid_auth_time
@@ -108,16 +122,23 @@ defmodule Attesto.RefreshToken do
           | :dpop_proof_required
           | :dpop_proof_unexpected
           | :dpop_binding_mismatch
+          | :attestation_proof_required
+          | :attestation_proof_unexpected
+          | :attestation_binding_mismatch
 
   @doc """
   Issue a refresh token for `context` and persist it via `store`.
 
   `context` MUST carry `:subject`; optional `:scope` (list, default
-  `[]`), `:client_id`, `:dpop_jkt` (binds the token to a DPoP key), and
+  `[]`), `:client_id`, `:dpop_jkt` (binds the token to a DPoP key),
+  `:attestation_jkt` (the verified Client Instance Key), and
   `:claims` (a lossless, string-keyed I-JSON object of host context; persisted
   numbers are exact-range integers, not floats).
 
-  Options: `:ttl` (seconds, default 14 days) and `:now`. Public issuance
+  Options: `:ttl` (idle seconds, default 14 days), `:family_ttl` (optional
+  positive seconds, fixing the entire family's maximum lifetime), and `:now`.
+  The family deadline is stored as `:family_expires_at` in the canonical
+  context and caps the initial token as well as every successor. Public issuance
   always starts a fresh family at generation 0; only `rotate/3` can create a
   later generation, through the store's atomic rotation transaction.
 
@@ -131,7 +152,9 @@ defmodule Attesto.RefreshToken do
   def issue(store, context, opts \\ []) when is_atom(store) and is_map(context) and is_list(opts) do
     validate_issue_options!(opts)
 
-    with {:ok, data} <- normalize_context(context) do
+    with {:ok, normalized} <- normalize_context(context) do
+      data = put_family_deadline(normalized, opts)
+
       case persist_issue(store, data, opts) do
         {:ok, issued} -> {:ok, issued}
         {:error, :family_revoked} = error -> error
@@ -161,6 +184,8 @@ defmodule Attesto.RefreshToken do
     * `:now` - clock override.
     * `:dpop_jkt` - the presented proof's thumbprint (for DPoP-bound
       tokens).
+    * `:attestation_jkt` - the authenticated Client Instance Key thumbprint,
+      required for an attestation-bound family independently of its DPoP key.
     * `:client_id` - the authenticated presenting client. When the token
       was issued with a `client_id`, rotation is fail-closed: it MUST
       present a matching one (`:client_required` if absent,
@@ -283,16 +308,18 @@ defmodule Attesto.RefreshToken do
   defp recover_successor_or_reuse(store, record, opts) do
     with :ok <- check_client(record.data, opts),
          :ok <- check_dpop(record.data, opts),
+         :ok <- check_attestation(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
          {:ok, resource} <- resolve_resource(record.data, opts),
          {:ok, successor} <- same_successor(record, scope, resource) do
       case successor_status(store, record, successor, opts) do
-        :live ->
+        {:live, expires_at} ->
           {:ok,
            %{
              token: successor.token,
              family_id: record.family_id,
              generation: successor.generation,
+             expires_at: expires_at,
              context: successor.context
            }}
 
@@ -402,7 +429,9 @@ defmodule Attesto.RefreshToken do
   defp classify_consumed_successor(_consumed_at), do: {:state_error, :successor_invalid}
 
   defp classify_unconsumed_successor(child, nil, nil, opts) do
-    if child.expires_at > NumericDate.now(opts), do: :live, else: {:state_error, :successor_expired}
+    if child.expires_at > NumericDate.now(opts),
+      do: {:live, child.expires_at},
+      else: {:state_error, :successor_expired}
   end
 
   defp classify_unconsumed_successor(_child, _consumed_at, _successor, _opts), do: {:state_error, :successor_invalid}
@@ -414,6 +443,7 @@ defmodule Attesto.RefreshToken do
     with :ok <- check_client(record.data, opts),
          :ok <- check_expiry(record, opts),
          :ok <- check_dpop(record.data, opts),
+         :ok <- check_attestation(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
          {:ok, resource} <- resolve_resource(record.data, opts) do
       rotate_successor(store, record, scope, resource, opts)
@@ -598,13 +628,13 @@ defmodule Attesto.RefreshToken do
       family_id: family_id,
       generation: generation,
       data: data,
-      expires_at: NumericDate.now(opts) + ttl,
+      expires_at: capped_expiry(data, NumericDate.now(opts) + ttl),
       consumed: false,
       consumed_at: nil,
       successor: nil
     }
 
-    {%{token: token, family_id: family_id, generation: generation}, record}
+    {%{token: token, family_id: family_id, generation: generation, expires_at: record.expires_at}, record}
   end
 
   defp rotated_successfully(issued, successor_data) do
@@ -613,6 +643,7 @@ defmodule Attesto.RefreshToken do
        token: issued.token,
        family_id: issued.family_id,
        generation: issued.generation,
+       expires_at: issued.expires_at,
        context: successor_data
      }}
   end
@@ -782,7 +813,7 @@ defmodule Attesto.RefreshToken do
       non_empty_binary?(Map.get(record, :family_id)) and
       is_integer(Map.get(record, :generation)) and Map.get(record, :generation) >= 0 and
       valid_stored_context?(Map.get(record, :data)) and is_integer(Map.get(record, :expires_at)) and
-      is_boolean(Map.get(record, :consumed))
+      valid_family_expiry?(record) and is_boolean(Map.get(record, :consumed))
   end
 
   # A malformed record must not be allowed to name an arbitrary family for
@@ -831,14 +862,18 @@ defmodule Attesto.RefreshToken do
       non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
       valid_optional_client_id?(client_id) and
       valid_optional_jkt?(dpop_jkt) and Claims.portable_json_object?(claims) and
-      valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time)
+      valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time) and
+      valid_stored_attestation?(context) and
+      valid_family_deadline?(context)
   end
 
   defp valid_stored_context?(_malformed), do: false
 
-  defp exact_context_keys?(context),
-    do:
-      map_size(context) == length(@stored_context_keys) and Enum.all?(@stored_context_keys, &Map.has_key?(context, &1))
+  defp exact_context_keys?(context) do
+    keys = @stored_context_keys ++ Enum.filter([:family_expires_at, :attestation_jkt], &Map.has_key?(context, &1))
+
+    map_size(context) == length(keys) and Enum.all?(keys, &Map.has_key?(context, &1))
+  end
 
   defp retry_window(record, opts) do
     grace = Keyword.fetch!(opts, :rotation_grace_seconds)
@@ -926,6 +961,7 @@ defmodule Attesto.RefreshToken do
 
   defp validate_issue_options!(opts) do
     _ttl = ttl_seconds!(opts)
+    _family_ttl = family_ttl_seconds!(opts)
     _now = refresh_now!(opts)
 
     if Keyword.has_key?(opts, :family_id) or Keyword.has_key?(opts, :generation) do
@@ -935,6 +971,34 @@ defmodule Attesto.RefreshToken do
 
     :ok
   end
+
+  defp family_ttl_seconds!(opts) do
+    case Keyword.get(opts, :family_ttl) do
+      nil -> nil
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _invalid -> raise ArgumentError, ":family_ttl must be a positive integer or nil"
+    end
+  end
+
+  defp put_family_deadline(data, opts) do
+    case family_ttl_seconds!(opts) do
+      nil -> data
+      ttl -> Map.put(data, :family_expires_at, refresh_now!(opts) + ttl)
+    end
+  end
+
+  defp capped_expiry(%{family_expires_at: deadline}, expires_at), do: min(deadline, expires_at)
+  defp capped_expiry(_data, expires_at), do: expires_at
+
+  defp valid_family_deadline?(context) do
+    case Map.fetch(context, :family_expires_at) do
+      :error -> true
+      {:ok, deadline} -> is_integer(deadline) and deadline >= 0
+    end
+  end
+
+  defp valid_family_expiry?(%{data: %{family_expires_at: deadline}, expires_at: expires_at}), do: expires_at <= deadline
+  defp valid_family_expiry?(_record), do: true
 
   defp ttl_seconds!(opts) do
     case Keyword.get(opts, :ttl, @default_ttl_seconds) do
@@ -983,9 +1047,12 @@ defmodule Attesto.RefreshToken do
 
   defp valid_successor_context?(context, parent) do
     valid_stored_context?(context) and
-      Enum.all?([:subject, :client_id, :dpop_jkt, :acr, :auth_time, :claims], fn key ->
-        Map.get(context, key) == Map.get(parent, key)
-      end) and authorization_subset?(context.scope, parent.scope) and
+      Enum.all?(
+        [:subject, :client_id, :dpop_jkt, :attestation_jkt, :acr, :auth_time, :claims, :family_expires_at],
+        fn key ->
+          Map.fetch(context, key) == Map.fetch(parent, key)
+        end
+      ) and authorization_subset?(context.scope, parent.scope) and
       authorization_subset?(context.resource, parent.resource)
   end
 
@@ -1021,6 +1088,7 @@ defmodule Attesto.RefreshToken do
   defp validate_supplemental_context(context, dpop_jkt) do
     cond do
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
+      not valid_optional_jkt?(Map.get(context, :attestation_jkt)) -> {:error, :invalid_attestation_jkt}
       not Claims.portable_json_object?(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
       not valid_optional_acr?(Map.get(context, :acr)) -> {:error, :invalid_acr}
       not valid_optional_auth_time?(Map.get(context, :auth_time)) -> {:error, :invalid_auth_time}
@@ -1044,6 +1112,17 @@ defmodule Attesto.RefreshToken do
       auth_time: Map.get(context, :auth_time),
       claims: Map.get(context, :claims, %{})
     }
+    |> put_attestation_binding(Map.get(context, :attestation_jkt))
+  end
+
+  defp put_attestation_binding(data, nil), do: data
+  defp put_attestation_binding(data, thumbprint), do: Map.put(data, :attestation_jkt, thumbprint)
+
+  defp valid_stored_attestation?(context) do
+    case Map.fetch(context, :attestation_jkt) do
+      :error -> true
+      {:ok, thumbprint} -> Thumbprint.valid?(thumbprint)
+    end
   end
 
   defp valid_optional_acr?(nil), do: true
@@ -1072,6 +1151,20 @@ defmodule Attesto.RefreshToken do
       nil -> :ok
       _ -> {:error, :dpop_proof_unexpected}
     end
+  end
+
+  defp check_attestation(%{attestation_jkt: bound}, opts) do
+    case Keyword.get(opts, :attestation_jkt) do
+      nil -> {:error, :attestation_proof_required}
+      ^bound -> :ok
+      _ -> {:error, :attestation_binding_mismatch}
+    end
+  end
+
+  defp check_attestation(_data, opts) do
+    if is_nil(Keyword.get(opts, :attestation_jkt)),
+      do: :ok,
+      else: {:error, :attestation_proof_unexpected}
   end
 
   # ----- helpers -----

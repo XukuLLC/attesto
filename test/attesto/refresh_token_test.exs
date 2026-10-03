@@ -141,9 +141,104 @@ defmodule Attesto.RefreshTokenTest do
     Map.merge(%{subject: "usr_42", scope: ["documents.read"]}, overrides)
   end
 
+  test "attested refresh binding is independent of DPoP and survives capped retries" do
+    instance = jkt("client-instance")
+    dpop = jkt("independent-dpop")
+
+    assert {:ok, initial} =
+             RefreshToken.issue(ETS, context(%{attestation_jkt: instance, dpop_jkt: dpop}),
+               now: 1_000,
+               ttl: 100,
+               family_ttl: 150
+             )
+
+    assert {:error, :attestation_proof_required} = RefreshToken.rotate(ETS, initial.token, dpop_jkt: dpop, now: 1_010)
+
+    assert {:error, :attestation_binding_mismatch} =
+             RefreshToken.rotate(ETS, initial.token, attestation_jkt: jkt("other-instance"), dpop_jkt: dpop, now: 1_010)
+
+    assert {:ok, %{consumed: false}} = ETS.get(Secret.hash(initial.token))
+
+    opts = [attestation_jkt: instance, dpop_jkt: dpop, now: 1_010, ttl: 1_000]
+    assert {:ok, child} = RefreshToken.rotate(ETS, initial.token, opts)
+    assert child.context.attestation_jkt == instance
+    assert child.context.dpop_jkt == dpop
+    assert child.context.family_expires_at == 1_150
+    assert child.expires_at == 1_150
+    assert {:ok, ^child} = RefreshToken.rotate(ETS, initial.token, Keyword.put(opts, :now, 1_011))
+
+    assert {:error, :reuse_detected} =
+             RefreshToken.rotate(ETS, initial.token, Keyword.put(opts, :attestation_jkt, jkt("other-instance")))
+
+    assert {:error, :invalid_grant} = RefreshToken.rotate(ETS, child.token, opts)
+  end
+
+  test "attestation binding validates canonical thumbprints without widening legacy families" do
+    assert {:error, :invalid_attestation_jkt} = RefreshToken.issue(ETS, context(%{attestation_jkt: "bad"}))
+    assert {:ok, legacy} = RefreshToken.issue(ETS, context(), now: 1_000)
+    assert {:ok, stored} = ETS.get(Secret.hash(legacy.token))
+    refute Map.has_key?(stored.data, :attestation_jkt)
+
+    assert {:error, :attestation_proof_unexpected} =
+             RefreshToken.rotate(ETS, legacy.token, attestation_jkt: jkt("instance"), now: 1_001)
+
+    assert {:ok, _} = RefreshToken.rotate(ETS, legacy.token, now: 1_001)
+  end
+
+  test "cached successor attestation binding cannot be erased or replaced" do
+    instance = jkt("instance")
+
+    for mutate <- [&Map.delete(&1, :attestation_jkt), &Map.put(&1, :attestation_jkt, jkt("other-instance"))] do
+      :ok = ETS.reset()
+      assert {:ok, initial} = RefreshToken.issue(ETS, context(%{attestation_jkt: instance}), now: 1_000)
+      opts = [attestation_jkt: instance, now: 1_001]
+      assert {:ok, child} = RefreshToken.rotate(ETS, initial.token, opts)
+
+      Process.put({MalformedContextStore, :mutator}, fn record ->
+        Map.update!(record, :successor, fn successor -> Map.update!(successor, :context, mutate) end)
+      end)
+
+      try do
+        assert {:error, :grant_revoked} = RefreshToken.rotate(MalformedContextStore, initial.token, opts)
+      after
+        Process.delete({MalformedContextStore, :mutator})
+      end
+
+      assert :error = ETS.get(Secret.hash(child.token))
+    end
+  end
+
   @max_exact_integer 9_007_199_254_740_991
 
   describe "issue/3" do
+    test "a fixed family lifetime caps issuance and every rotation" do
+      assert {:ok, initial} = RefreshToken.issue(ETS, context(), now: 1_000, ttl: 100, family_ttl: 150)
+      assert initial.expires_at == 1_100
+
+      assert {:ok, first} = RefreshToken.rotate(ETS, initial.token, now: 1_090, ttl: 100)
+      assert first.expires_at == 1_150
+      assert first.context.family_expires_at == 1_150
+
+      assert {:ok, last} = RefreshToken.rotate(ETS, first.token, now: 1_149, ttl: 10_000)
+      assert last.expires_at == 1_150
+      assert last.context.family_expires_at == 1_150
+
+      assert {:ok, retry} = RefreshToken.rotate(ETS, first.token, now: 1_149, ttl: 20_000)
+      assert retry == last
+      assert {:error, :expired} = RefreshToken.rotate(ETS, last.token, now: 1_150)
+      assert {:ok, %{consumed: false}} = ETS.get(Secret.hash(last.token))
+    end
+
+    test "a short family lifetime caps the first token and validates its option" do
+      assert {:ok, %{expires_at: 1_010}} = RefreshToken.issue(ETS, context(), now: 1_000, ttl: 100, family_ttl: 10)
+
+      for invalid <- [0, -1, 1.5, "60", false] do
+        assert_raise ArgumentError, ~r/:family_ttl must be a positive integer or nil/, fn ->
+          RefreshToken.issue(ETS, context(), family_ttl: invalid)
+        end
+      end
+    end
+
     test "success returns a token, a family_id, and generation 0" do
       assert {:ok, %{token: token, family_id: family_id, generation: 0}} =
                RefreshToken.issue(RefreshStore.ETS, context())
@@ -288,6 +383,8 @@ defmodule Attesto.RefreshTokenTest do
         {:resource, {:private_resource_sentinel}},
         {:client_id, ""},
         {:dpop_jkt, "private-jkt-sentinel"},
+        {:attestation_jkt, nil},
+        {:attestation_jkt, "private-attestation-sentinel"},
         {:acr, ""},
         {:auth_time, -1},
         {:claims, [:private_claims_sentinel]},

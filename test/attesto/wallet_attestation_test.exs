@@ -121,6 +121,37 @@ defmodule Attesto.WalletAttestationTest do
              ])
   end
 
+  test "a malformed exp cannot be mistaken for a request to refresh the attestation" do
+    provider = ec_key()
+    instance = ec_key()
+    opts = [trusted_wallet_provider_jwks: trusted(provider)] ++ verify_opts()
+
+    for invalid_exp <- [nil, "expired", %{}] do
+      att = attestation(provider, public_map(instance), %{"exp" => invalid_exp})
+      assert {:error, :invalid_attestation} = WalletAttestation.verify(att, pop(instance), opts)
+    end
+  end
+
+  test "optional attestation iat must be a NumericDate when present" do
+    provider = ec_key()
+    instance = ec_key()
+    opts = [trusted_wallet_provider_jwks: trusted(provider)] ++ verify_opts()
+    valid = attestation(provider, public_map(instance))
+    assert {:ok, _} = WalletAttestation.verify(valid, pop(instance), opts)
+
+    # Omitting this optional claim remains valid; explicitly supplying null
+    # or another non-NumericDate value does not count as omission.
+    header = valid |> JOSE.JWS.peek_protected() |> JSON.decode!()
+    claims = valid |> JOSE.JWS.peek_payload() |> JSON.decode!() |> Map.delete("iat")
+    omitted = sign(provider, header, claims)
+    assert {:ok, _} = WalletAttestation.verify(omitted, pop(instance), opts)
+
+    for invalid <- [nil, false, "issued", %{}, [], 1.5] do
+      invalid_attestation = attestation(provider, public_map(instance), %{"iat" => invalid})
+      assert {:error, :invalid_attestation} = WalletAttestation.verify(invalid_attestation, pop(instance), opts)
+    end
+  end
+
   test "rejects a PoP JWT with the wrong audience" do
     wallet_provider = ec_key()
     instance = ec_key()
@@ -161,6 +192,21 @@ defmodule Attesto.WalletAttestationTest do
              ])
   end
 
+  test "honors optional PoP expiry and not-before even when iat is fresh" do
+    provider = ec_key()
+    instance = ec_key()
+    att = attestation(provider, public_map(instance))
+    opts = [trusted_wallet_provider_jwks: trusted(provider)] ++ verify_opts()
+
+    assert {:error, :pop_expired} = WalletAttestation.verify(att, pop(instance, %{"exp" => @now - 1}), opts)
+    assert {:error, :invalid_pop} = WalletAttestation.verify(att, pop(instance, %{"nbf" => @now + 1}), opts)
+    assert {:ok, _} = WalletAttestation.verify(att, pop(instance, %{"exp" => @now + 1, "nbf" => @now}), opts)
+
+    for claim <- [%{"exp" => nil}, %{"nbf" => "now"}, %{"challenge" => ["challenge"]}] do
+      assert {:error, :invalid_pop} = WalletAttestation.verify(att, pop(instance, claim), opts)
+    end
+  end
+
   test "rejects a PoP JWT whose iat is unreasonably in the future" do
     wallet_provider = ec_key()
     instance = ec_key()
@@ -185,6 +231,22 @@ defmodule Attesto.WalletAttestationTest do
     assert {:error, :invalid_client_id} = WalletAttestation.verify(att, pop_jwt, opts)
   end
 
+  test "requires a nonempty attestation sub and honors its JWT not-before claim" do
+    provider = ec_key()
+    instance = ec_key()
+    opts = [trusted_wallet_provider_jwks: trusted(provider)] ++ verify_opts()
+
+    for invalid_sub <- [nil, "", 42] do
+      att = attestation(provider, public_map(instance), %{"sub" => invalid_sub})
+      assert {:error, :invalid_client_id} = WalletAttestation.verify(att, pop(instance), opts)
+    end
+
+    future = attestation(provider, public_map(instance), %{"nbf" => @now + 1})
+    assert {:error, :invalid_attestation} = WalletAttestation.verify(future, pop(instance), opts)
+    live = attestation(provider, public_map(instance), %{"nbf" => @now})
+    assert {:ok, _} = WalletAttestation.verify(live, pop(instance), opts)
+  end
+
   test "matches an expected challenge and rejects a mismatched one" do
     wallet_provider = ec_key()
     instance = ec_key()
@@ -200,6 +262,31 @@ defmodule Attesto.WalletAttestationTest do
     assert {:ok, _} = WalletAttestation.verify(att, good_pop, opts)
     assert {:error, :invalid_pop_challenge} = WalletAttestation.verify(att, bad_pop, opts)
     assert {:error, :invalid_pop_challenge} = WalletAttestation.verify(att, missing_pop, opts)
+  end
+
+  test "checks a server-issued challenge only after authenticating the proof" do
+    provider = ec_key()
+    instance = ec_key()
+    att = attestation(provider, public_map(instance))
+    owner = self()
+
+    check = fn challenge ->
+      send(owner, {:challenge_checked, challenge})
+      if challenge == "live-challenge", do: :ok, else: {:error, :invalid_pop_challenge}
+    end
+
+    opts = [trusted_wallet_provider_jwks: trusted(provider), challenge_check: check] ++ verify_opts()
+
+    assert {:ok, _} = WalletAttestation.verify(att, pop(instance, %{"challenge" => "live-challenge"}), opts)
+    assert_received {:challenge_checked, "live-challenge"}
+
+    for claims <- [%{}, %{"challenge" => "expired-challenge"}] do
+      assert {:error, :invalid_pop_challenge} = WalletAttestation.verify(att, pop(instance, claims), opts)
+      assert_received {:challenge_checked, _}
+    end
+
+    assert {:error, :invalid_pop_signature} = WalletAttestation.verify(att, pop(ec_key()), opts)
+    refute_received {:challenge_checked, _}
   end
 
   test "rejects a cnf key that carries private material" do

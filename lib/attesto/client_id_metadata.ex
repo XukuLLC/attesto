@@ -1,7 +1,7 @@
 defmodule Attesto.ClientIdMetadata do
   @moduledoc """
   Client ID Metadata Documents - CIMD
-  (`draft-ietf-oauth-client-id-metadata-document-01`, IETF OAuth WG).
+  (`draft-ietf-oauth-client-id-metadata-document-02`, IETF OAuth WG).
 
   CIMD lets a client identify itself with no prior registration by using an
   HTTPS URL as its `client_id`. The authorization server dereferences that URL
@@ -47,9 +47,14 @@ defmodule Attesto.ClientIdMetadata do
       (`{:error, :symmetric_auth_method}`) - a CIMD client authenticates as a
       public client (`none` + PKCE) or with `private_key_jwt`.
 
-  RFC 9700 requires registered redirect URIs, so a CIMD document MUST carry a
-  non-empty `redirect_uris` array of strings
-  (`{:error, :invalid_redirect_uris}` otherwise).
+  Authorization-code and implicit grants require a non-empty `redirect_uris`
+  array of strings. A document explicitly declaring only grants that do not
+  redirect, such as `client_credentials`, may omit it; normalization supplies
+  an empty list. A missing `grant_types` retains the RFC 7591 default of
+  `authorization_code` and therefore still requires redirect URIs.
+
+  An inline JWK Set must contain public asymmetric keys only. Private JWK
+  members and symmetric keys yield `{:error, :private_key_material}`.
 
   ## Normalized client shape
 
@@ -84,6 +89,9 @@ defmodule Attesto.ClientIdMetadata do
     {"grant_types", :string_array},
     {"response_types", :string_array},
     {"contacts", :string_array},
+    {"client_attestation_signing_alg_values_supported", :attestation_algs},
+    {"client_attestation_pop_signing_alg_values_supported", :attestation_pop_algs},
+    {"client_attestation_pop_methods_supported", :capability_strings},
     {"scope", :string},
     {"client_name", :string},
     {"client_uri", :string},
@@ -113,6 +121,7 @@ defmodule Attesto.ClientIdMetadata do
           | :symmetric_auth_method
           | :invalid_redirect_uris
           | :invalid_metadata
+          | :private_key_material
 
   @doc """
   Returns `true` iff `value` is a CIMD `client_id`: a binary that parses as an
@@ -133,7 +142,7 @@ defmodule Attesto.ClientIdMetadata do
 
   @doc """
   Validate a `client_id` against the CIMD URL grammar
-  (`draft-ietf-oauth-client-id-metadata-document-01` §2).
+  (`draft-ietf-oauth-client-id-metadata-document-02` §2).
 
   Returns `{:ok, %URI{}}` for a well-formed CIMD `client_id`, or
   `{:error, reason}` for the first rule it violates:
@@ -224,6 +233,7 @@ defmodule Attesto.ClientIdMetadata do
     with :ok <- validate_document_client_id(client_id, doc),
          :ok <- reject_symmetric_secret(doc),
          :ok <- reject_symmetric_auth_method(doc),
+         :ok <- validate_document_keys(doc),
          {:ok, redirect_uris} <- validate_redirect_uris(doc),
          {:ok, passthrough} <- normalize_passthrough(doc) do
       metadata =
@@ -265,9 +275,39 @@ defmodule Attesto.ClientIdMetadata do
     end
   end
 
-  # RFC 9700: the AS MUST require registered redirect URIs and exact-match the
-  # request's, so a CIMD document MUST carry a non-empty `redirect_uris` array
-  # of strings. An absent, empty, or non-string-list value is rejected.
+  @private_jwk_members ~w(d p q dp dq qi oth k)
+
+  @doc """
+  Check CIMD verification keys for private or symmetric key material.
+
+  Applies draft 02 §4.1 to embedded `jwks` and to a fetched `jwks_uri` response.
+  Unknown public key types are retained; consumers select usable keys separately.
+  """
+  @spec validate_public_jwks(term()) :: :ok | {:error, :private_key_material | :invalid_metadata}
+  def validate_public_jwks(%{"keys" => keys}) when is_list(keys) do
+    Enum.reduce_while(keys, :ok, fn
+      key, :ok when is_map(key) and not is_struct(key) ->
+        if key["kty"] == "oct" or Enum.any?(@private_jwk_members, &Map.has_key?(key, &1)),
+          do: {:halt, {:error, :private_key_material}},
+          else: {:cont, :ok}
+
+      _, :ok ->
+        {:halt, {:error, :invalid_metadata}}
+    end)
+  end
+
+  def validate_public_jwks(_), do: {:error, :invalid_metadata}
+
+  defp validate_document_keys(doc) do
+    case Map.fetch(doc, "jwks") do
+      :error -> :ok
+      {:ok, jwks} -> validate_public_jwks(jwks)
+    end
+  end
+
+  # RFC 9700 and CIMD draft 02 §4.2 require registered redirect URIs for
+  # redirecting grants. An explicit catalog of non-redirecting grants can
+  # omit them; any supplied URI must still be unambiguous.
   #
   # Each URI must also be one every URL parser reads the same way
   # (`Attesto.RedirectURI.unambiguous?/1`). A CIMD document is fetched from a
@@ -287,10 +327,23 @@ defmodule Attesto.ClientIdMetadata do
           {:error, :invalid_redirect_uris}
         end
 
+      uris when uris in [nil, []] ->
+        if redirect_free_grants?(doc),
+          do: {:ok, []},
+          else: {:error, :invalid_redirect_uris}
+
       _ ->
         {:error, :invalid_redirect_uris}
     end
   end
+
+  # Missing grant_types defaults to authorization_code (RFC 7591 §2). Only an
+  # explicit grant catalog without browser redirection can omit redirect URIs.
+  defp redirect_free_grants?(%{"grant_types" => [_ | _] = grants}) do
+    Enum.all?(grants, &(is_binary(&1) and &1 != "" and &1 not in ~w(authorization_code implicit)))
+  end
+
+  defp redirect_free_grants?(_), do: false
 
   # RFC 7591 §2: carry through the KNOWN client-metadata members the document
   # supplied, each validated against the shape it must satisfy. An absent member
@@ -307,6 +360,13 @@ defmodule Attesto.ClientIdMetadata do
     end)
   end
 
+  defp normalize_member(doc, key, kind) when kind in [:attestation_algs, :attestation_pop_algs, :capability_strings] do
+    case Map.fetch(doc, key) do
+      :error -> :absent
+      {:ok, value} -> normalize_value(kind, value)
+    end
+  end
+
   defp normalize_member(doc, key, kind) do
     case Map.get(doc, key) do
       nil -> :absent
@@ -320,6 +380,20 @@ defmodule Attesto.ClientIdMetadata do
 
   defp normalize_value(:string_array, value) when is_list(value) do
     if Enum.all?(value, &is_binary/1), do: {:ok, value}, else: :error
+  end
+
+  defp normalize_value(kind, value)
+       when kind in [:attestation_algs, :attestation_pop_algs, :capability_strings] and is_list(value) do
+    prohibited =
+      case kind do
+        :attestation_algs -> ["none"]
+        :attestation_pop_algs -> ["none", "HS256", "HS384", "HS512"]
+        :capability_strings -> []
+      end
+
+    if Enum.all?(value, &(is_binary(&1) and &1 != "" and &1 not in prohibited)),
+      do: {:ok, value},
+      else: :error
   end
 
   defp normalize_value(_kind, _value), do: :error

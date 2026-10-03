@@ -330,7 +330,7 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
 
 **Selective disclosure**
 
-- `Attesto.SdJwt` — SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`): issue
+- `Attesto.SdJwt` — SD-JWT (RFC 9901): issue
   with per-claim disclosures, recursive verify (nested `_sd` + array element
   digests, unused/duplicate-disclosure rejection), and Key Binding JWT
   verification (nonce / audience / `sd_hash`).
@@ -448,7 +448,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 7662 | OAuth 2.0 Token Introspection | Core primitive |
 | RFC 9701 | JWT Response for OAuth Token Introspection | Core primitive |
 | FAPI 2.0 Message Signing | JAR/JARM/signed introspection primitives | Core primitives |
-| SD-JWT (`draft-ietf-oauth-selective-disclosure-jwt`) | Selective Disclosure JWT (issue + recursive verify + KB-JWT) | Supported (`Attesto.SdJwt`) |
+| SD-JWT (RFC 9901) | Selective Disclosure JWT (issue + recursive verify + KB-JWT) | Supported (`Attesto.SdJwt`) |
 | SD-JWT VC (`draft-ietf-oauth-sd-jwt-vc`) | SD-JWT-based Verifiable Credentials (`vc+sd-jwt`/`dc+sd-jwt`) | Supported (`Attesto.SdJwtVc`) |
 | W3C VC Data Model 1.1 / OID4VCI `jwt_vc_json` | W3C Verifiable Credentials signed as compact JWTs | Supported (`Attesto.JwtVc`) |
 | OpenID4VCI 1.0 | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
@@ -546,6 +546,22 @@ these signals in traffic that is simply what a healthy authorization server
 looks like.
 
 ## Cluster safety
+
+Refresh issuance accepts `family_ttl: seconds` in addition to the inactivity
+`ttl`. The resulting optional canonical-context `family_expires_at` deadline
+caps the initial token and every successor, including lost-response retries,
+as required for preestablished refresh expiry by
+[RFC 10017 §6.3.2.3](https://www.rfc-editor.org/rfc/rfc10017.html#section-6.3.2.3).
+Stores must preserve this key and value exactly. Existing families without it
+retain their inactivity policy. Issue and rotation results expose the actual
+absolute `expires_at` for applications that communicate credential expiry.
+
+An attested client can additionally issue a family with canonical-context
+`attestation_jkt`, the verified Client Instance Key thumbprint, and must pass
+the same thumbprint as a rotation option. This is independent of `dpop_jkt`.
+Stores must preserve both the presence and value of the binding. An unbound
+legacy family cannot acquire this binding during refresh; authorize again to
+establish it from the initial verified attestation.
 
 The engine is pure and stateless, so it is **cluster-safe by
 construction**: the same token/proof verifies to the same result on any

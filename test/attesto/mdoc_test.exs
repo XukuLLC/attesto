@@ -120,6 +120,65 @@ defmodule Attesto.MdocTest do
     assert {:error, :not_yet_valid} = Mdoc.verify(future, ctx.issuer_public, now: ctx.now)
   end
 
+  test "issuance rejects invalid MSO timestamp ordering", ctx do
+    for validity <- invalid_validities(ctx.now) do
+      assert {:error, :invalid_options} = Mdoc.issue(Keyword.put(ctx.opts, :validity, validity))
+    end
+  end
+
+  test "verification rejects correctly signed MSOs with invalid timestamp ordering", ctx do
+    assert {:ok, issued} = Mdoc.issue(ctx.opts)
+
+    for validity <- invalid_validities(ctx.now) do
+      issuer_signed = issued |> Base.url_decode64!(padding: false) |> decode!()
+      {:ok, mso_payload} = Cose.verify1(CBOR.encode(issuer_signed["issuerAuth"]), ctx.issuer_public, [])
+      %CBOR.Tag{tag: 24, value: %CBOR.Tag{tag: :bytes, value: encoded_mso}} = decode!(mso_payload)
+      mso = decode!(encoded_mso)
+
+      validity_info = %{
+        "signed" => datetime(validity.signed),
+        "validFrom" => datetime(validity.valid_from),
+        "validUntil" => datetime(validity.valid_until)
+      }
+
+      changed_payload =
+        %CBOR.Tag{
+          tag: 24,
+          value: bytes(CBOR.encode(Map.put(mso, "validityInfo", validity_info)))
+        }
+        |> CBOR.encode()
+
+      changed_issuer_auth = Cose.sign1(ctx.issuer_pem, changed_payload, [])
+      assert {:ok, ^changed_payload} = Cose.verify1(changed_issuer_auth, ctx.issuer_public, [])
+
+      nonconforming =
+        issuer_signed
+        |> Map.put("issuerAuth", decode!(changed_issuer_auth))
+        |> CBOR.encode()
+
+      assert {:error, :invalid_mdoc} = Mdoc.verify(nonconforming, ctx.issuer_public, now: ctx.now)
+    end
+  end
+
+  test "a validity period beginning at the signing time remains valid", ctx do
+    validity = %{signed: ctx.now, valid_from: ctx.now, valid_until: ctx.now + 3600}
+    assert {:ok, issued} = Mdoc.issue(Keyword.put(ctx.opts, :validity, validity))
+    assert {:ok, verified} = Mdoc.verify(issued, ctx.issuer_public, now: ctx.now)
+    assert verified.validity == validity
+  end
+
+  defp invalid_validities(now) do
+    [
+      %{signed: now + 1, valid_from: now, valid_until: now + 3600},
+      %{signed: now - 10, valid_from: now, valid_until: now},
+      %{signed: now - 10, valid_from: now + 1, valid_until: now}
+    ]
+  end
+
+  defp datetime(unix_seconds) do
+    %CBOR.Tag{tag: 0, value: unix_seconds |> DateTime.from_unix!(:second) |> DateTime.to_iso8601()}
+  end
+
   test "expected_doc_type rejects a different document type", ctx do
     assert {:ok, issued} = Mdoc.issue(ctx.opts)
 

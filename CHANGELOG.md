@@ -6,6 +6,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Update CIMD to draft 02: accept explicitly nonredirecting grant profiles and
+  reject private or symmetric keys in public client JWKS documents.
+- Add optional absolute refresh-token family deadlines that remain fixed across
+  rotation and grace retries, alongside the existing inactivity expiration.
+- Apply client-attestation draft 11 Challenge and JWT time-claim rules.
+- Preserve optional refresh-family `attestation_jkt` bindings through atomic
+  rotation and grace retries; reject missing or changed instance keys.
+- Include the signing key ID in signed credential issuer metadata's public JWK.
+- Preserve required mdoc `doctype` metadata and accept its integer COSE signing
+  algorithm identifiers, while retaining JOSE names for JWT credential formats.
+- Reject invalid mdoc validity ordering during issuance and verification:
+  `signed <= valid_from < valid_until`.
+- Support OID4VCI 1.0 nested `credential_metadata`, preserving ordered claim
+  paths, display properties, and JSON extensions. Validate current metadata
+  while retaining legacy top-level inputs for 2.x callers.
+- Cite SD-JWT RFC 9901 and document the RFC 10017 and RFC 10027 host policies.
+
 ## [2.1.0] - 2026-09-11
 
 ### Changed

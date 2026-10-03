@@ -267,6 +267,8 @@ defmodule Attesto.RefreshStore.ETS do
       valid_child_state?(child) and
       valid_child_lifetime?(child, now) and
       valid_child_context?(child, successor) and
+      valid_attestation_binding?(parent, child) and
+      valid_family_deadline?(parent, child) and
       valid_successor_state?(successor, child, now)
   end
 
@@ -292,6 +294,30 @@ defmodule Attesto.RefreshStore.ETS do
   defp valid_child_context?(child, successor) do
     child_data = Map.get(child, :data)
     is_map(child_data) and child_data == successor_context(successor, child_data)
+  end
+
+  defp valid_family_deadline?(parent, child) do
+    parent_data = Map.get(parent, :data, %{})
+    child_data = Map.get(child, :data, %{})
+
+    is_map(parent_data) and
+      Map.fetch(parent_data, :family_expires_at) == Map.fetch(child_data, :family_expires_at) and
+      case Map.fetch(child_data, :family_expires_at) do
+        :error -> true
+        {:ok, deadline} -> is_integer(deadline) and child.expires_at <= deadline
+      end
+  end
+
+  defp valid_attestation_binding?(parent, child) do
+    parent_data = Map.get(parent, :data, %{})
+    child_data = Map.get(child, :data, %{})
+
+    is_map(parent_data) and
+      Map.fetch(parent_data, :attestation_jkt) == Map.fetch(child_data, :attestation_jkt) and
+      case Map.fetch(child_data, :attestation_jkt) do
+        :error -> true
+        {:ok, thumbprint} -> Attesto.Thumbprint.valid?(thumbprint)
+      end
   end
 
   defp successor_context(%{context: context}, _default), do: context

@@ -76,6 +76,54 @@ defmodule Attesto.RefreshStore.ETSTest do
     assert reused.successor == retry
   end
 
+  test "a direct rotation cannot erase or extend an immutable family deadline" do
+    data = %{subject: "usr_42", scope: ["documents.read"], family_expires_at: 1_200}
+    rec = record("bounded-parent", data: data, expires_at: 1_100)
+    assert :ok = ETS.insert(rec)
+
+    for {candidate_data, expiry} <- [
+          {Map.delete(data, :family_expires_at), 1_200},
+          {%{data | family_expires_at: 1_300}, 1_200},
+          {data, 1_201}
+        ] do
+      candidate = child("bounded-child", data: candidate_data, expires_at: expiry)
+
+      assert {:error, :invalid_rotation} =
+               ETS.rotate(rec.token_hash, candidate, successor("bounded-child", candidate), now: 1_000)
+
+      assert {:ok, ^rec} = ETS.get(rec.token_hash)
+    end
+  end
+
+  test "direct atomic rotations cannot erase, change, or introduce an attestation binding" do
+    thumbprint = Secret.hash("instance")
+    data = %{subject: "usr_42", scope: ["documents.read"], attestation_jkt: thumbprint}
+    rec = record("attested-parent", data: data)
+    assert :ok = ETS.insert(rec)
+
+    for candidate_data <- [
+          Map.delete(data, :attestation_jkt),
+          %{data | attestation_jkt: Secret.hash("other")},
+          %{data | attestation_jkt: nil}
+        ] do
+      candidate = child("attested-child", data: candidate_data)
+
+      assert {:error, :invalid_rotation} =
+               ETS.rotate(rec.token_hash, candidate, successor("attested-child", candidate), now: 1_000)
+
+      assert {:ok, ^rec} = ETS.get(rec.token_hash)
+    end
+
+    legacy = record("legacy-parent", family_id: "legacy-family")
+    assert :ok = ETS.insert(legacy)
+
+    candidate =
+      child("introduced-binding", family_id: legacy.family_id, data: Map.put(legacy.data, :attestation_jkt, thumbprint))
+
+    assert {:error, :invalid_rotation} =
+             ETS.rotate(legacy.token_hash, candidate, successor("introduced-binding", candidate), now: 1_000)
+  end
+
   test "rotate of an absent hash returns :error" do
     candidate = child("tok-never-inserted-child")
 

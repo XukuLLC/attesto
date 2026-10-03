@@ -1,7 +1,7 @@
 defmodule Attesto.WalletAttestation do
   @moduledoc """
   OAuth 2.0 Attestation-Based Client Authentication
-  (`draft-ietf-oauth-attestation-based-client-auth-10`, 2026-07-06), the
+  (`draft-ietf-oauth-attestation-based-client-auth-11`, 2026-09-03), the
   "Wallet Attestation" client authentication method OID4VCI recommends for
   native-app Wallets in place of `private_key_jwt`/mTLS.
 
@@ -25,7 +25,7 @@ defmodule Attesto.WalletAttestation do
     * `exp` - REQUIRED. Expiration time; rejected once passed.
     * `cnf` - REQUIRED. A `{"jwk" => <public JWK>}` (RFC 7800) confirmation
       key - the Client Instance Key used to sign the PoP JWT.
-    * `iat` - OPTIONAL.
+    * `iat` - OPTIONAL. When present, an integer NumericDate.
 
   The draft version implemented here carries **no `aud`** on the Client
   Attestation JWT itself (earlier drafts did; it was removed) - the
@@ -77,6 +77,7 @@ defmodule Attesto.WalletAttestation do
           | {:audience, String.t()}
           | {:client_id, String.t()}
           | {:expected_challenge, String.t()}
+          | {:challenge_check, (String.t() | nil -> :ok | {:error, :invalid_pop_challenge})}
           | {:now, DateTime.t() | non_neg_integer()}
           | {:max_age_seconds, pos_integer()}
           | {:accepted_algs, [SigningAlg.alg()]}
@@ -130,6 +131,13 @@ defmodule Attesto.WalletAttestation do
       Challenge is a server-issued, non-secret freshness token (visible on
       the wire already), so this is a plain equality check, matching
       `Attesto.CredentialProof`'s `c_nonce` check.
+    * `:challenge_check` - optional 1-arity validator for server-issued
+      Challenges. Receives the verified PoP's `challenge` claim (or `nil`)
+      and returns `:ok` or `{:error, :invalid_pop_challenge}`. This supports
+      rotating or shared-store Challenges without selecting one fixed value
+      before verifying the PoP. When both options are supplied, both checks
+      must pass. Challenge support is optional in draft §6; a server that
+      rejects a Challenge must return a fresh one with its error response.
     * `:now` - clock reference (DateTime or unix seconds).
     * `:max_age_seconds` - how far in the past the PoP's `iat` may be.
       Default #{@default_pop_max_age_seconds}.
@@ -199,7 +207,9 @@ defmodule Attesto.WalletAttestation do
          :ok <- check_typ(header, @attestation_typ, :invalid_typ),
          {:ok, claims} <- verify_attestation_signature(attestation, header, opts),
          :ok <- check_client_id(claims, opts),
+         :ok <- check_attestation_issued_at(claims),
          :ok <- check_attestation_expiry(claims, opts),
+         :ok <- check_attestation_not_before(claims, opts),
          {:ok, jwk_map} <- extract_cnf_jwk_map(claims),
          {:ok, jkt} <- jwk_thumbprint(jwk_map, :invalid_cnf) do
       {:ok, claims, jwk_map, jkt}
@@ -228,19 +238,34 @@ defmodule Attesto.WalletAttestation do
     )
   end
 
-  defp check_client_id(claims, opts) do
+  defp check_client_id(%{"sub" => sub}, opts) when is_binary(sub) and sub != "" do
     case Keyword.get(opts, :client_id) do
       nil -> :ok
-      client_id -> if Map.get(claims, "sub") == client_id, do: :ok, else: {:error, :invalid_client_id}
+      client_id -> if sub == client_id, do: :ok, else: {:error, :invalid_client_id}
     end
   end
+
+  defp check_client_id(_claims, _opts), do: {:error, :invalid_client_id}
 
   defp check_attestation_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
     now = NumericDate.now(opts, invalid_override: :fallback)
     if NumericDate.not_expired?(exp, now, leeway: 0), do: :ok, else: {:error, :expired}
   end
 
-  defp check_attestation_expiry(_claims, _opts), do: {:error, :expired}
+  defp check_attestation_expiry(_claims, _opts), do: {:error, :invalid_attestation}
+
+  defp check_attestation_issued_at(%{"iat" => iat}) when is_integer(iat), do: :ok
+  defp check_attestation_issued_at(%{"iat" => _invalid}), do: {:error, :invalid_attestation}
+  defp check_attestation_issued_at(_claims), do: :ok
+
+  defp check_attestation_not_before(%{"nbf" => nbf}, opts) when is_integer(nbf) do
+    if nbf <= NumericDate.now(opts, invalid_override: :fallback),
+      do: :ok,
+      else: {:error, :invalid_attestation}
+  end
+
+  defp check_attestation_not_before(%{"nbf" => _invalid}, _opts), do: {:error, :invalid_attestation}
+  defp check_attestation_not_before(_claims, _opts), do: :ok
 
   # Structural extraction only - `map()` with entries, nothing more. Whether
   # it is usable key material (not private, alg-compatible) is validated at
@@ -262,7 +287,10 @@ defmodule Attesto.WalletAttestation do
          {:ok, cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg),
          {:ok, claims} <- verify_pop_signature(pop, alg, cnf_jwk),
          :ok <- check_pop_audience(claims, opts),
+         :ok <- check_pop_time_claims(claims, opts),
+         :ok <- check_pop_challenge_type(claims),
          :ok <- check_pop_challenge(claims, opts),
+         :ok <- check_pop_challenge_callback(claims, opts),
          :ok <- check_pop_iat(claims, opts),
          {:ok, jti} <- check_pop_jti(claims),
          replay_key = replay_key(jkt, jti),
@@ -302,6 +330,31 @@ defmodule Attesto.WalletAttestation do
 
   defp check_pop_audience(_claims, _opts), do: {:error, :invalid_pop_audience}
 
+  defp check_pop_time_claims(claims, opts) do
+    now = NumericDate.now(opts, invalid_override: :fallback)
+
+    with :ok <- check_optional_pop_expiry(claims, now),
+         do: check_optional_pop_not_before(claims, now)
+  end
+
+  defp check_optional_pop_expiry(%{"exp" => exp}, now) when is_integer(exp) do
+    if NumericDate.not_expired?(exp, now, leeway: 0), do: :ok, else: {:error, :pop_expired}
+  end
+
+  defp check_optional_pop_expiry(%{"exp" => _invalid}, _now), do: {:error, :invalid_pop}
+  defp check_optional_pop_expiry(_claims, _now), do: :ok
+
+  defp check_optional_pop_not_before(%{"nbf" => nbf}, now) when is_integer(nbf) do
+    if nbf <= now, do: :ok, else: {:error, :invalid_pop}
+  end
+
+  defp check_optional_pop_not_before(%{"nbf" => _invalid}, _now), do: {:error, :invalid_pop}
+  defp check_optional_pop_not_before(_claims, _now), do: :ok
+
+  defp check_pop_challenge_type(%{"challenge" => challenge}) when is_binary(challenge), do: :ok
+  defp check_pop_challenge_type(%{"challenge" => _invalid}), do: {:error, :invalid_pop}
+  defp check_pop_challenge_type(_claims), do: :ok
+
   defp check_pop_challenge(claims, opts) do
     case Keyword.get(opts, :expected_challenge) do
       nil ->
@@ -309,6 +362,23 @@ defmodule Attesto.WalletAttestation do
 
       expected ->
         if Map.get(claims, "challenge") == expected, do: :ok, else: {:error, :invalid_pop_challenge}
+    end
+  end
+
+  defp check_pop_challenge_callback(claims, opts) do
+    case Keyword.get(opts, :challenge_check) do
+      nil ->
+        :ok
+
+      fun when is_function(fun, 1) ->
+        case fun.(Map.get(claims, "challenge")) do
+          :ok -> :ok
+          {:error, :invalid_pop_challenge} = error -> error
+          _other -> raise ArgumentError, ":challenge_check must return :ok or {:error, :invalid_pop_challenge}"
+        end
+
+      _other ->
+        raise ArgumentError, ":challenge_check must be a 1-arity function or nil"
     end
   end
 

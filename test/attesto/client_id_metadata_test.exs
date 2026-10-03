@@ -304,4 +304,65 @@ defmodule Attesto.ClientIdMetadataTest do
                ClientIdMetadata.validate_document(client_id, doc)
     end
   end
+
+  describe "CIMD draft 02 grant and key restrictions" do
+    test "retains draft 11 capability metadata and rejects forbidden signing algorithms" do
+      client_id = "https://app.example/metadata"
+      base = %{"client_id" => client_id, "redirect_uris" => ["https://app.example/cb"]}
+
+      capabilities = %{
+        "client_attestation_signing_alg_values_supported" => ["ES256"],
+        "client_attestation_pop_signing_alg_values_supported" => ["ES256"],
+        "client_attestation_pop_methods_supported" => ["jwt"]
+      }
+
+      assert {:ok, metadata} = ClientIdMetadata.validate_document(client_id, Map.merge(base, capabilities))
+      for {key, value} <- capabilities, do: assert(metadata[key] == value)
+
+      for {key, value} <- [
+            {"client_attestation_signing_alg_values_supported", ["none"]},
+            {"client_attestation_pop_signing_alg_values_supported", ["none"]},
+            {"client_attestation_pop_signing_alg_values_supported", ["HS256"]},
+            {"client_attestation_pop_methods_supported", "jwt"},
+            {"client_attestation_pop_methods_supported", nil}
+          ] do
+        assert {:error, :invalid_metadata} = ClientIdMetadata.validate_document(client_id, Map.put(base, key, value))
+      end
+    end
+
+    test "permits explicitly non-redirecting grants without redirect URIs" do
+      client_id = "https://app.example/metadata"
+
+      for grant <- ["client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"] do
+        doc = %{"client_id" => client_id, "grant_types" => [grant], "token_endpoint_auth_method" => "private_key_jwt"}
+        assert {:ok, metadata} = ClientIdMetadata.validate_document(client_id, doc)
+        assert metadata["redirect_uris"] == []
+      end
+
+      for grants <- [[], ["authorization_code"], ["client_credentials", "authorization_code"], [42]] do
+        assert {:error, :invalid_redirect_uris} =
+                 ClientIdMetadata.validate_document(client_id, %{"client_id" => client_id, "grant_types" => grants})
+      end
+    end
+
+    test "rejects private and symmetric JWK material, including null private members" do
+      client_id = "https://app.example/metadata"
+      base = %{"client_id" => client_id, "redirect_uris" => ["https://app.example/callback"]}
+
+      for key <- [
+            %{"kty" => "EC", "d" => "private"},
+            %{"kty" => "RSA", "p" => nil},
+            %{"kty" => "oct"},
+            %{"kty" => "future", "k" => "secret"}
+          ] do
+        assert {:error, :private_key_material} =
+                 ClientIdMetadata.validate_document(client_id, Map.put(base, "jwks", %{"keys" => [key]}))
+
+        assert {:error, :private_key_material} = ClientIdMetadata.validate_public_jwks(%{"keys" => [key]})
+      end
+
+      assert :ok = ClientIdMetadata.validate_public_jwks(%{"keys" => [%{"kty" => "future-public-key"}]})
+      assert {:error, :invalid_metadata} = ClientIdMetadata.validate_public_jwks(%{"keys" => ["not-a-key"]})
+    end
+  end
 end

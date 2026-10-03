@@ -99,6 +99,17 @@ defmodule Attesto.RefreshStore do
     * `:claims` - a portable, recursively string-keyed object of host context,
       using valid UTF-8 without U+0000 and exact-range integers.
 
+  A family issued with `:family_ttl` additionally carries the optional
+  `:family_expires_at` non-negative Unix second. Its presence and value MUST
+  survive every rotation and encrypted successor round trip unchanged, and
+  no record's `:expires_at` may exceed it. Legacy families without this key
+  continue to use the per-token inactivity timeout.
+
+  An attested client additionally carries an optional `:attestation_jkt`
+  Client Instance Key thumbprint, independently of its DPoP key. Its presence
+  and value MUST survive rotation and successor recovery unchanged. Adapters
+  MUST reject direct rotations that erase, introduce, or change this binding.
+
   The canonical context is also exposed as `stored_context/0` for adapter
   specifications. A positive-grace successor bundle contains the plaintext
   `:token`, matching child `:generation` and `:context`, and a
@@ -117,6 +128,8 @@ defmodule Attesto.RefreshStore do
           required(:dpop_jkt) => String.t() | nil,
           required(:acr) => String.t() | nil,
           required(:auth_time) => non_neg_integer() | nil,
+          optional(:family_expires_at) => non_neg_integer(),
+          optional(:attestation_jkt) => String.t(),
           required(:claims) => map()
         }
 

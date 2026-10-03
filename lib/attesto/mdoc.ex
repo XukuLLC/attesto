@@ -69,6 +69,7 @@ if Code.ensure_loaded?(CBOR) do
     Required options are `:doc_type`, `:namespaces`, `:device_key`,
     `:issuer_pem`, and `:validity`. `:x5chain` optionally carries a list of
     issuer-certificate DER binaries in the COSE unprotected header.
+    Validity must satisfy `signed <= valid_from < valid_until`.
     """
     @spec issue(keyword()) :: {:ok, String.t()} | {:error, :invalid_options}
     def issue(opts) when is_list(opts) do
@@ -434,7 +435,7 @@ if Code.ensure_loaded?(CBOR) do
       with {:ok, signed_unix} <- datetime_to_unix(signed),
            {:ok, valid_from_unix} <- datetime_to_unix(valid_from),
            {:ok, valid_until_unix} <- datetime_to_unix(valid_until),
-           true <- valid_from_unix <= valid_until_unix do
+           true <- signed_unix <= valid_from_unix and valid_from_unix < valid_until_unix do
         {:ok,
          %{
            signed: signed_unix,
@@ -583,12 +584,14 @@ if Code.ensure_loaded?(CBOR) do
     defp validate_namespaces!(_namespaces), do: raise(ArgumentError, ":namespaces must be a map")
 
     defp validate_validity!(%{signed: signed, valid_from: valid_from, valid_until: valid_until})
-         when is_integer(signed) and is_integer(valid_from) and is_integer(valid_until) and valid_from <= valid_until do
+         when is_integer(signed) and is_integer(valid_from) and is_integer(valid_until) and signed <= valid_from and
+                valid_from < valid_until do
       %{signed: signed, valid_from: valid_from, valid_until: valid_until}
     end
 
     defp validate_validity!(_validity) do
-      raise ArgumentError, ":validity must contain integer :signed, :valid_from, and :valid_until values"
+      raise ArgumentError,
+            ":validity must contain integer :signed, :valid_from, and :valid_until values with signed <= valid_from < valid_until"
     end
 
     defp tagged_datetime(unix_seconds) do
