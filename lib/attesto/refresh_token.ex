@@ -859,8 +859,7 @@ defmodule Attesto.RefreshToken do
     # keys must survive a round trip. Host-specific values belong inside
     # `:claims`, so an extra sibling key is a malformed record, not ignored data.
     exact_context_keys?(context) and
-      non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
-      valid_optional_client_id?(client_id) and
+      valid_stored_grant_context?(subject, scope, resource, client_id) and
       valid_optional_jkt?(dpop_jkt) and Claims.portable_json_object?(claims) and
       valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time) and
       valid_stored_attestation?(context) and
@@ -868,6 +867,11 @@ defmodule Attesto.RefreshToken do
   end
 
   defp valid_stored_context?(_malformed), do: false
+
+  defp valid_stored_grant_context?(subject, scope, resource, client_id) do
+    non_empty_binary?(subject) and valid_scope?(scope) and valid_resource?(resource) and
+      valid_optional_client_id?(client_id)
+  end
 
   defp exact_context_keys?(context) do
     keys = @stored_context_keys ++ Enum.filter([:family_expires_at, :attestation_jkt], &Map.has_key?(context, &1))

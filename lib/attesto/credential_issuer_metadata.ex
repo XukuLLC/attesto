@@ -417,45 +417,63 @@ defmodule Attesto.CredentialIssuerMetadata do
   defp metadata_json!(_value, configuration_id), do: metadata_error!(configuration_id, "must contain JSON values")
 
   defp metadata_display!(display, configuration_id, credential?) when is_list(display) and display != [] do
-    Enum.reduce(display, MapSet.new(), fn item, locales ->
-      if not is_map(item), do: metadata_error!(configuration_id, "display must contain objects")
-      if credential?, do: metadata_string!(item, "name", configuration_id, true)
-
-      for key <- ["name", "locale"], do: metadata_string!(item, key, configuration_id, false)
-
-      if credential? do
-        for key <- ["description", "background_color", "text_color"],
-            do: metadata_string!(item, key, configuration_id, false)
-
-        for key <- ["logo", "background_image"], Map.has_key?(item, key) do
-          image = item[key]
-          if not is_map(image), do: metadata_error!(configuration_id, "display #{key} must be an object")
-          metadata_string!(image, "uri", configuration_id, true)
-          metadata_string!(image, "alt_text", configuration_id, false)
-
-          case URI.new(image["uri"]) do
-            {:ok, %URI{scheme: scheme}} when is_binary(scheme) and scheme != "" -> :ok
-            _other -> metadata_error!(configuration_id, "display #{key} uri must contain a URI")
-          end
-        end
-      end
-
-      case Map.fetch(item, "locale") do
-        :error ->
-          locales
-
-        {:ok, locale} ->
-          locale = String.downcase(locale)
-          if MapSet.member?(locales, locale), do: metadata_error!(configuration_id, "display locales must be unique")
-          MapSet.put(locales, locale)
-      end
-    end)
+    _validated_locales =
+      Enum.reduce(display, MapSet.new(), fn item, locales ->
+        metadata_display_item!(item, configuration_id, credential?)
+        metadata_display_locale!(item, configuration_id, locales)
+      end)
 
     :ok
   end
 
   defp metadata_display!(_display, configuration_id, _credential?),
     do: metadata_error!(configuration_id, "display must be a non-empty array of objects")
+
+  defp metadata_display_item!(item, configuration_id, credential?) when is_map(item) do
+    if credential?, do: metadata_string!(item, "name", configuration_id, true)
+    Enum.each(["name", "locale"], &metadata_string!(item, &1, configuration_id, false))
+
+    if credential?, do: metadata_display_appearance!(item, configuration_id)
+  end
+
+  defp metadata_display_item!(_item, configuration_id, _credential?),
+    do: metadata_error!(configuration_id, "display must contain objects")
+
+  defp metadata_display_appearance!(item, configuration_id) do
+    Enum.each(
+      ["description", "background_color", "text_color"],
+      &metadata_string!(item, &1, configuration_id, false)
+    )
+
+    Enum.each(["logo", "background_image"], fn key ->
+      if Map.has_key?(item, key), do: metadata_display_image!(item[key], configuration_id, key)
+    end)
+  end
+
+  defp metadata_display_image!(image, configuration_id, key) when is_map(image) do
+    metadata_string!(image, "uri", configuration_id, true)
+    metadata_string!(image, "alt_text", configuration_id, false)
+
+    case URI.new(image["uri"]) do
+      {:ok, %URI{scheme: scheme}} when is_binary(scheme) and scheme != "" -> :ok
+      _other -> metadata_error!(configuration_id, "display #{key} uri must contain a URI")
+    end
+  end
+
+  defp metadata_display_image!(_image, configuration_id, key),
+    do: metadata_error!(configuration_id, "display #{key} must be an object")
+
+  defp metadata_display_locale!(item, configuration_id, locales) do
+    case Map.fetch(item, "locale") do
+      :error ->
+        locales
+
+      {:ok, locale} ->
+        locale = String.downcase(locale)
+        if MapSet.member?(locales, locale), do: metadata_error!(configuration_id, "display locales must be unique")
+        MapSet.put(locales, locale)
+    end
+  end
 
   defp metadata_string!(item, key, configuration_id, required?) do
     case Map.fetch(item, key) do
@@ -466,23 +484,24 @@ defmodule Attesto.CredentialIssuerMetadata do
   end
 
   defp metadata_claims!(claims, configuration_id, format) when is_list(claims) and claims != [] do
-    Enum.reduce(claims, [], fn claim, previous_paths ->
-      if not is_map(claim), do: metadata_error!(configuration_id, "claims must contain objects")
-      path = claim["path"]
+    _validated_paths =
+      Enum.reduce(claims, [], fn claim, previous_paths ->
+        if not is_map(claim), do: metadata_error!(configuration_id, "claims must contain objects")
+        path = claim["path"]
 
-      if not metadata_path?(path, format),
-        do: metadata_error!(configuration_id, "claims require a valid non-empty path")
+        if not metadata_path?(path, format),
+          do: metadata_error!(configuration_id, "claims require a valid non-empty path")
 
-      if Map.has_key?(claim, "mandatory") and not is_boolean(claim["mandatory"]),
-        do: metadata_error!(configuration_id, "claim mandatory must be a boolean")
+        if Map.has_key?(claim, "mandatory") and not is_boolean(claim["mandatory"]),
+          do: metadata_error!(configuration_id, "claim mandatory must be a boolean")
 
-      if Map.has_key?(claim, "display"), do: metadata_display!(claim["display"], configuration_id, false)
+        if Map.has_key?(claim, "display"), do: metadata_display!(claim["display"], configuration_id, false)
 
-      if Enum.any?(previous_paths, &metadata_paths_conflict?(path, &1, format)),
-        do: metadata_error!(configuration_id, "claims contain repeated or contradictory paths")
+        if Enum.any?(previous_paths, &metadata_paths_conflict?(path, &1, format)),
+          do: metadata_error!(configuration_id, "claims contain repeated or contradictory paths")
 
-      [path | previous_paths]
-    end)
+        [path | previous_paths]
+      end)
 
     :ok
   end
@@ -509,13 +528,15 @@ defmodule Attesto.CredentialIssuerMetadata do
   defp metadata_paths_conflict?(_left, [], _format), do: false
 
   defp metadata_paths_conflict?([left | _], [right | _], format) do
-    left_array? = is_nil(left) or (is_integer(left) and left >= 0)
-    right_array? = is_nil(right) or (is_integer(right) and right >= 0)
-
-    is_nil(left) or is_nil(right) or
-      (format != "mso_mdoc" and
-         ((is_binary(left) and right_array?) or (is_binary(right) and left_array?)))
+    is_nil(left) or is_nil(right) or metadata_component_types_conflict?(left, right, format)
   end
+
+  defp metadata_component_types_conflict?(_left, _right, "mso_mdoc"), do: false
+
+  defp metadata_component_types_conflict?(left, right, _format),
+    do: (is_binary(left) and metadata_array_component?(right)) or (is_binary(right) and metadata_array_component?(left))
+
+  defp metadata_array_component?(component), do: is_nil(component) or (is_integer(component) and component >= 0)
 
   defp metadata_error!(configuration_id, reason) do
     raise ArgumentError,
