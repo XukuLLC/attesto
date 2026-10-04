@@ -150,6 +150,18 @@ defmodule Attesto.IdentityAssertionTest do
       assert {:error, :unsupported_alg} = IdentityAssertion.verify(jwt, jwks, opts())
     end
 
+    test "does not treat a trusted RSA public key as an HS256 secret" do
+      rsa = rsa_key()
+      {_kty, public_map} = JOSE.JWK.to_public_map(rsa)
+      hmac_key = public_map |> JSON.encode!() |> JOSE.JWK.from_oct()
+
+      header = %{"alg" => "HS256", "kid" => JOSE.JWK.thumbprint(rsa), "typ" => @typ}
+      {_header, jwt} = hmac_key |> JOSE.JWT.sign(header, claims(%{})) |> JOSE.JWS.compact()
+
+      assert {:error, :invalid_signature} =
+               IdentityAssertion.verify(jwt, public_jwks(rsa, "RS256"), opts())
+    end
+
     test "rejects a non-compact token" do
       assert {:error, :malformed} = IdentityAssertion.verify("not-a-jwt", %{"keys" => []}, opts())
     end

@@ -7,6 +7,9 @@ defmodule Attesto.RevocationTest do
   alias Attesto.Revocation
   alias Attesto.Secret
 
+  @issuer "https://issuer.example/tenant-a"
+  @other_issuer "https://issuer.example/tenant-b"
+
   setup do
     start_supervised!(RefreshStore.ETS)
     :ok
@@ -81,6 +84,42 @@ defmodule Attesto.RevocationTest do
     test "an unbound token revokes without a presented client" do
       {:ok, %{token: r0}} = RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42"})
       assert :ok = Revocation.revoke(RefreshStore.ETS, r0)
+    end
+  end
+
+  describe "issuer binding" do
+    test "the expected issuer may revoke its family" do
+      {:ok, %{token: token}} =
+        RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", issuer: @issuer})
+
+      assert :ok = Revocation.revoke(RefreshStore.ETS, token, issuer: @issuer)
+      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, token, issuer: @issuer)
+    end
+
+    test "a different issuer is a no-op for both live and consumed family handles" do
+      {:ok, %{token: parent}} =
+        RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", issuer: @issuer}, now: 1_000)
+
+      assert :ok = Revocation.revoke(RefreshStore.ETS, parent, issuer: @other_issuer)
+      assert {:ok, child} = RefreshToken.rotate(RefreshStore.ETS, parent, issuer: @issuer, now: 1_001)
+
+      assert :ok = Revocation.revoke(RefreshStore.ETS, parent, issuer: @other_issuer)
+      assert {:ok, _grandchild} = RefreshToken.rotate(RefreshStore.ETS, child.token, issuer: @issuer, now: 1_002)
+    end
+
+    test "a supplied issuer treats a legacy token as unknown without mutation" do
+      {:ok, %{token: legacy}} = RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42"}, now: 1_000)
+
+      assert :ok = Revocation.revoke(RefreshStore.ETS, legacy, issuer: @issuer)
+      assert {:ok, _child} = RefreshToken.rotate(RefreshStore.ETS, legacy, now: 1_001)
+    end
+
+    test "omitting issuer preserves legacy revocation behavior for bound families" do
+      {:ok, %{token: token}} =
+        RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", issuer: @issuer})
+
+      assert :ok = Revocation.revoke(RefreshStore.ETS, token)
+      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, token, issuer: @issuer)
     end
   end
 

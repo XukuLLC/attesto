@@ -47,7 +47,7 @@ defmodule Attesto.KeyAttestation do
   by convention; it is not checked unless supplied.
   """
 
-  alias Attesto.{JWS, NumericDate, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, NumericDate, SecureCompare, SigningAlg, Thumbprint}
 
   @typ "key-attestation+jwt"
   @future_skew_seconds 60
@@ -268,8 +268,13 @@ defmodule Attesto.KeyAttestation do
 
   defp check_nonce(claims, opts) do
     case Keyword.get(opts, :nonce) do
-      nil -> :ok
-      expected -> if Map.get(claims, "nonce") == expected, do: :ok, else: {:error, :invalid_nonce}
+      nil ->
+        :ok
+
+      expected ->
+        if SecureCompare.equal?(Map.get(claims, "nonce"), expected),
+          do: :ok,
+          else: {:error, :invalid_nonce}
     end
   end
 

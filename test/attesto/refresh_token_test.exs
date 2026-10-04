@@ -7,6 +7,10 @@ defmodule Attesto.RefreshTokenTest do
   alias Attesto.RefreshToken
   alias Attesto.Secret
 
+  @issuer "https://issuer.example/tenant-a"
+  @other_issuer "https://issuer.example/tenant-b"
+  @issuer_claim_key "urn:attesto:refresh-token:issuer"
+
   defmodule AtomicStore do
     @moduledoc false
     @behaviour Attesto.RefreshStore
@@ -141,6 +145,61 @@ defmodule Attesto.RefreshTokenTest do
     Map.merge(%{subject: "usr_42", scope: ["documents.read"]}, overrides)
   end
 
+  test "issuer binding survives serialized claims, rotation, and retry without entering host claims" do
+    host_claims = %{"tenant" => "a"}
+
+    assert {:ok, initial} =
+             RefreshToken.issue(ETS, context(%{issuer: @issuer, claims: host_claims}), now: 1_000)
+
+    assert {:ok, stored} = ETS.get(Secret.hash(initial.token))
+    assert stored.data.claims[@issuer_claim_key] == @issuer
+    assert stored.data.claims["tenant"] == "a"
+
+    # The reserved string key survives the JSON round trip used by persistent
+    # stores for the established claims column.
+    assert stored.data.claims == stored.data.claims |> Jason.encode!() |> Jason.decode!()
+
+    assert {:error, :issuer_mismatch} =
+             RefreshToken.rotate(ETS, initial.token, issuer: @other_issuer, now: 1_001)
+
+    assert {:ok, %{consumed: false}} = ETS.get(Secret.hash(initial.token))
+
+    assert {:ok, first} = RefreshToken.rotate(ETS, initial.token, issuer: @issuer, now: 1_001)
+    assert first.context.issuer == @issuer
+    assert first.context.claims == host_claims
+    refute Map.has_key?(first.context.claims, @issuer_claim_key)
+
+    assert {:ok, child_record} = ETS.get(Secret.hash(first.token))
+    assert child_record.data.claims[@issuer_claim_key] == @issuer
+
+    assert {:ok, retry} = RefreshToken.rotate(ETS, initial.token, issuer: @issuer, now: 1_002)
+    assert retry == first
+
+    # An issuer mismatch on a consumed parent is a policy rejection, not reuse:
+    # it must not revoke the correctly bound live child.
+    assert {:error, :issuer_mismatch} =
+             RefreshToken.rotate(ETS, initial.token, issuer: @other_issuer, now: 1_002)
+
+    assert {:ok, second} = RefreshToken.rotate(ETS, first.token, issuer: @issuer, now: 1_003)
+    assert second.context.issuer == @issuer
+    assert second.context.claims == host_claims
+  end
+
+  test "issuer checks fail closed for legacy tokens but omission remains compatible" do
+    assert {:ok, legacy} = RefreshToken.issue(ETS, context(), now: 1_000)
+
+    assert {:error, :issuer_mismatch} =
+             RefreshToken.rotate(ETS, legacy.token, issuer: @issuer, now: 1_001)
+
+    assert {:ok, %{consumed: false}} = ETS.get(Secret.hash(legacy.token))
+    assert {:ok, legacy_child} = RefreshToken.rotate(ETS, legacy.token, now: 1_001)
+    refute Map.has_key?(legacy_child.context, :issuer)
+
+    assert {:ok, bound} = RefreshToken.issue(ETS, context(%{issuer: @issuer}), now: 1_000)
+    assert {:ok, bound_child} = RefreshToken.rotate(ETS, bound.token, now: 1_001)
+    assert bound_child.context.issuer == @issuer
+  end
+
   test "attested refresh binding is independent of DPoP and survives capped retries" do
     instance = jkt("client-instance")
     dpop = jkt("independent-dpop")
@@ -200,6 +259,36 @@ defmodule Attesto.RefreshTokenTest do
 
       try do
         assert {:error, :grant_revoked} = RefreshToken.rotate(MalformedContextStore, initial.token, opts)
+      after
+        Process.delete({MalformedContextStore, :mutator})
+      end
+
+      assert :error = ETS.get(Secret.hash(child.token))
+    end
+  end
+
+  test "cached successor issuer binding cannot be erased or replaced" do
+    mutations = [
+      &Map.delete(&1, @issuer_claim_key),
+      &Map.put(&1, @issuer_claim_key, @other_issuer)
+    ]
+
+    for mutate <- mutations do
+      :ok = ETS.reset()
+      assert {:ok, initial} = RefreshToken.issue(ETS, context(%{issuer: @issuer}), now: 1_000)
+      assert {:ok, child} = RefreshToken.rotate(ETS, initial.token, issuer: @issuer, now: 1_001)
+
+      Process.put({MalformedContextStore, :mutator}, fn record ->
+        Map.update!(record, :successor, fn successor ->
+          Map.update!(successor, :context, fn successor_context ->
+            Map.update!(successor_context, :claims, mutate)
+          end)
+        end)
+      end)
+
+      try do
+        assert {:error, :grant_revoked} =
+                 RefreshToken.rotate(MalformedContextStore, initial.token, issuer: @issuer, now: 1_002)
       after
         Process.delete({MalformedContextStore, :mutator})
       end
@@ -270,6 +359,41 @@ defmodule Attesto.RefreshTokenTest do
       end
 
       assert :ets.tab2list(RefreshStore.ETS) == []
+    end
+
+    test "issuer bindings are bounded HTTPS identifiers and reserve their claims marker" do
+      too_long = "https://issuer.example/" <> String.duplicate("a", 2_048)
+
+      for invalid <- [
+            nil,
+            "",
+            "http://issuer.example/",
+            "https:///missing-host",
+            "https://issuer.example/?query=1",
+            "https://issuer.example/#fragment",
+            " https://issuer.example/",
+            <<"https://issuer.example/", 255>>,
+            too_long
+          ] do
+        assert {:error, :invalid_issuer} = RefreshToken.issue(ETS, context(%{issuer: invalid}))
+      end
+
+      for claims <- [
+            %{@issuer_claim_key => @issuer},
+            %{@issuer_claim_key => @other_issuer, "tenant" => "a"}
+          ] do
+        assert {:error, :invalid_claims} = RefreshToken.issue(ETS, context(%{claims: claims}))
+
+        assert {:error, :invalid_claims} =
+                 RefreshToken.issue(ETS, context(%{issuer: @issuer, claims: claims}))
+      end
+
+      assert :ets.tab2list(ETS) == []
+
+      prefix = "https://issuer.example/"
+      at_limit = prefix <> String.duplicate("a", 2_048 - byte_size(prefix))
+      assert byte_size(at_limit) == 2_048
+      assert {:ok, _issued} = RefreshToken.issue(ETS, context(%{issuer: at_limit}))
     end
 
     test "a malformed dpop_jkt is rejected as invalid_dpop_jkt" do
@@ -388,7 +512,8 @@ defmodule Attesto.RefreshTokenTest do
         {:acr, ""},
         {:auth_time, -1},
         {:claims, [:private_claims_sentinel]},
-        {:claims, %{"nested" => %{role: :private_claims_sentinel}}}
+        {:claims, %{"nested" => %{role: :private_claims_sentinel}}},
+        {:claims, %{@issuer_claim_key => "http://private-issuer-sentinel.example"}}
       ]
 
       for {field, value} <- invalid_values do

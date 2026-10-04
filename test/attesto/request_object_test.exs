@@ -62,6 +62,28 @@ defmodule Attesto.RequestObjectTest do
   end
 
   describe ":accepted_algs" do
+    test "rejects alg none when no client-specific signing algorithm was registered" do
+      now = System.system_time(:second)
+
+      header = Base.url_encode64(JSON.encode!(%{"alg" => "none"}), padding: false)
+
+      payload =
+        Base.url_encode64(
+          JSON.encode!(%{
+            "iss" => @issuer,
+            "client_id" => @client_id,
+            "aud" => @audience,
+            "iat" => now,
+            "exp" => now + 300,
+            "scope" => "admin"
+          }),
+          padding: false
+        )
+
+      assert {:error, :request_not_supported} =
+               RequestObject.verify("#{header}.#{payload}.", %{"keys" => []}, base_opts())
+    end
+
     test "default rejects an RS256-signed object (FAPI 2 forbids RS256)" do
       key = JOSE.JWK.generate_key({:rsa, 2048})
       jwt = request_object(key, %{}, %{"alg" => "RS256", "kid" => JOSE.JWK.thumbprint(key)})

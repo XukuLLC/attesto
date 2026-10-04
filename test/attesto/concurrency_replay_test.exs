@@ -146,4 +146,18 @@ defmodule Attesto.ConcurrencyReplayTest do
              "the re-recorded jti must again reject as :replay within its new window"
     end
   end
+
+  describe "live-entry retention under unique-identity floods" do
+    test "a flood never evicts a still-live replay identity" do
+      victim = "retained-victim-#{System.unique_integer([:positive])}"
+      assert :ok = ReplayCache.check_and_record(victim, 60)
+
+      for index <- 1..5_000 do
+        assert :ok = ReplayCache.check_and_record("flood-#{index}-#{victim}", 60)
+      end
+
+      assert {:error, :replay} = ReplayCache.check_and_record(victim, 60)
+      assert ReplayCache.size() == 5_001
+    end
+  end
 end

@@ -10,7 +10,8 @@ defmodule Attesto.ClientAssertion do
     * `aud` contains the expected token endpoint/audience
     * `exp` is in the future
     * `iat`, when present, is not meaningfully in the future
-    * `jti` is present for replay tracking by the caller
+    * `jti` is present, non-empty, and at most 256 bytes for replay tracking
+      by the caller
 
   The JOSE algorithm is resolved from the trusted JWK's `alg` member when
   present, otherwise from the key shape. It is never accepted just because the
@@ -23,6 +24,7 @@ defmodule Attesto.ClientAssertion do
 
   @assertion_type "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
   @clock_skew_seconds 60
+  @max_jti_bytes 256
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -183,7 +185,10 @@ defmodule Attesto.ClientAssertion do
   defp check_iat(%{"iat" => _}, _opts), do: {:error, :not_yet_valid}
   defp check_iat(_claims, _opts), do: :ok
 
-  defp check_jti(%{"jti" => jti}) when is_binary(jti) and jti != "", do: :ok
+  defp check_jti(%{"jti" => jti}) when is_binary(jti) and jti != "" do
+    if byte_size(jti) <= @max_jti_bytes, do: :ok, else: {:error, :invalid_assertion}
+  end
+
   defp check_jti(_claims), do: {:error, :missing_jti}
 
   defp check_crit(header) do

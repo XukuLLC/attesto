@@ -48,6 +48,7 @@ defmodule Attesto.Did do
 
   @domain_label ~r/\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\z/
   @web_path_segment ~r/\A(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2}|[!$&'()*+,;=@])+\z/
+  @max_encoded_jwk_bytes 16_384
 
   @type jwk :: %{required(String.t()) => term()}
   @type result :: {:ok, jwk()} | {:needs_fetch, String.t()} | {:error, term()}
@@ -89,6 +90,8 @@ defmodule Attesto.Did do
 
   defp do_resolve(_did, _opts), do: {:error, :invalid_did}
 
+  defp resolve_jwk(encoded) when byte_size(encoded) > @max_encoded_jwk_bytes, do: {:error, :invalid_jwk}
+
   defp resolve_jwk(encoded) do
     with {:ok, json} <- decode_base64url(encoded),
          {:ok, jwk} <- decode_jwk(json),
@@ -100,7 +103,7 @@ defmodule Attesto.Did do
   defp decode_base64url(""), do: {:error, :invalid_base64url}
 
   defp decode_base64url(encoded) do
-    case JWS.decode64(encoded) do
+    case JWS.decode64(encoded, max_encoded_bytes: @max_encoded_jwk_bytes) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, _reason} -> {:error, :invalid_base64url}
     end

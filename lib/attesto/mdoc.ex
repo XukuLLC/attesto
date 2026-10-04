@@ -31,6 +31,8 @@ if Code.ensure_loaded?(CBOR) do
     @clock_skew_seconds 60
     @digest_algorithm "SHA-256"
     @minimum_random_bytes 16
+    @max_cbor_bytes 1_048_576
+    @max_encoded_cbor_bytes div(@max_cbor_bytes * 4 + 2, 3)
 
     @type validity :: %{
             signed: integer(),
@@ -381,7 +383,10 @@ if Code.ensure_loaded?(CBOR) do
 
     defp issuer_signed_bytes(input) do
       if base64url?(input) do
-        JWS.decode64(input)
+        case JWS.decode64(input, max_encoded_bytes: @max_encoded_cbor_bytes) do
+          {:ok, bytes} -> {:ok, bytes}
+          {:error, _reason} -> {:error, :invalid_mdoc}
+        end
       else
         {:ok, input}
       end
@@ -619,8 +624,6 @@ if Code.ensure_loaded?(CBOR) do
     # ceiling bounds the worst-case footprint. (A real mDL, photo included, is a
     # few tens of KB.) A per-nesting depth guard would be tighter but needs a
     # vendored decoder; the size cap is the proportionate immediate bound.
-    @max_cbor_bytes 1_048_576
-
     defp decode_complete(encoded) when is_binary(encoded) and byte_size(encoded) > @max_cbor_bytes do
       {:error, :invalid_mdoc}
     end

@@ -3,6 +3,16 @@ defmodule Attesto.JWS do
 
   alias Attesto.{Key, Signer, SigningAlg, Thumbprint}
 
+  # Compact JOSE values arrive before authentication at several protocol
+  # endpoints. Bound the encoded input before splitting or decoding it so one
+  # request cannot force an unbounded list allocation or base64 decode. The
+  # header/signature ceilings follow Authlib's hardened 256 KiB segment limit;
+  # the total ceiling also bounds the payload and may be raised explicitly by
+  # a trusted caller with an unusually large signed artifact.
+  @default_max_compact_bytes 1_048_576
+  @max_protected_segment_bytes 256 * 1_024
+  @max_signature_segment_bytes 256 * 1_024
+
   @type compact_segments :: %{
           protected_segment: binary(),
           payload_segment: binary(),
@@ -31,20 +41,31 @@ defmodule Attesto.JWS do
   def decode64(value, opts) when is_binary(value) and is_list(opts) do
     canonical? = Keyword.get(opts, :canonical, true)
 
-    case Base.url_decode64(value, padding: false) do
-      {:ok, decoded} ->
-        if canonical? == false or encode64(decoded) == value,
-          do: {:ok, decoded},
-          else: {:error, :non_canonical_base64url}
-
-      :error ->
-        {:error, :invalid_base64url}
+    if encoded_size_allowed?(value, opts) do
+      decode_allowed64(value, canonical?)
+    else
+      {:error, :invalid_base64url}
     end
   rescue
     _ -> {:error, :invalid_base64url}
   end
 
   def decode64(_value, _opts), do: {:error, :invalid_base64url}
+
+  defp decode_allowed64(value, canonical?) do
+    case Base.url_decode64(value, padding: false) do
+      {:ok, decoded} -> canonical_decoding_result(value, decoded, canonical?)
+      :error -> {:error, :invalid_base64url}
+    end
+  end
+
+  defp canonical_decoding_result(_value, decoded, false), do: {:ok, decoded}
+
+  defp canonical_decoding_result(value, decoded, _canonical?) do
+    if encode64(decoded) == value,
+      do: {:ok, decoded},
+      else: {:error, :non_canonical_base64url}
+  end
 
   @doc false
   @spec decode_compact(binary(), keyword()) ::
@@ -56,8 +77,8 @@ defmodule Attesto.JWS do
     canonical? = Keyword.get(opts, :canonical, true)
     allow_empty_signature? = Keyword.get(opts, :allow_empty_signature, false)
 
-    case :binary.split(jwt, ".", [:global]) do
-      [protected, payload, signature] ->
+    case compact_segments(jwt, opts) do
+      {:ok, {protected, payload, signature}} ->
         decode_compact_segments(
           protected,
           payload,
@@ -66,8 +87,8 @@ defmodule Attesto.JWS do
           allow_empty_signature?
         )
 
-      _ ->
-        {:error, :malformed_compact}
+      {:error, :malformed_compact} = error ->
+        error
     end
   rescue
     _ -> {:error, :malformed_compact}
@@ -102,7 +123,8 @@ defmodule Attesto.JWS do
              canonical: Keyword.get(opts, :canonical, true),
              # A peek must let the caller inspect an unsecured JWS header and
              # return its protocol-specific `alg=none` error before JOSE runs.
-             allow_empty_signature: Keyword.get(opts, :allow_empty_signature, true)
+             allow_empty_signature: Keyword.get(opts, :allow_empty_signature, true),
+             max_compact_bytes: Keyword.get(opts, :max_compact_bytes, @default_max_compact_bytes)
            ),
          encoded = Map.fetch!(compact, segment_key(segment)),
          {:ok, bytes} <- decode64(encoded, canonical: Keyword.get(opts, :canonical, true)),
@@ -196,10 +218,48 @@ defmodule Attesto.JWS do
 
     validate_verification_result_options!(malformed_result, claims_map?, return_key?)
 
-    Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, opts))
+    case decode_and_validate_jwt(jwt, opts) do
+      :ok ->
+        Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, opts))
+
+      {:error, _reason} ->
+        {:error, Keyword.get(opts, :malformed_error, terminal_error)}
+    end
   end
 
   def verify_strict(_jwt, _candidates, _opts), do: {:error, :invalid_signature}
+
+  # Split at most twice, then scan the final segment for one extra separator.
+  # `:binary.split(..., [:global])` builds one list entry per attacker supplied
+  # period before it can reject the wrong part count.
+  defp compact_segments(jwt, opts) do
+    with {:ok, max_compact_bytes} <- max_compact_bytes(opts),
+         true <- byte_size(jwt) <= max_compact_bytes,
+         [protected, rest] <- :binary.split(jwt, "."),
+         [payload, signature] <- :binary.split(rest, "."),
+         :nomatch <- :binary.match(signature, "."),
+         true <- byte_size(protected) <= @max_protected_segment_bytes,
+         true <- byte_size(signature) <= @max_signature_segment_bytes do
+      {:ok, {protected, payload, signature}}
+    else
+      _ -> {:error, :malformed_compact}
+    end
+  end
+
+  defp max_compact_bytes(opts) do
+    case Keyword.get(opts, :max_compact_bytes, @default_max_compact_bytes) do
+      value when is_integer(value) and value > 0 -> {:ok, value}
+      _ -> {:error, :malformed_compact}
+    end
+  end
+
+  defp encoded_size_allowed?(value, opts) do
+    case Keyword.get(opts, :max_encoded_bytes, :infinity) do
+      :infinity -> true
+      maximum when is_integer(maximum) and maximum >= 0 -> byte_size(value) <= maximum
+      _invalid -> false
+    end
+  end
 
   defp decode_segments(segments, canonical?) do
     Enum.reduce_while(segments, :ok, fn segment, :ok ->
@@ -219,12 +279,44 @@ defmodule Attesto.JWS do
   end
 
   defp decode_json_map(bytes) do
-    case JSON.decode(bytes) do
-      {:ok, %{} = map} -> {:ok, map}
+    # RFC 8259 says object member names SHOULD be unique and explicitly warns
+    # that implementations disagree when they are not. Reject duplicates at the
+    # raw JSON boundary so a signed header or claim set cannot mean one thing to
+    # Attesto and another thing to an intermediary or downstream verifier.
+    decoders = [
+      object_start: fn _old_acc -> %{} end,
+      object_push: fn key, value, object ->
+        if Map.has_key?(object, key),
+          do: throw(:duplicate_json_member),
+          else: Map.put(object, key, value)
+      end,
+      object_finish: fn object, old_acc -> {object, old_acc} end
+    ]
+
+    case JSON.decode(bytes, nil, decoders) do
+      {%{} = map, nil, ""} -> {:ok, map}
       _ -> {:error, :invalid_json}
     end
   rescue
     _ -> {:error, :invalid_json}
+  catch
+    :duplicate_json_member -> {:error, :invalid_json}
+  end
+
+  defp decode_and_validate_jwt(jwt, opts) do
+    # Keep an empty signature structurally parseable at the verification
+    # boundary so unsecured `alg=none` input is classified as a signature
+    # failure, matching the verifier contract. It can never verify against a
+    # permitted candidate key and algorithm.
+    opts = Keyword.put(opts, :allow_empty_signature, true)
+
+    with {:ok, compact} <- decode_compact(jwt, opts),
+         {:ok, protected} <- decode64(compact.protected_segment),
+         {:ok, _header} <- decode_json_map(protected),
+         {:ok, payload} <- decode64(compact.payload_segment),
+         {:ok, _claims} <- decode_json_map(payload) do
+      :ok
+    end
   end
 
   defp segment_key(:protected), do: :protected_segment

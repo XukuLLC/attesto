@@ -45,6 +45,23 @@ defmodule Attesto.RefreshToken do
   `:attestation_jkt`. Every rotation and retry requires that same instance key,
   even when its DPoP key differs. An unbound legacy token rejects a presented
   instance key; its original binding cannot be reconstructed after issuance.
+
+  ## Issuer binding
+
+  A host that may share a refresh store across authorization-server issuers can
+  pass the issuing server's exact `:issuer` in the initial context. Passing
+  that server's identifier as the `:issuer` option to `rotate/3` then requires
+  an exact match before an unconsumed token can be claimed. If the caller
+  supplies an expected issuer for a legacy token that has no issuer binding,
+  rotation fails closed with `:issuer_mismatch` and leaves the token usable by
+  a caller applying the correct legacy policy. Omitting the option preserves
+  compatibility for existing callers and families.
+
+  The marker is stored under a core-reserved string key inside `:claims`, so
+  stores that serialize this established JSON field preserve it without a
+  schema migration. Host claims cannot set that key. Returned rotation context
+  exposes the verified value as top-level `:issuer` and removes the reserved
+  entry before handing `:claims` back to the host.
   """
 
   alias Attesto.Claims
@@ -56,6 +73,8 @@ defmodule Attesto.RefreshToken do
   # 14 days. Refresh lifetime is a host policy; this is a sane default.
   @default_ttl_seconds 14 * 24 * 60 * 60
   @default_rotation_grace_seconds 10
+  @max_issuer_bytes 2_048
+  @issuer_claim_key "urn:attesto:refresh-token:issuer"
   @stored_context_keys [:acr, :auth_time, :claims, :client_id, :dpop_jkt, :resource, :scope, :subject]
 
   @typedoc """
@@ -77,6 +96,7 @@ defmodule Attesto.RefreshToken do
           optional(:acr) => String.t() | nil,
           optional(:auth_time) => non_neg_integer() | nil,
           optional(:client_id) => String.t(),
+          optional(:issuer) => String.t(),
           optional(:dpop_jkt) => String.t() | nil,
           optional(:attestation_jkt) => String.t() | nil,
           optional(:claims) => map()
@@ -102,6 +122,7 @@ defmodule Attesto.RefreshToken do
           | :invalid_scope
           | :invalid_resource
           | :invalid_client_id
+          | :invalid_issuer
           | :invalid_dpop_jkt
           | :invalid_attestation_jkt
           | :invalid_claims
@@ -117,6 +138,7 @@ defmodule Attesto.RefreshToken do
           | :expired
           | :client_required
           | :client_mismatch
+          | :issuer_mismatch
           | :invalid_scope
           | :invalid_target
           | :dpop_proof_required
@@ -130,7 +152,8 @@ defmodule Attesto.RefreshToken do
   Issue a refresh token for `context` and persist it via `store`.
 
   `context` MUST carry `:subject`; optional `:scope` (list, default
-  `[]`), `:client_id`, `:dpop_jkt` (binds the token to a DPoP key),
+  `[]`), `:client_id`, `:issuer` (the exact authorization-server issuer),
+  `:dpop_jkt` (binds the token to a DPoP key),
   `:attestation_jkt` (the verified Client Instance Key), and
   `:claims` (a lossless, string-keyed I-JSON object of host context; persisted
   numbers are exact-range integers, not floats).
@@ -177,7 +200,7 @@ defmodule Attesto.RefreshToken do
   otherwise the whole family is revoked and `{:error, :reuse_detected}` is
   returned. Other failures include `:invalid_grant` (unknown token), `:expired`,
   `:grant_revoked`, `:temporarily_unavailable`, `:client_mismatch`,
-  `:invalid_scope`, and the DPoP binding errors.
+  `:issuer_mismatch`, `:invalid_scope`, and the DPoP binding errors.
 
   Options:
 
@@ -192,6 +215,12 @@ defmodule Attesto.RefreshToken do
       `:client_mismatch` if wrong), closing token substitution across
       clients (RFC 6749 §6 / §10.4). Pass `allow_missing_client_id?: true`
       to opt out. A token issued without a client binding skips the check.
+    * `:issuer` - the authorization server expected to have issued this
+      refresh family. When supplied, it must exactly match the bounded HTTPS
+      issuer saved at issuance. A different issuer, or a legacy token with no
+      issuer binding, returns `:issuer_mismatch` without consuming an
+      unconsumed token or revoking a consumed token's family. Omitting this
+      option preserves legacy behavior.
     * `:scope` - a requested scope list. MUST be a subset of the token's
       granted scope; the successor then carries the narrowed scope. A
       request for any scope not granted is `:invalid_scope` (no
@@ -202,12 +231,15 @@ defmodule Attesto.RefreshToken do
       for strict reuse revocation. The window is fixed when the successor is
       issued: a later call may shorten it, but cannot extend it.
 
-  Recoverable failures (`:client_mismatch`, `:invalid_scope`, `:expired`,
-  the DPoP binding errors) are checked on a non-consuming read *before*
-  the token is claimed, so they do NOT burn the token: a client that, say,
-  retries with a corrected DPoP proof succeeds rather than tripping reuse
-  detection. An already-consumed token is accepted only when its complete
-  successor state proves it is the same request inside the fixed retry window.
+  Recoverable failures (`:client_mismatch`, `:issuer_mismatch`,
+  `:invalid_scope`, `:expired`, the DPoP binding errors) are checked on a
+  non-consuming read *before* the token is claimed, so they do NOT burn the
+  token: a client that, say, retries with a corrected DPoP proof succeeds
+  rather than tripping reuse detection. Issuer mismatch is also checked before
+  retry/reuse handling for an already-consumed token, so a request routed to a
+  different issuer cannot revoke the legitimate issuer's family. An
+  already-consumed token is accepted only when its complete successor state
+  proves it is the same request inside the fixed retry window.
 
   The parent claim, child insert, and retry-state persistence are one atomic
   `c:Attesto.RefreshStore.rotate/4` operation. Simultaneous matching requests
@@ -259,22 +291,62 @@ defmodule Attesto.RefreshToken do
     end
   end
 
-  defp handle_refresh_lookup({:ok, %{consumed: true} = record}, store, token_hash, opts) do
-    if valid_loaded_record?(record, token_hash),
-      do: maybe_idempotent_retry_or_reuse(store, record, opts),
-      else: fail_initial_lookup(store, record, token_hash)
+  @doc false
+  @spec issuer_matches?(map(), term()) :: boolean()
+  def issuer_matches?(data, expected) when is_map(data) do
+    with true <- valid_issuer?(expected),
+         {:ok, claims} <- stored_claims(data),
+         true <- is_map(claims),
+         {:ok, stored} <- Map.fetch(claims, @issuer_claim_key),
+         true <- valid_issuer?(stored) do
+      stored == expected
+    else
+      _ -> false
+    end
   end
 
-  defp handle_refresh_lookup({:ok, %{consumed: false} = record}, store, token_hash, opts) do
-    if valid_loaded_record?(record, token_hash) and valid_unconsumed_record?(record),
-      do: rotate_unconsumed(store, record, opts),
-      else: fail_initial_lookup(store, record, token_hash)
+  def issuer_matches?(_data, _expected), do: false
+
+  @doc false
+  @spec valid_issuer_binding?(map()) :: boolean()
+  def valid_issuer_binding?(data) when is_map(data) do
+    case stored_claims(data) do
+      :absent ->
+        true
+
+      {:ok, claims} when is_map(claims) ->
+        valid_stored_issuer?(claims)
+
+      _invalid ->
+        false
+    end
+  end
+
+  def valid_issuer_binding?(_data), do: false
+
+  defp handle_refresh_lookup({:ok, record}, store, token_hash, opts) do
+    if valid_loaded_record?(record, token_hash) do
+      with :ok <- check_issuer(record.data, opts) do
+        handle_valid_refresh_record(record, store, token_hash, opts)
+      end
+    else
+      fail_initial_lookup(store, record, token_hash)
+    end
   end
 
   defp handle_refresh_lookup(:error, _store, _token_hash, _opts), do: {:error, :invalid_grant}
 
   defp handle_refresh_lookup(invalid_return, store, token_hash, _opts) do
     fail_initial_lookup(store, invalid_return, token_hash)
+  end
+
+  defp handle_valid_refresh_record(%{consumed: true} = record, store, _token_hash, opts),
+    do: maybe_idempotent_retry_or_reuse(store, record, opts)
+
+  defp handle_valid_refresh_record(%{consumed: false} = record, store, token_hash, opts) do
+    if valid_unconsumed_record?(record),
+      do: rotate_unconsumed(store, record, opts),
+      else: fail_initial_lookup(store, record, token_hash)
   end
 
   defp fail_initial_lookup(store, record, token_hash) do
@@ -320,7 +392,7 @@ defmodule Attesto.RefreshToken do
              family_id: record.family_id,
              generation: successor.generation,
              expires_at: expires_at,
-             context: successor.context
+             context: public_context(successor.context)
            }}
 
         :consumed ->
@@ -644,8 +716,15 @@ defmodule Attesto.RefreshToken do
        family_id: issued.family_id,
        generation: issued.generation,
        expires_at: issued.expires_at,
-       context: successor_data
+       context: public_context(successor_data)
      }}
+  end
+
+  defp public_context(%{claims: claims} = context) do
+    case Map.pop(claims, @issuer_claim_key) do
+      {nil, public_claims} -> %{context | claims: public_claims}
+      {issuer, public_claims} -> context |> Map.put(:claims, public_claims) |> Map.put(:issuer, issuer)
+    end
   end
 
   defp fail_rotation_state(store, record, operation, reason) do
@@ -753,6 +832,13 @@ defmodule Attesto.RefreshToken do
   end
 
   defp check_client(_data, _opts), do: :ok
+
+  defp check_issuer(data, opts) do
+    case Keyword.fetch(opts, :issuer) do
+      :error -> :ok
+      {:ok, expected} -> if issuer_matches?(data, expected), do: :ok, else: {:error, :issuer_mismatch}
+    end
+  end
 
   defp allow_missing_client?(opts) do
     case Keyword.fetch(opts, :allow_missing_client_id?) do
@@ -862,6 +948,7 @@ defmodule Attesto.RefreshToken do
       valid_stored_grant_context?(subject, scope, resource, client_id) and
       valid_optional_jkt?(dpop_jkt) and Claims.portable_json_object?(claims) and
       valid_optional_acr?(acr) and valid_optional_auth_time?(auth_time) and
+      valid_stored_issuer?(claims) and
       valid_stored_attestation?(context) and
       valid_family_deadline?(context)
   end
@@ -1085,6 +1172,7 @@ defmodule Attesto.RefreshToken do
       not valid_scope?(scope) -> {:error, :invalid_scope}
       not valid_resource?(resource) -> {:error, :invalid_resource}
       not valid_optional_client_id?(Map.get(context, :client_id)) -> {:error, :invalid_client_id}
+      not valid_context_issuer?(context) -> {:error, :invalid_issuer}
       true -> :ok
     end
   end
@@ -1093,7 +1181,7 @@ defmodule Attesto.RefreshToken do
     cond do
       not valid_optional_jkt?(dpop_jkt) -> {:error, :invalid_dpop_jkt}
       not valid_optional_jkt?(Map.get(context, :attestation_jkt)) -> {:error, :invalid_attestation_jkt}
-      not Claims.portable_json_object?(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
+      not valid_host_claims?(Map.get(context, :claims, %{})) -> {:error, :invalid_claims}
       not valid_optional_acr?(Map.get(context, :acr)) -> {:error, :invalid_acr}
       not valid_optional_auth_time?(Map.get(context, :auth_time)) -> {:error, :invalid_auth_time}
       true -> :ok
@@ -1114,7 +1202,7 @@ defmodule Attesto.RefreshToken do
       # never makes the authentication "fresher".
       acr: Map.get(context, :acr),
       auth_time: Map.get(context, :auth_time),
-      claims: Map.get(context, :claims, %{})
+      claims: claims_with_issuer(context)
     }
     |> put_attestation_binding(Map.get(context, :attestation_jkt))
   end
@@ -1128,6 +1216,62 @@ defmodule Attesto.RefreshToken do
       {:ok, thumbprint} -> Thumbprint.valid?(thumbprint)
     end
   end
+
+  defp valid_context_issuer?(context) do
+    case Map.fetch(context, :issuer) do
+      :error -> true
+      {:ok, issuer} -> valid_issuer?(issuer)
+    end
+  end
+
+  defp valid_host_claims?(claims) do
+    Claims.portable_json_object?(claims) and not Map.has_key?(claims, @issuer_claim_key)
+  end
+
+  defp claims_with_issuer(context) do
+    claims = Map.get(context, :claims, %{})
+
+    case Map.fetch(context, :issuer) do
+      :error -> claims
+      {:ok, issuer} -> Map.put(claims, @issuer_claim_key, issuer)
+    end
+  end
+
+  defp valid_stored_issuer?(claims) do
+    case Map.fetch(claims, @issuer_claim_key) do
+      :error -> true
+      {:ok, issuer} -> valid_issuer?(issuer)
+    end
+  end
+
+  defp stored_claims(data) do
+    case {Map.fetch(data, :claims), Map.fetch(data, "claims")} do
+      {:error, :error} -> :absent
+      {{:ok, claims}, :error} -> {:ok, claims}
+      {:error, {:ok, claims}} -> {:ok, claims}
+      {{:ok, claims}, {:ok, claims}} -> {:ok, claims}
+      {{:ok, _atom_claims}, {:ok, _string_claims}} -> :invalid
+    end
+  end
+
+  # RFC 8414 section 2 defines the authorization-server issuer as an HTTPS URL
+  # with a host and no query or fragment. The byte limit bounds persisted
+  # tenant-controlled context while retaining normal path-based identifiers.
+  defp valid_issuer?(issuer)
+       when is_binary(issuer) and byte_size(issuer) > 0 and byte_size(issuer) <= @max_issuer_bytes do
+    with true <- String.valid?(issuer),
+         false <- String.match?(issuer, ~r/[\x00-\x20\x7F]/u),
+         {:ok, uri} <- URI.new(issuer),
+         true <- uri.scheme == "https",
+         true <- is_binary(uri.host) and uri.host != "",
+         true <- is_nil(uri.query) and is_nil(uri.fragment) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_issuer?(_issuer), do: false
 
   defp valid_optional_acr?(nil), do: true
   defp valid_optional_acr?(acr), do: non_empty_binary?(acr)

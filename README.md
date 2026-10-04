@@ -541,6 +541,13 @@ events as indicators to correlate rather than proof of theft;
 `Attesto.Telemetry` covers both. Event names and metadata keys are public
 API.
 
+**Never use `jti`, `client_id`, `subject`, or `family_id` as metric labels.**
+Their values are attacker controlled or have unbounded cardinality, so a
+remote party can create an unbounded number of time series and exhaust the
+metrics backend. Hashing or truncating a value does not bound its cardinality.
+Use bounded fields such as the event name, `binding`, or `reason` for metric
+labels, and keep per-identifier correlation in appropriately protected logs.
+
 Routine failures are deliberately **not** events. Emitting them would bury
 these signals in traffic that is simply what a healthy authorization server
 looks like.

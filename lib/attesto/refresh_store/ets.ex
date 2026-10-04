@@ -331,7 +331,7 @@ defmodule Attesto.RefreshStore.ETS do
        )
        when map_size(successor) == 4 do
     is_binary(token) and token != "" and generation == child.generation and
-      Attesto.Secret.hash(token) == child.token_hash and context == child.data and
+      Attesto.SecureCompare.equal?(Attesto.Secret.hash(token), child.token_hash) and context == child.data and
       is_integer(retry_until) and retry_until >= now and
       retry_until < child.expires_at
   end

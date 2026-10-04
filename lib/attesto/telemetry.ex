@@ -170,6 +170,13 @@ defmodule Attesto.Telemetry do
   interpolate it into anything that parses. A client that puts its own live
   secret in `jti` will have that secret written wherever the handler writes.
 
+  **Never use `jti`, `client_id`, `subject`, or `family_id` as metric labels.**
+  Their values are attacker controlled or have unbounded cardinality, so a
+  remote party can create an unbounded number of time series and exhaust the
+  metrics backend. Hashing or truncating a value does not bound its cardinality.
+  Use bounded fields such as the event name, `binding`, or `reason` for metric
+  labels, and keep per-identifier correlation in appropriately protected logs.
+
   ## Handlers run synchronously
 
   `:telemetry` invokes handlers on the calling process, so a handler that

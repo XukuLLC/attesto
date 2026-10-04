@@ -115,6 +115,27 @@ defmodule Attesto.ClientAssertionTest do
              |> ClientAssertion.verify(@client_id, @audience, %{"keys" => [public_jwk(key)]})
   end
 
+  test "accepts a 256-byte jti and rejects one byte over the cap" do
+    key = ec_key()
+    trusted = %{"keys" => [public_jwk(key)]}
+    at_limit = String.duplicate("j", 256)
+    over_limit = at_limit <> "j"
+
+    assert byte_size(at_limit) == 256
+
+    assert {:ok, %{"jti" => ^at_limit}} =
+             key
+             |> assertion(%{"jti" => at_limit})
+             |> ClientAssertion.verify(@client_id, @audience, trusted)
+
+    assert byte_size(over_limit) == 257
+
+    assert {:error, :invalid_assertion} =
+             key
+             |> assertion(%{"jti" => over_limit})
+             |> ClientAssertion.verify(@client_id, @audience, trusted)
+  end
+
   test "rejects an array aud even when it contains the expected audience - FAPI 2 requires a single-valued aud" do
     key = ec_key()
 

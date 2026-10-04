@@ -102,6 +102,54 @@ defmodule Attesto.JWSTest do
       end
     end
 
+    test "does not expose an external signer's private failure reason" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+      ExternalSigner.install(private_pem, public_pem)
+      ExternalSigner.install_failure({:backend_failure, private_pem})
+
+      error =
+        assert_raise RuntimeError, "external signer failed", fn ->
+          JWS.sign_current(ExternalSigner, %{"sub" => "private-error"}, typ: "JWT")
+        end
+
+      refute Exception.message(error) =~ private_pem
+    end
+
+    test "does not expose exceptions, throws, or exits from an external sign callback" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+
+      for kind <- [:raise, :throw, :exit] do
+        ExternalSigner.install(private_pem, public_pem)
+        ExternalSigner.install_failure({kind, private_pem})
+
+        error =
+          assert_raise RuntimeError, "external signer failed", fn ->
+            JWS.sign_current(ExternalSigner, %{"sub" => "private-callback-error"}, typ: "JWT")
+          end
+
+        refute Exception.message(error) =~ private_pem
+      end
+    end
+
+    test "does not expose exceptions, throws, or exits from the public JWK callback" do
+      private_pem = Factory.rsa_pem()
+      public_pem = Key.public_pem(private_pem)
+
+      for kind <- [:raise, :throw, :exit] do
+        ExternalSigner.install(private_pem, public_pem)
+        ExternalSigner.install_signing_jwk_failure({kind, private_pem})
+
+        error =
+          assert_raise RuntimeError, "external signer failed", fn ->
+            Attesto.Signer.signing_jwk!(ExternalSigner)
+          end
+
+        refute Exception.message(error) =~ private_pem
+      end
+    end
+
     test "rejects a signature produced by a different remote key" do
       signing_private = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_pem() |> elem(1)
       advertised_public = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_public() |> JOSE.JWK.to_pem() |> elem(1)
@@ -197,6 +245,32 @@ defmodule Attesto.JWSTest do
       )
 
     assert {:error, :wrong_key} = JWS.verify_strict(jwt, wrong_candidates, terminal_error: :wrong_key)
+
+    assert {:error, :malformed} =
+             JWS.verify_strict(String.duplicate(".", 100_000), wrong_candidates, malformed_error: :malformed)
+  end
+
+  test "strict verification rejects duplicate JSON claim members before using the claims" do
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    kid = JOSE.JWK.thumbprint(signer)
+    payload = ~s({"iss":"https://trusted.example","iss":["https://trusted.example","https://evil.example"]})
+
+    {_header, jwt} =
+      signer
+      |> JOSE.JWS.sign(payload, %{"alg" => "ES256", "kid" => kid})
+      |> JOSE.JWS.compact()
+
+    candidates =
+      JWS.verification_candidates(
+        public_map(signer, %{"kid" => kid, "alg" => "ES256"}),
+        accepted_algs: ["ES256"]
+      )
+
+    assert {:error, :malformed} =
+             JWS.verify_strict(jwt, candidates,
+               terminal_error: :invalid_signature,
+               malformed_error: :malformed
+             )
   end
 
   # ── parser primitives (the compact-JWS parser consolidation) ──────────────
@@ -232,6 +306,39 @@ defmodule Attesto.JWSTest do
       assert {:error, :malformed_compact} = JWS.decode_compact("nodots")
     end
 
+    test "rejects separator floods without globally splitting attacker input" do
+      flooded = String.duplicate(".", 100_000)
+      assert {:error, :malformed_compact} = JWS.decode_compact(flooded)
+    end
+
+    test "bounds the encoded compact value before base64 decoding" do
+      oversized_payload = String.duplicate("A", 1_048_576)
+      jwt = "#{b64("h")}.#{oversized_payload}.#{b64("s")}"
+
+      assert {:error, :malformed_compact} = JWS.decode_compact(jwt)
+      assert {:ok, _segments} = JWS.decode_compact(jwt, max_compact_bytes: byte_size(jwt))
+    end
+
+    test "peek_json forwards a trusted caller's total-byte override" do
+      oversized_payload = String.duplicate("A", 1_048_576)
+      jwt = "#{b64(JSON.encode!(%{"alg" => "none"}))}.#{oversized_payload}.#{b64("s")}"
+
+      assert {:error, :malformed_compact} = JWS.peek_json(jwt, :protected)
+
+      assert {:ok, %{"alg" => "none"}} =
+               JWS.peek_json(jwt, :protected, max_compact_bytes: byte_size(jwt))
+    end
+
+    test "bounds protected-header and signature segments independently" do
+      oversized_segment = String.duplicate("A", 256 * 1_024 + 4)
+
+      assert {:error, :malformed_compact} =
+               JWS.decode_compact("#{oversized_segment}.#{b64("p")}.#{b64("s")}")
+
+      assert {:error, :malformed_compact} =
+               JWS.decode_compact("#{b64("h")}.#{b64("p")}.#{oversized_segment}")
+    end
+
     test "rejects an empty signature by default; accepts it when allowed" do
       jwt = "#{b64("h")}.#{b64("p")}."
       assert {:error, :malformed_compact} = JWS.decode_compact(jwt)
@@ -246,6 +353,15 @@ defmodule Attesto.JWSTest do
 
     test "rejects non-binary input" do
       assert {:error, :malformed_compact} = JWS.decode_compact(123)
+    end
+  end
+
+  describe "decode64/2 encoded input limit" do
+    test "rejects before decoding when the configured encoded-byte cap is exceeded" do
+      encoded = Base.url_encode64("0123456789", padding: false)
+
+      assert {:error, :invalid_base64url} = JWS.decode64(encoded, max_encoded_bytes: byte_size(encoded) - 1)
+      assert {:ok, "0123456789"} = JWS.decode64(encoded, max_encoded_bytes: byte_size(encoded))
     end
   end
 
@@ -267,6 +383,17 @@ defmodule Attesto.JWSTest do
     test "errors on JSON that is not an object" do
       jwt = "#{b64(JSON.encode!([1, 2]))}.#{b64(JSON.encode!(%{}))}.#{b64("s")}"
       assert {:error, :invalid_json} = JWS.peek_json(jwt, :protected)
+    end
+
+    test "rejects duplicate members at every JSON object depth" do
+      duplicate_header = ~s({"alg":"ES256","alg":"RS256"})
+      duplicate_nested_claim = ~s({"cnf":{"jkt":"first","jkt":"second"}})
+
+      header_jwt = "#{b64(duplicate_header)}.#{b64(JSON.encode!(%{}))}.#{b64("s")}"
+      payload_jwt = "#{b64(JSON.encode!(%{"alg" => "ES256"}))}.#{b64(duplicate_nested_claim)}.#{b64("s")}"
+
+      assert {:error, :invalid_json} = JWS.peek_json(header_jwt, :protected)
+      assert {:error, :invalid_json} = JWS.peek_json(payload_jwt, :payload)
     end
 
     test "peeks an alg=none header (empty signature) by default" do
@@ -325,22 +452,31 @@ defmodule Attesto.JWSTest do
       Process.put({__MODULE__, :private_pem}, private_pem)
       Process.put({__MODULE__, :public_pem}, public_pem)
       Process.put({__MODULE__, :sign_calls}, 0)
+      Process.delete({__MODULE__, :failure})
     end
 
     def sign_calls, do: Process.get({__MODULE__, :sign_calls}, 0)
 
     def install_signing_jwk(jwk), do: Process.put({__MODULE__, :signing_jwk}, jwk)
+    def install_signing_jwk_failure(failure), do: Process.put({__MODULE__, :signing_jwk_failure}, failure)
     def install_pss_saltlen(length), do: Process.put({__MODULE__, :pss_saltlen}, length)
+    def install_failure(reason), do: Process.put({__MODULE__, :failure}, reason)
 
     @impl Attesto.Signer
     def signing_jwk do
-      case Process.get({__MODULE__, :signing_jwk}) do
+      case Process.get({__MODULE__, :signing_jwk_failure}) do
         nil ->
-          {_kind, public_map} = Process.get({__MODULE__, :public_pem}) |> Key.jwk() |> JOSE.JWK.to_public_map()
-          public_map
+          case Process.get({__MODULE__, :signing_jwk}) do
+            nil ->
+              {_kind, public_map} = Process.get({__MODULE__, :public_pem}) |> Key.jwk() |> JOSE.JWK.to_public_map()
+              public_map
 
-        jwk ->
-          jwk
+            jwk ->
+              jwk
+          end
+
+        failure ->
+          fail_callback(failure)
       end
     end
 
@@ -348,13 +484,11 @@ defmodule Attesto.JWSTest do
     def sign(signing_input, "RS256") do
       Process.put({__MODULE__, :sign_calls}, sign_calls() + 1)
 
-      private_key =
-        Process.get({__MODULE__, :private_pem})
-        |> Key.signing_jwk()
-        |> JOSE.JWK.to_key()
-        |> elem(1)
-
-      {:ok, :public_key.sign(signing_input, :sha256, private_key)}
+      case Process.get({__MODULE__, :failure}) do
+        nil -> sign_rsa(signing_input)
+        {kind, reason} when kind in [:raise, :throw, :exit] -> fail_callback({kind, reason})
+        reason -> {:error, reason}
+      end
     end
 
     def sign(signing_input, "PS256") do
@@ -372,6 +506,20 @@ defmodule Attesto.JWSTest do
          rsa_pss_saltlen: Process.get({__MODULE__, :pss_saltlen}, 32)
        )}
     end
+
+    defp sign_rsa(signing_input) do
+      private_key =
+        Process.get({__MODULE__, :private_pem})
+        |> Key.signing_jwk()
+        |> JOSE.JWK.to_key()
+        |> elem(1)
+
+      {:ok, :public_key.sign(signing_input, :sha256, private_key)}
+    end
+
+    defp fail_callback({:raise, reason}), do: raise("external backend failure: #{inspect(reason)}")
+    defp fail_callback({:throw, reason}), do: throw(reason)
+    defp fail_callback({:exit, reason}), do: exit(reason)
 
     @impl Attesto.Keystore
     def verification_pems, do: [Process.get({__MODULE__, :public_pem})]

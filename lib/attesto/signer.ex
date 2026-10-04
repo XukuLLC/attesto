@@ -56,7 +56,9 @@ defmodule Attesto.Signer do
             "#{inspect(module)} must export both signing_jwk/0 and sign/2 to use non-extractable signing"
     end
 
-    module.signing_jwk() |> public_jwk!()
+    module
+    |> invoke!(:signing_jwk, [])
+    |> public_jwk!()
   end
 
   @doc false
@@ -64,16 +66,15 @@ defmodule Attesto.Signer do
   def sign!(module, signing_input, alg) when is_atom(module) and is_binary(signing_input) and is_binary(alg) do
     SigningAlg.validate!(alg)
 
-    case module.sign(signing_input, alg) do
+    case invoke!(module, :sign, [signing_input, alg]) do
       {:ok, signature} when is_binary(signature) and byte_size(signature) > 0 ->
         signature
 
-      {:error, reason} ->
-        raise RuntimeError, "external signer failed: #{inspect(reason)}"
+      {:error, _reason} ->
+        raise RuntimeError, "external signer failed"
 
-      other ->
-        raise RuntimeError,
-              "external signer returned #{inspect(other)}; expected {:ok, non_empty_signature} or {:error, reason}"
+      _other ->
+        raise RuntimeError, "external signer returned an invalid result"
     end
   end
 
@@ -87,25 +88,38 @@ defmodule Attesto.Signer do
 
     case Key.verification_jwk(jwk_map, alg: alg) do
       {:ok, jwk} -> jwk
-      {:error, reason} -> raise ArgumentError, "invalid signer public JWK: #{inspect(reason)}"
+      {:error, _reason} -> raise ArgumentError, "invalid signer public JWK"
     end
   end
 
-  defp public_jwk!(other) do
+  defp public_jwk!(_other) do
     raise ArgumentError,
-          "signing_jwk/0 must return a public JWK map or JOSE.JWK; got #{inspect(other)}"
+          "signing_jwk/0 must return a public JWK map or JOSE.JWK"
+  end
+
+  # External custody adapters can fail with an exception, throw, or exit whose
+  # payload contains provider responses, key handles, or other private backend
+  # details. Normalize every callback failure before it crosses Attesto's API
+  # boundary. Validation of a callback's successful return still happens
+  # outside this wrapper so configuration errors retain their useful messages.
+  defp invoke!(module, function, arguments) do
+    apply(module, function, arguments)
+  rescue
+    _exception -> raise RuntimeError, "external signer failed"
+  catch
+    _kind, _reason -> raise RuntimeError, "external signer failed"
   end
 
   defp infer_public_alg!(jwk_map) do
     case Map.get(jwk_map, "alg") do
       alg when is_binary(alg) -> SigningAlg.validate!(alg)
       nil -> jwk_map |> JOSE.JWK.from_map() |> SigningAlg.infer()
-      other -> raise ArgumentError, "signer public JWK alg must be a string; got #{inspect(other)}"
+      _other -> raise ArgumentError, "signer public JWK alg must be a string"
     end
   rescue
-    error ->
+    _error ->
       reraise ArgumentError,
-              [message: "invalid signer public JWK: #{Exception.message(error)}"],
+              [message: "invalid signer public JWK"],
               __STACKTRACE__
   end
 

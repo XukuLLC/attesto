@@ -24,6 +24,13 @@ defmodule Attesto.Revocation do
   `allow_missing_client_id?: true`. A token issued without a client
   binding skips the check.
 
+  ## Issuer binding
+
+  Passing `:issuer` confines revocation to a refresh family issued by that
+  exact authorization-server issuer. A mismatch, including a legacy token
+  with no issuer marker, is the same no-op `:ok` as an unknown token and never
+  mutates the family. Omitting `:issuer` preserves legacy core behavior.
+
   ## Access tokens
 
   Attesto access tokens are stateless, short-lived JWTs, so there is no
@@ -33,7 +40,7 @@ defmodule Attesto.Revocation do
   credential, which is what RFC 7009 revocation is primarily for.
   """
 
-  alias Attesto.Secret
+  alias Attesto.{RefreshToken, Secret}
 
   @type revoke_error :: :unauthorized_client
 
@@ -45,8 +52,9 @@ defmodule Attesto.Revocation do
   `client_id` and the presented `:client_id` does not match (or is absent
   without `allow_missing_client_id?: true`).
 
-  Options: `:client_id` (the authenticated revoking client) and
-  `:allow_missing_client_id?`.
+  Options: `:client_id` (the authenticated revoking client),
+  `:allow_missing_client_id?`, and `:issuer` (the expected authorization
+  server issuer).
   """
   @spec revoke(module(), String.t(), keyword()) :: :ok | {:error, revoke_error()}
   def revoke(store, token, opts \\ []) when is_atom(store) and is_binary(token) and is_list(opts) do
@@ -74,6 +82,13 @@ defmodule Attesto.Revocation do
   # not revoke. A matching (or explicitly allowed missing) client revokes the
   # family and receives that same indistinguishable `:ok` response.
   defp revoke_present(store, record, opts) do
+    case check_issuer(record.data, opts) do
+      :ok -> revoke_for_client(store, record, opts)
+      :mismatch -> :ok
+    end
+  end
+
+  defp revoke_for_client(store, record, opts) do
     if expired?(record) do
       case check_client(record.data, opts) do
         :ok -> revoke_family(store, record.family_id)
@@ -105,7 +120,7 @@ defmodule Attesto.Revocation do
        ) do
     token_hash == expected_hash and is_binary(family_id) and family_id != "" and
       is_map(data) and is_integer(expires_at) and is_boolean(consumed) and
-      valid_client_binding?(data)
+      valid_client_binding?(data) and RefreshToken.valid_issuer_binding?(data)
   end
 
   defp valid_record?(_record, _expected_hash), do: false
@@ -134,6 +149,13 @@ defmodule Attesto.Revocation do
   end
 
   defp check_client(_data, _opts), do: :ok
+
+  defp check_issuer(data, opts) do
+    case Keyword.fetch(opts, :issuer) do
+      :error -> :ok
+      {:ok, expected} -> if RefreshToken.issuer_matches?(data, expected), do: :ok, else: :mismatch
+    end
+  end
 
   defp allow_missing_client?(opts) do
     case Keyword.fetch(opts, :allow_missing_client_id?) do

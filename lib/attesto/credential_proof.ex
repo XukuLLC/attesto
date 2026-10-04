@@ -34,7 +34,7 @@ defmodule Attesto.CredentialProof do
   rejects a proof that carries no `key_attestation` header at all.
   """
 
-  alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SecureCompare, SigningAlg, Thumbprint}
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
@@ -185,8 +185,13 @@ defmodule Attesto.CredentialProof do
 
   defp check_nonce(claims, opts) do
     case Keyword.get(opts, :nonce) do
-      nil -> :ok
-      expected -> if Map.get(claims, "nonce") == expected, do: :ok, else: {:error, :invalid_nonce}
+      nil ->
+        :ok
+
+      expected ->
+        if SecureCompare.equal?(Map.get(claims, "nonce"), expected),
+          do: :ok,
+          else: {:error, :invalid_nonce}
     end
   end
 

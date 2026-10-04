@@ -32,6 +32,11 @@ defmodule Attesto.DidTest do
       assert micros < 500_000
     end
 
+    test "rejects an oversized encoded did:jwk before base64url decoding" do
+      assert {:error, :invalid_jwk} =
+               Did.resolve("did:jwk:" <> String.duplicate("A", 16_385))
+    end
+
     test "preserves permitted public JWK metadata" do
       {_private, public} = keypair({:ec, "P-256"})
       public = Map.merge(public, %{"alg" => "ES256", "kid" => "key-1", "use" => "sig"})

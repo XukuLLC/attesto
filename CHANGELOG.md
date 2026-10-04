@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-10-04
+
+### Security
+
+- Bound compact JWS input and protected/signature segments before splitting or
+  decoding, require canonical Base64URL, and reject duplicate JSON members at
+  any nesting depth in signed headers and claim sets. Apply equivalent
+  pre-decode bounds to `did:jwk` and mdoc credentials.
+- Add optional authorization-server issuer binding for refresh families.
+  Rotation checks the issuer before any consume, retry, or reuse action;
+  introspection treats mismatches as inactive and revocation treats them as an
+  unknown token without mutating the family. Callers that omit the issuer keep
+  the existing core behavior.
+- Bound private-key JWT `jti` values, compare credential/key-attestation nonces
+  and cached refresh successors in constant time, and keep external signer
+  failures from exposing backend errors or key material.
+- Document that attacker-controlled identifiers must not be used as telemetry
+  metric labels because they permit unbounded series cardinality.
+
 ## [2.2.1] - 2026-10-03
 
 ### Changed

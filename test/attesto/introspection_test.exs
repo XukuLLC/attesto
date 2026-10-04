@@ -8,6 +8,8 @@ defmodule Attesto.IntrospectionTest do
   alias Attesto.Test.Factory
   alias Attesto.Token
 
+  @issuer_claim_key "urn:attesto:refresh-token:issuer"
+
   setup do
     {:ok, config: Factory.config(Factory.rsa_pem())}
   end
@@ -38,6 +40,13 @@ defmodule Attesto.IntrospectionTest do
       assert is_integer(response["iat"])
       assert is_binary(response["jti"])
       assert response["token_type"] == "Bearer"
+    end
+
+    test "the refresh issuer option does not alter access-token introspection", %{config: config} do
+      now = 1_700_000_000
+      {:ok, %{access_token: jwt}} = Token.mint(config, client_principal(), now: now)
+
+      assert Introspection.introspect(config, jwt, now: now, issuer: config.issuer)["active"] == true
     end
 
     test "an expired access token is inactive (no existence oracle)", %{config: config} do
@@ -300,12 +309,14 @@ defmodule Attesto.IntrospectionTest do
       :ok
     end
 
-    defp introspect_refresh(config, token, now) do
-      Introspection.introspect(config, token,
-        now: now,
-        refresh_store: StubRefreshStore,
-        token_type_hint: "refresh_token"
-      )
+    defp introspect_refresh(config, token, now, extra_opts \\ []) do
+      opts =
+        Keyword.merge(
+          [now: now, refresh_store: StubRefreshStore, token_type_hint: "refresh_token"],
+          extra_opts
+        )
+
+      Introspection.introspect(config, token, opts)
     end
 
     test "a stored, unconsumed, unexpired refresh token is active (minimal members)", %{config: config} do
@@ -356,6 +367,36 @@ defmodule Attesto.IntrospectionTest do
       refute_received {:introspection_store_failure, _, _, _}
     end
 
+    test "expected issuer confines refresh introspection and fails closed for legacy records", %{config: config} do
+      now = 1_700_000_000
+
+      StubRefreshStore.put("refresh-bound", %{
+        family_id: "fam-bound",
+        expires_at: now + 1_000,
+        consumed: false,
+        data: %{claims: %{@issuer_claim_key => config.issuer}}
+      })
+
+      assert introspect_refresh(config, "refresh-bound", now, issuer: config.issuer)["active"] == true
+
+      assert introspect_refresh(config, "refresh-bound", now, issuer: "https://other-issuer.example/") == %{
+               "active" => false
+             }
+
+      # Core remains backward compatible when the caller has not opted in.
+      assert introspect_refresh(config, "refresh-bound", now)["active"] == true
+
+      StubRefreshStore.put("refresh-legacy", %{
+        family_id: "fam-legacy",
+        expires_at: now + 1_000,
+        consumed: false,
+        data: %{}
+      })
+
+      assert introspect_refresh(config, "refresh-legacy", now, issuer: config.issuer) == %{"active" => false}
+      assert introspect_refresh(config, "refresh-legacy", now)["active"] == true
+    end
+
     test "a malformed record missing :consumed is inactive (fail closed)", %{config: config} do
       now = 1_700_000_000
       StubRefreshStore.put("refresh-malformed", %{family_id: "fam-1", expires_at: now + 1000, data: %{}})
@@ -389,6 +430,7 @@ defmodule Attesto.IntrospectionTest do
             {"subject", %{subject: "", scope: []}},
             {"resource", %{subject: "user-42", scope: [], resource: [""]}},
             {"claims", %{subject: "user-42", scope: [], claims: []}},
+            {"issuer", %{claims: %{@issuer_claim_key => "http://private-issuer.example"}}},
             {"conflict", %{"subject" => "different", subject: "user-42", scope: []}}
           ] do
         token = "refresh-malformed-#{suffix}"

@@ -41,7 +41,7 @@ defmodule Attesto.Introspection do
   unmatched hint still falls through to the other.
   """
 
-  alias Attesto.{Config, NumericDate, Scope, Secret, Thumbprint, Token}
+  alias Attesto.{Config, NumericDate, RefreshToken, Scope, Secret, Thumbprint, Token}
 
   @inactive %{"active" => false}
 
@@ -54,6 +54,7 @@ defmodule Attesto.Introspection do
   @type opts :: [
           refresh_store: module() | nil,
           token_type_hint: String.t() | nil,
+          issuer: String.t() | nil,
           trusted_audiences: [String.t()] | (map() -> [String.t()]) | nil,
           authorize: (response() -> boolean()) | nil,
           now: integer() | DateTime.t()
@@ -69,6 +70,9 @@ defmodule Attesto.Introspection do
       refresh tokens; when absent, only access tokens are introspected.
     * `:token_type_hint` - `"access_token"` or `"refresh_token"` (RFC 7662
       §2.1); reorders the attempts, never restricts them.
+    * `:issuer` - the expected authorization-server issuer for refresh tokens.
+      When supplied, a different binding or a legacy refresh token with no
+      binding is inactive. Omitting it preserves legacy core behavior.
     * `:trusted_audiences` - a non-empty allowlist of access-token audiences
       this authorization server recognizes for introspection, or a one-arity
       resolver receiving otherwise-verified claims whose `aud` has not yet
@@ -175,6 +179,7 @@ defmodule Attesto.Introspection do
     with store when is_atom(store) and not is_nil(store) <- Keyword.get(opts, :refresh_store),
          token_hash = Secret.hash(token),
          {:ok, entry} <- refresh_store_get(store, token_hash),
+         true <- refresh_issuer_matches?(entry, opts),
          true <- active_refresh?(entry, NumericDate.now(opts)) do
       rfc7662_refresh_response(entry)
     else
@@ -250,7 +255,8 @@ defmodule Attesto.Introspection do
       valid_optional_data_member?(data, :dpop_jkt, &nil_or_thumbprint?/1) and
       valid_optional_data_member?(data, :acr, &nil_or_non_empty_binary?/1) and
       valid_optional_data_member?(data, :auth_time, &nil_or_non_negative_integer?/1) and
-      valid_optional_data_member?(data, :claims, &is_map/1)
+      valid_optional_data_member?(data, :claims, &is_map/1) and
+      RefreshToken.valid_issuer_binding?(data)
   end
 
   defp valid_refresh_data?(_data), do: false
@@ -281,6 +287,13 @@ defmodule Attesto.Introspection do
   defp report_refresh_store_failure(reason) do
     Attesto.Telemetry.introspection_refresh_store_failed(reason)
     :error
+  end
+
+  defp refresh_issuer_matches?(%{data: data}, opts) do
+    case Keyword.fetch(opts, :issuer) do
+      :error -> true
+      {:ok, expected} -> RefreshToken.issuer_matches?(data, expected)
+    end
   end
 
   # A refresh token is active only while it is explicitly unconsumed and

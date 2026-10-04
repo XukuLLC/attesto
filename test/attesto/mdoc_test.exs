@@ -74,6 +74,11 @@ defmodule Attesto.MdocTest do
            }
   end
 
+  test "rejects oversized base64url input before decoding it", ctx do
+    encoded = String.duplicate("A", 1_398_103)
+    assert {:error, :invalid_mdoc} = Mdoc.verify(encoded, ctx.issuer_public, now: ctx.now)
+  end
+
   test "a changed element value fails item-digest verification", ctx do
     assert {:ok, issued} = Mdoc.issue(ctx.opts)
     raw = Base.url_decode64!(issued, padding: false)
