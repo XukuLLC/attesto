@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - Unreleased
+
+### Added
+
+- Add `Attesto.JWE.encrypt/4` and `decrypt/3` for bounded compact credential
+  encryption using ECDH-ES with P-256 and A128GCM or A256GCM. Callers select
+  algorithms from trusted protocol metadata and can narrow the accepted set.
+- Validate encoded sizes, canonical Base64URL, duplicate protected JSON
+  members, ephemeral public keys, fixed GCM parameters, and key-use constraints
+  before decryption. Reject compression and unsupported critical extensions;
+  return controlled errors for malformed input and authentication failure.
+
 ## [2.2.2] - 2026-10-04
 
 ### Security

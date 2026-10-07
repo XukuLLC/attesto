@@ -365,6 +365,17 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
   `Attesto.PresentationSession` (the verifier state machine: single-use
   nonce↔response correlation).
 
+**Encrypted credential exchanges**
+
+- `Attesto.JWE` — bounded compact encryption and authenticated decryption
+  with ECDH-ES/P-256 and A128GCM or A256GCM. It rejects noncanonical encoding,
+  duplicate protected JSON members, unsupported critical extensions,
+  compression, and invalid GCM or ephemeral-key parameters before decryption.
+  Select the algorithms and recipient key from authenticated protocol metadata;
+  application trust and protocol claim validation remain with the caller.
+  Wallet transport and metadata negotiation are implemented by
+  [`attesto_client`](https://hex.pm/packages/attesto_client).
+
 **Self-issued identity & DID resolution**
 
 - `Attesto.Siop` — verify SIOPv2 Self-Issued ID Tokens against an embedded
