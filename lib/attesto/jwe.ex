@@ -47,7 +47,6 @@ defmodule Attesto.JWE do
     else
       true -> {:error, :invalid_header}
       {:error, _reason} = error -> error
-      _other -> {:error, :invalid_jwe}
     end
   rescue
     _error -> {:error, :invalid_jwe}
@@ -80,7 +79,6 @@ defmodule Attesto.JWE do
       {:ok, plaintext, header}
     else
       {:error, _reason} = error -> error
-      _other -> {:error, :invalid_jwe}
     end
   rescue
     _error -> {:error, :invalid_jwe}
