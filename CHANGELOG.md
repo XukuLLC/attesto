@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.3.0] - Unreleased
 
+### Changed
+
+- Allow certificate-identified SD-JWT VC credentials to omit `iss` using
+  `issuer_identity: :certificate` after the caller validates the issuer chain
+  and supplies its verified leaf key. Existing issuer-claim requirements
+  remain the default; a present malformed issuer still fails.
+
 ### Added
 
 - Add `Attesto.JWE.encrypt/4` and `decrypt/3` for bounded compact credential

@@ -140,6 +140,57 @@ defmodule Attesto.SdJwtVcTest do
   end
 
   describe "verify/3 VC claim rules" do
+    test "certificate identity permits an omitted issuer only when explicitly selected" do
+      %{cert: der, key: key} =
+        :public_key.pkix_test_root_cert(~c"wallet-issuer", key: {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}})
+
+      jwk = JOSE.JWK.from_key(key)
+      {_type, pem} = JOSE.JWK.to_pem(jwk)
+      {_type, public} = JOSE.JWK.to_public_map(jwk)
+
+      credential =
+        SdJwt.issue(%{"vct" => "identity"},
+          pem: pem,
+          typ: "dc+sd-jwt",
+          x5c: [Base.encode64(der)]
+        )
+
+      assert {:error, :missing_iss} = SdJwtVc.verify(credential, public)
+
+      assert {:ok, %{iss: nil, vct: "identity"}} =
+               SdJwtVc.verify(credential, public, issuer_identity: :certificate)
+
+      assert {:error, :invalid_issuer_identity} =
+               SdJwtVc.verify(credential, public, issuer_identity: :unknown)
+
+      {_type, other} = JOSE.JWK.generate_key({:ec, "P-256"}) |> JOSE.JWK.to_public_map()
+
+      assert {:error, _reason} =
+               SdJwtVc.verify(credential, other, issuer_identity: :certificate)
+    end
+
+    test "certificate identity does not permit a missing header or malformed issuer" do
+      {pem, jwk} = keypair()
+      %{cert: der} = :public_key.pkix_test_root_cert(~c"wallet-issuer", [])
+
+      without_header = SdJwt.issue(%{"vct" => "identity"}, pem: pem, typ: "dc+sd-jwt")
+
+      assert {:error, :missing_iss} =
+               SdJwtVc.verify(without_header, jwk, issuer_identity: :certificate)
+
+      for issuer <- [nil, "", 123] do
+        credential =
+          SdJwt.issue(%{"vct" => "identity", "iss" => issuer},
+            pem: pem,
+            typ: "dc+sd-jwt",
+            x5c: [Base.encode64(der)]
+          )
+
+        assert {:error, :missing_iss} =
+                 SdJwtVc.verify(credential, jwk, issuer_identity: :certificate)
+      end
+    end
+
     test "rejects a plain SD-JWT that is not typed as a VC" do
       {pem, jwk} = keypair()
       # A base SD-JWT with no vc+sd-jwt typ.

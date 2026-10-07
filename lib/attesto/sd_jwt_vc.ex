@@ -19,14 +19,16 @@ defmodule Attesto.SdJwtVc do
       `:typ` (`vc+sd-jwt` or `dc+sd-jwt`; defaults to `vc+sd-jwt`).
     * `verify/3` — verify the issuer signature (typed `vc+sd-jwt`), reconstruct
       the disclosed claims, and enforce the VC claim rules: `iss` and `vct`
-      REQUIRED and non-empty, `exp` (if present) not passed, `nbf` (if present)
+      non-empty by default, `exp` (if present) not passed, `nbf` (if present)
       reached. Holder binding is a separate step - pass the returned `cnf` key to
       `Attesto.SdJwt.verify_key_binding/3` with the presentation's nonce/audience.
+      Explicit certificate identity mode permits an omitted `iss` after the
+      caller establishes certificate trust.
 
   Conn-free and fail-closed, like the rest of attesto core.
   """
 
-  alias Attesto.{MapParams, NumericDate, SdJwt}
+  alias Attesto.{JWS, MapParams, NumericDate, SdJwt}
 
   # RFC-registered media type for an SD-JWT VC; the newer draft additionally
   # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
@@ -44,14 +46,20 @@ defmodule Attesto.SdJwtVc do
   @type verified :: %{
           claims: map(),
           vct: String.t(),
-          iss: String.t(),
+          iss: String.t() | nil,
           cnf: map() | nil,
           key_binding_jwt: String.t() | nil,
           issuer_jwt: String.t(),
           disclosures: [String.t()]
         }
 
-  @type verify_error :: SdJwt.verify_error() | :missing_iss | :missing_vct | :expired | :not_yet_valid
+  @type verify_error ::
+          SdJwt.verify_error()
+          | :missing_iss
+          | :invalid_issuer_identity
+          | :missing_vct
+          | :expired
+          | :not_yet_valid
 
   @doc """
   Issue an SD-JWT VC.
@@ -171,6 +179,13 @@ defmodule Attesto.SdJwtVc do
   `Attesto.SdJwt.verify/3` (e.g. `:accepted_algs`), plus:
 
     * `:now` / `:max_age_seconds` - clock reference for the temporal checks.
+    * `:issuer_identity` - defaults to `:claim`, requiring a nonempty `iss`.
+      Set `:certificate` only after validating the issuer's certificate chain
+      and supplying its verified leaf public key as `jwks`. This mode permits
+      an omitted `iss` when the signed header contains `x5c`, as in the SD-JWT
+      VC profile referenced by HAIP. A present malformed `iss` still fails.
+      This module does not establish certificate trust; an `x5c` header alone
+      is never a trust decision.
 
   Returns `{:ok, %{claims:, vct:, iss:, cnf:, key_binding_jwt:, ...}}`. Holder
   binding is NOT checked here - if `cnf` is present and the presentation carries
@@ -183,7 +198,7 @@ defmodule Attesto.SdJwtVc do
     opts = Keyword.put_new(opts, :accepted_typ, @accepted_typ)
 
     with {:ok, base} <- SdJwt.verify(combined, jwks, opts),
-         {:ok, iss} <- require_string(base.claims, "iss", :missing_iss),
+         {:ok, iss} <- credential_issuer(base, opts),
          {:ok, vct} <- require_string(base.claims, "vct", :missing_vct),
          :ok <- check_exp(base.claims, opts),
          :ok <- check_nbf(base.claims, opts) do
@@ -201,6 +216,30 @@ defmodule Attesto.SdJwtVc do
   end
 
   # ── claim rules ──────────────────────────────────────────────────────────
+
+  defp credential_issuer(base, opts) do
+    case Keyword.get(opts, :issuer_identity, :claim) do
+      :claim ->
+        require_string(base.claims, "iss", :missing_iss)
+
+      :certificate ->
+        certificate_issuer(base)
+
+      _invalid ->
+        {:error, :invalid_issuer_identity}
+    end
+  end
+
+  defp certificate_issuer(base) do
+    with {:ok, header} <- JWS.peek_json(base.issuer_jwt, :protected),
+         [_ | _] <- Map.get(header, "x5c") do
+      if Map.has_key?(base.claims, "iss"),
+        do: require_string(base.claims, "iss", :missing_iss),
+        else: {:ok, nil}
+    else
+      _invalid -> {:error, :missing_iss}
+    end
+  end
 
   defp require_string(claims, key, error) do
     case Map.get(claims, key) do
