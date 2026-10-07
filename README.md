@@ -45,7 +45,17 @@ as an authorization server built from `attesto` +
 
 The client side, [`attesto_client`](https://github.com/XukuLLC/attesto_client),
 is separately certified as a **Relying Party library** (Basic, Config, and
-Dynamic OP profiles).
+Dynamic RP profiles).
+
+Attesto also provides the shared credential protocol and cryptography for the
+`attesto_phoenix` deployment certified as an
+[**OpenID4VCI 1.0 + HAIP 1.0 issuer**](https://openid.net/certification/certified-oid4vci-haip-final/)
+and an
+[**OpenID4VP 1.0 + HAIP 1.0 verifier**](https://openid.net/certification/certified-oid4vp-haip-final/).
+Both cover **SD-JWT VC** and **ISO mdoc**; issuer coverage includes
+wallet-initiated and issuer-initiated authorization code flows, and verifier
+coverage uses `direct_post.jwt`. The certified deployment versions are
+`attesto` **2.2.2**, `attesto_phoenix` **3.5.1**, and `attesto_client` **2.6.1**.
 
 Certification runs against the OpenID Foundation's conformance suite and the
 results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade
@@ -314,7 +324,7 @@ Attesto.Scope.grants_all?(catalog, ["documents.read"], ["documents.write"])
 
 Attesto implements the conn-free core of the OpenID for Verifiable Credentials
 stack — the issuer and verifier roles behind an EUDI-wallet-facing service —
-targeting the [OpenID4VC High Assurance Interoperability Profile
+supporting the [OpenID4VC High Assurance Interoperability Profile
 (HAIP)](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0.html).
 As with the rest of the library, these are pure functions and behaviours; the
 HTTP endpoints live in `attesto_phoenix`.
@@ -460,7 +470,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | ISO/IEC 18013-5 | Mobile documents (mdoc / `mso_mdoc`: IssuerSigned + MSO + device auth) | Supported (`Attesto.Mdoc`, optional `:cbor`) |
 | RFC 8152 (COSE) | COSE_Sign1 (ES256) + COSE_Key, as used by mdoc | Supported (`Attesto.Cose`, optional `:cbor`) |
 | Token Status List (`draft-ietf-oauth-status-list`) | `statuslist+jwt` revocation | Supported (`Attesto.StatusList`) |
-| OID4VC HAIP 1.0 | High Assurance Interoperability Profile (SD-JWT VC + mdoc, DCQL, encrypted responses) | Targeted |
+| OID4VC HAIP 1.0 | High Assurance Interoperability Profile (SD-JWT VC + mdoc, DCQL, encrypted responses) | Supported; [issuer/verifier certification](#certification) with `attesto_phoenix` |
 
 ## Plug integration (optional)
 
