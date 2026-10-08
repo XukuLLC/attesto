@@ -155,9 +155,10 @@ defmodule Attesto.Siop do
   defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
-    if is_list(accepted_algs) and alg in accepted_algs and alg in SigningAlg.allowed(),
-      do: {:ok, alg},
-      else: {:error, :invalid_alg}
+    if SigningAlg.valid_verification_algorithms?(accepted_algs) and alg in accepted_algs and
+         alg in SigningAlg.allowed(),
+       do: {:ok, alg},
+       else: {:error, :invalid_alg}
   end
 
   defp check_alg(_header, _opts), do: {:error, :invalid_alg}

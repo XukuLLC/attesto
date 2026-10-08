@@ -78,6 +78,84 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
     end
   end
 
+  for api <- @fapi_apis do
+    test "#{api} never weakens RSA strength through a mixed allowlist", context do
+      api = unquote(api)
+      weak = %{context | signer: context.weak_rsa, alg: "PS256"}
+      strong = %{context | signer: context.strong_rsa, alg: "PS256"}
+      accepted = ["PS256", "ES256", "ES384"]
+
+      assert {:error, _reason} = verify_for(api, weak, accepted_algs: accepted)
+      assert {:ok, _verified} = verify_for(api, strong, accepted_algs: accepted)
+
+      assert {:ok, _verified} =
+               verify_for(api, weak, accepted_algs: accepted, enforce_fapi_alg_policy: false)
+    end
+  end
+
+  for api <- @apis do
+    test "#{api} rejects an entire malformed algorithm allowlist", context do
+      for policy <- [
+            nil,
+            "ES256",
+            false,
+            ["ES256", "ES256"],
+            ["ES256", nil],
+            ["ES256", :ES256],
+            ["ES256", "ES25X"],
+            ["ES256", %{}]
+          ] do
+        assert {:error, _reason} = verify_for(unquote(api), context, accepted_algs: policy)
+      end
+    end
+  end
+
+  for api <- @fapi_apis do
+    test "#{api} requires explicit opt-out for a valid broader algorithm", context do
+      key = JOSE.JWK.generate_key({:ec, "P-384"})
+      broader = %{context | signer: key, alg: "ES384"}
+      accepted = ["ES256", "ES384"]
+
+      assert {:error, _reason} = verify_for(unquote(api), broader, accepted_algs: accepted)
+
+      assert {:error, _reason} =
+               verify_for(unquote(api), broader, accepted_algs: accepted, enforce_fapi_alg_policy: true)
+
+      assert {:ok, _verified} =
+               verify_for(unquote(api), broader, accepted_algs: accepted, enforce_fapi_alg_policy: false)
+    end
+
+    test "#{api} rejects malformed enforcement flags", context do
+      for value <- [nil, "false", 0] do
+        assert_raise ArgumentError, fn ->
+          verify_for(unquote(api), context, enforce_fapi_alg_policy: value)
+        end
+      end
+    end
+  end
+
+  test "low-level policy validation rejects malformed lists before candidate construction", context do
+    public = trusted(context)
+    jwt = signed(context.signer, "ES256", %{"ok" => true})
+    candidates = JWS.verification_candidates(public)
+
+    for policy <- [nil, "ES256", ["ES256", "ES256"], ["ES256", nil], ["ES256", "ES25X"], ["ES256", :ES256]] do
+      assert [] = JWS.verification_candidates(public, accepted_algs: policy)
+      assert {:error, :invalid_signature} = JWS.verify_strict(jwt, candidates, accepted_algs: policy)
+
+      assert [] =
+               JWS.verification_candidates(public,
+                 accepted_algs: policy,
+                 candidate_builder: fn _key -> flunk("malformed policy reached key construction") end
+               )
+    end
+
+    for value <- [nil, "false", 0] do
+      assert [] = JWS.verification_candidates(public, fapi?: value)
+      assert {:error, :invalid_signature} = JWS.verify_strict(jwt, candidates, fapi?: value)
+    end
+  end
+
   test "low-level omitted JWS policy remains unrestricted but explicit empty policy denies", context do
     key = context.strong_rsa
     public = public_key(key, "RS256")
@@ -101,7 +179,10 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
     broader = %{context | signer: key, alg: "ES384"}
 
     assert {:error, :unsupported_alg} = verify_for(:sd_jwt, broader, [])
-    assert {:ok, _verified} = verify_for(:sd_jwt, broader, accepted_algs: ["ES384"])
+    assert {:error, :invalid_signature} = verify_for(:sd_jwt, broader, accepted_algs: ["ES384"])
+
+    assert {:ok, _verified} =
+             verify_for(:sd_jwt, broader, accepted_algs: ["ES384"], enforce_fapi_alg_policy: false)
 
     assert {:error, :invalid_signature} =
              verify_for(:sd_jwt, broader, accepted_algs: ["ES384"], enforce_fapi_alg_policy: true)

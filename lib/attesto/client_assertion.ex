@@ -73,8 +73,7 @@ defmodule Attesto.ClientAssertion do
       and explicit Ed25519). An empty list always denies all algorithms.
     * `:enforce_fapi_alg_policy` - enforce the FAPI RSA modulus and Edwards
       curve restrictions in addition to `:accepted_algs`. Defaults to `true`
-      when `:accepted_algs` is omitted or narrows the default list, and `false`
-      for an explicitly broader algorithm policy. Explicit `false` relaxes
+      for every algorithm allowlist. Only explicit `false` relaxes
       these gates.
   """
   @spec verify(String.t(), String.t(), String.t() | [String.t()], map() | [map()] | map(), verify_opts()) ::

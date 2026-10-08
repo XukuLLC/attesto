@@ -59,8 +59,7 @@ defmodule Attesto.RequestObject do
       and explicit Ed25519).
     * `:enforce_fapi_alg_policy` - additionally enforce the FAPI key/algorithm
       policy, rejecting RSA moduli below 2048 bits and legacy `EdDSA` over
-      Ed448. Defaults to `true` when `:accepted_algs` is omitted or narrows the
-      default list, and `false` for an explicitly broader algorithm policy.
+      Ed448. Defaults to `true` for every algorithm allowlist.
       Explicit `false` relaxes these gates; an empty list always denies all.
     * `:require_nbf` - when `true`, reject an object without an `nbf` claim.
       Defaults to `false`. (RFC 9101 / FAPI Message Signing 2.0 §5.3.1.)
