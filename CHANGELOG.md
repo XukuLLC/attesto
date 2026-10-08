@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - Unreleased
+
+### Security
+
+- Preserve the default FAPI algorithm and key-strength policy for every explicit
+  allowlist, including mixed lists. Only `enforce_fapi_alg_policy: false` opts
+  into a broader policy. Reject malformed, unknown, duplicate and non-string
+  algorithm entries; an empty list continues to deny all algorithms.
+- Bind presentation responses to the requested credential-query IDs. Reject
+  unsolicited IDs before credential processing, while retaining separate sets
+  for permitted and required IDs.
+- Return controlled errors for malformed presentation values, including scalar
+  values in encrypted presentation-session responses.
+
+Version 2.3.0 was tagged but not published to Hex. This release includes its
+changes below; its tag remains unchanged.
+
 ## [2.3.0] - 2026-10-08
 
 ### Security
