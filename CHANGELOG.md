@@ -19,6 +19,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Verify PS256, PS384 and PS512 signatures with exact 32-, 48- and 64-byte PSS
   salt lengths and the corresponding MGF1 hash, independent of JOSE backend
   defaults. Reject otherwise valid signatures with different salt lengths.
+- Pin the same PSS parameters when the DPoP testing helper signs proofs,
+  ensuring conforming signatures across native and fallback crypto backends.
 
 ### Changed
 

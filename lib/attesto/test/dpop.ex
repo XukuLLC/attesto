@@ -222,18 +222,21 @@ defmodule Attesto.Test.DPoP do
 
   # ----- internal: signing -----
 
-  # Mirror `Attesto.Token.sign/2`: sign through `JOSE.JWS` (not
-  # `JOSE.JWT`) so the protected header is emitted verbatim and the
-  # `typ: "dpop+jwt"` survives, then compact. Only the public half of the
-  # key is embedded in `jwk`, as RFC 9449 §4.2 requires.
+  # Preserve the protected header verbatim and embed only the public key.
+  # PSS signing pins the JWA salt/MGF1 instead of backend-specific defaults.
   defp sign(jwk, payload, opts) do
     pub = public_jwk(jwk)
     alg = Keyword.get(opts, :alg, SigningAlg.infer(jwk))
     alg = validate_dpop_alg!(alg, jwk)
     header = %{"typ" => @proof_typ, "alg" => alg, "jwk" => public_jwk_map(pub)}
-    signed = JOSE.JWS.sign(jwk, JSON.encode!(payload), header)
-    {_protected, compact} = JOSE.JWS.compact(signed)
-    compact
+
+    if alg in ["PS256", "PS384", "PS512"] do
+      Attesto.JWS.sign_compact_jwk(jwk, header, payload)
+    else
+      signed = JOSE.JWS.sign(jwk, JSON.encode!(payload), header)
+      {_protected, compact} = JOSE.JWS.compact(signed)
+      compact
+    end
   end
 
   defp public_jwk(jwk), do: JOSE.JWK.to_public(jwk)

@@ -4,6 +4,7 @@ defmodule Attesto.Test.Factory do
   # DPoP proofs with JOSE so the engine can be exercised end to end.
 
   alias Attesto.Keystore.Static
+  alias Attesto.Test.JWT
 
   @doc "A fresh PKCS#1 RSA private-key PEM for default-RSA fixtures."
   def rsa_pem(bits \\ 2048) do
@@ -81,7 +82,7 @@ defmodule Attesto.Test.Factory do
       }
       |> maybe_put("ath", Keyword.get(opts, :ath))
 
-    {_, proof} = jwk |> JOSE.JWT.sign(header, payload) |> JOSE.JWS.compact()
+    proof = JWT.sign_compact(jwk, header, payload)
     {proof, JOSE.JWK.thumbprint(jwk)}
   end
 

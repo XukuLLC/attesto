@@ -603,6 +603,19 @@ defmodule Attesto.JWS do
     pem |> Key.signing_jwk() |> sign_compact_with_jwk(header, claims)
   end
 
+  @doc false
+  @spec sign_compact_jwk(JOSE.JWK.t(), map(), map()) :: String.t()
+  def sign_compact_jwk(jwk, header, claims)
+
+  def sign_compact_jwk(%JOSE.JWK{} = jwk, %{"alg" => alg} = header, claims)
+      when alg in ["PS256", "PS384", "PS512"] and is_map(claims) do
+    sign_ps_compact(jwk, header, JSON.encode!(claims), alg)
+  end
+
+  def sign_compact_jwk(%JOSE.JWK{} = jwk, header, claims) when is_map(header) and is_map(claims) do
+    sign_compact_with_jwk(jwk, header, claims)
+  end
+
   defp sign_compact_with_jwk(jwk, header, claims) do
     alg = header |> Map.fetch!("alg") |> SigningAlg.validate!()
     payload = JSON.encode!(claims)
@@ -667,7 +680,7 @@ defmodule Attesto.JWS do
       :public_key.sign(
         signing_input,
         hash_alg(alg),
-        private_key(jwk),
+        rsa_private_key!(jwk),
         pss_opts(alg)
       )
 
@@ -681,6 +694,13 @@ defmodule Attesto.JWS do
   end
 
   defp private_key(jwk), do: jwk |> JOSE.JWK.to_key() |> elem(1)
+
+  defp rsa_private_key!(jwk) do
+    case private_key(jwk) do
+      {:RSAPrivateKey, _, _, _, _, _, _, _, _, _, _} = key -> key
+      _key -> raise ArgumentError, "PSS signing requires an RSA private key"
+    end
+  end
 
   defp pss_opts(alg) do
     [

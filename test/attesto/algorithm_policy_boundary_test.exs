@@ -5,6 +5,7 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
   alias Attesto.CIBA.Request, as: CibaRequest
   alias Attesto.{RequestObject, SdJwt, SdJwtVc, StatusList, WalletAttestation}
   alias Attesto.RequestObject.Policy
+  alias Attesto.Test.JWT
 
   @now 1_700_000_000
   @client "client-example"
@@ -259,7 +260,6 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
   end
 
   defp signed(key, alg, claims, typ \\ "oauth-authz-req+jwt") do
-    {_jws, jwt} = key |> JOSE.JWT.sign(%{"alg" => alg, "typ" => typ}, claims) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(key, %{"alg" => alg, "typ" => typ}, claims)
   end
 end

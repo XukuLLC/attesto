@@ -4,6 +4,7 @@ defmodule Attesto.RequestObjectTest do
 
   alias Attesto.RequestObject
   alias Attesto.RequestObject.Policy
+  alias Attesto.Test.JWT
 
   @client_id "client-123"
   @issuer @client_id
@@ -33,8 +34,7 @@ defmodule Attesto.RequestObjectTest do
       )
 
     header = Map.merge(%{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}, header_overrides)
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   defp base_opts, do: [issuer: @issuer, audience: @audience]
