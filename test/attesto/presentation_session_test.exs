@@ -203,7 +203,7 @@ defmodule Attesto.PresentationSessionTest do
     {:ok, session} = create_session(ctx)
     vp_token = valid_vp_token(ctx, session.nonce)
 
-    assert {:ok, %{@query_id => verified}} =
+    assert {:ok, %{@query_id => [verified]}} =
              PresentationSession.verify_response(Store, {:state, session.id}, vp_token, now: ctx.now)
 
     assert verified.vct == "identity"
@@ -216,7 +216,7 @@ defmodule Attesto.PresentationSessionTest do
     assert entry.data.status == :completed
     refute Map.has_key?(entry.data, :result)
 
-    assert {:ok, %{@query_id => ^verified}} =
+    assert {:ok, %{@query_id => [^verified]}} =
              PresentationSession.result(Store, session.id)
 
     # Single-use: a second read (e.g. a replayed response_code) gets nothing.
@@ -252,6 +252,46 @@ defmodule Attesto.PresentationSessionTest do
     )
 
     assert :error = PresentationSession.result(ContractStore, "session-expired")
+  end
+
+  test "scalar compatibility is explicit and does not complete a session on default rejection", ctx do
+    {:ok, session} = create_session(ctx)
+    %{@query_id => [presentation]} = valid_vp_token(ctx, session.nonce)
+    scalar_token = %{@query_id => presentation}
+
+    assert_raise ArgumentError, fn ->
+      PresentationSession.verify_response(Store, {:state, session.id}, scalar_token, now: ctx.now)
+    end
+
+    assert_pending(session.id)
+
+    assert {:ok, %{@query_id => verified}} =
+             PresentationSession.verify_response(Store, {:state, session.id}, scalar_token,
+               now: ctx.now,
+               legacy_scalar_values: true
+             )
+
+    assert verified.vct == "identity"
+    assert {:ok, %{@query_id => ^verified}} = PresentationSession.result(Store, session.id)
+  end
+
+  test "an empty issuer algorithm policy rejects before consuming a presentation session", ctx do
+    {:ok, session} = create_session(ctx)
+    token = valid_vp_token(ctx, session.nonce)
+
+    assert {:error, {:invalid_presentation, {@query_id, :unsupported_alg}}} =
+             PresentationSession.verify_response(Store, {:state, session.id}, token,
+               now: ctx.now,
+               accepted_algs: []
+             )
+
+    assert_pending(session.id)
+
+    assert {:ok, %{@query_id => [_verified]}} =
+             PresentationSession.verify_response(Store, {:state, session.id}, token,
+               now: ctx.now,
+               accepted_algs: ["ES256"]
+             )
   end
 
   test "all presentation-store callback return contracts fail loudly with constant messages", ctx do
@@ -520,7 +560,7 @@ defmodule Attesto.PresentationSessionTest do
         |> CBOR.encode()
         |> Base.url_encode64(padding: false)
 
-      %{@mdoc_query_id => device_response}
+      %{@mdoc_query_id => [device_response]}
     end
 
     defp mdoc_session_transcript(client_id, nonce, response_uri) do
@@ -540,7 +580,7 @@ defmodule Attesto.PresentationSessionTest do
       {:ok, session} = mdoc_create_session(ctx)
       vp_token = mdoc_vp_token(ctx, session.nonce)
 
-      assert {:ok, %{@mdoc_query_id => verified}} =
+      assert {:ok, %{@mdoc_query_id => [verified]}} =
                PresentationSession.verify_response(Store, {:state, session.id}, vp_token, now: ctx.now)
 
       assert verified.doc_type == @doc_type
@@ -612,7 +652,7 @@ defmodule Attesto.PresentationSessionTest do
 
   defp valid_vp_token(ctx, nonce, audience \\ @audience) do
     presentation = ctx.vc <> kb_jwt(ctx.holder_pem, ctx.vc, nonce, audience, ctx.now)
-    %{@query_id => presentation}
+    %{@query_id => [presentation]}
   end
 
   defp assert_pending(id) do

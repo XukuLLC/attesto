@@ -3,6 +3,7 @@ defmodule Attesto.ClientAssertionTest do
   use ExUnit.Case, async: false
 
   alias Attesto.ClientAssertion
+  alias Attesto.Test.JWT
 
   @client_id "client-123"
   @audience "https://issuer.example/oauth/token"
@@ -31,8 +32,7 @@ defmodule Attesto.ClientAssertionTest do
       )
 
     header = %{"alg" => alg, "kid" => JOSE.JWK.thumbprint(jwk)}
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   test "verifies a valid private_key_jwt assertion against a trusted JWK" do
@@ -188,7 +188,10 @@ defmodule Attesto.ClientAssertionTest do
              )
 
     assert {:ok, _claims} =
-             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: ["PS256"])
+             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+               accepted_algs: ["PS256"],
+               enforce_fapi_alg_policy: false
+             )
   end
 
   test "default :accepted_algs keeps the FAPI set (current behaviour)" do
@@ -262,8 +265,16 @@ defmodule Attesto.ClientAssertionTest do
                  enforce_fapi_alg_policy: true
                )
 
+      if alg == "EdDSA" do
+        assert {:error, :invalid_signature} =
+                 ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: [alg])
+      end
+
       assert {:ok, _claims} =
-               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: [alg])
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+                 accepted_algs: [alg],
+                 enforce_fapi_alg_policy: false
+               )
     end
   end
 

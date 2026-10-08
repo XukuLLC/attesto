@@ -174,7 +174,8 @@ defmodule Attesto.JWS do
   Options:
 
     * `:kid` narrows the result after conversion and algorithm filtering.
-    * `:accepted_algs` filters algorithms; an empty list means no filter.
+    * `:accepted_algs` filters algorithms; an explicit empty list denies all.
+      Omitting the option leaves algorithms unrestricted at this low-level API.
     * `:fapi?` applies `SigningAlg.fapi_compatible?/2` after algorithm
       filtering.
     * `:malformed_key` is `:reject_set` (default), `:skip`, or `:raise`.
@@ -205,6 +206,8 @@ defmodule Attesto.JWS do
   `:claims_map?` treats a successful JOSE result with non-map claims as a
   malformed result when set.
   `:return_key?` optionally includes the successful candidate in the result.
+  `:accepted_algs` and `:fapi?` also filter supplied candidates; an explicit
+  empty algorithm list denies all, including manually constructed candidates.
   """
   @spec verify_strict(binary(), [verification_candidate()], keyword()) ::
           {:ok, map()} | {:ok, map(), verification_candidate()} | {:error, atom()}
@@ -357,9 +360,17 @@ defmodule Attesto.JWS do
   end
 
   defp verify_candidate(candidate, acc, jwt, opts) do
+    if allow_verification_candidate(candidate, opts, :skip) == true,
+      do: verify_allowed_candidate(candidate, acc, jwt, opts),
+      else: {:cont, acc}
+  end
+
+  defp verify_allowed_candidate(candidate, acc, jwt, opts) do
     case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
       {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
-        verified_candidate_result(claims, candidate, acc, opts)
+        if signature_parameters_valid?(jwt, candidate, opts),
+          do: verified_candidate_result(claims, candidate, acc, opts),
+          else: {:cont, acc}
 
       {false, _jwt, _jws} ->
         {:cont, acc}
@@ -370,6 +381,26 @@ defmodule Attesto.JWS do
         malformed_verification_result(acc, malformed_result, malformed_error)
     end
   end
+
+  # JOSE's RSA-PSS verifier permits an automatically detected salt length.
+  # RFC 7518 §3.5 fixes both the salt length and MGF1 hash for each PS* name.
+  # Recheck successful PSS signatures with those explicit OTP parameters.
+  defp signature_parameters_valid?(jwt, {_kid, alg, jwk}, opts) when alg in ["PS256", "PS384", "PS512"] do
+    with {:ok, compact} <- decode_compact(jwt, opts),
+         {:ok, signature} <- decode64(compact.signature_segment) do
+      signing_input = compact.protected_segment <> "." <> compact.payload_segment
+      public_key = jwk |> JOSE.JWK.to_public() |> JOSE.JWK.to_key() |> elem(1)
+      :public_key.verify(signing_input, hash_alg(alg), signature, public_key, pss_opts(alg))
+    else
+      _invalid -> false
+    end
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp signature_parameters_valid?(_jwt, _candidate, _opts), do: true
 
   defp verified_candidate_result(claims, candidate, acc, opts) do
     claims_map? = Keyword.get(opts, :claims_map?, false)
@@ -422,8 +453,13 @@ defmodule Attesto.JWS do
   defp validate_candidate!(_candidate), do: raise(ArgumentError, "verification candidate must be {kid, alg, jwk}")
 
   defp candidate_allowed?({_kid, alg, jwk}, opts) do
-    accepted_algs = Keyword.get(opts, :accepted_algs, [])
-    accepted? = accepted_algs == [] or alg in accepted_algs
+    accepted? =
+      case Keyword.fetch(opts, :accepted_algs) do
+        :error -> true
+        {:ok, accepted_algs} when is_list(accepted_algs) -> alg in accepted_algs
+        {:ok, _invalid} -> false
+      end
+
     fapi? = Keyword.get(opts, :fapi?, false)
     accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk))
   end
@@ -567,6 +603,19 @@ defmodule Attesto.JWS do
     pem |> Key.signing_jwk() |> sign_compact_with_jwk(header, claims)
   end
 
+  @doc false
+  @spec sign_compact_jwk(JOSE.JWK.t(), map(), map()) :: String.t()
+  def sign_compact_jwk(jwk, header, claims)
+
+  def sign_compact_jwk(%JOSE.JWK{} = jwk, %{"alg" => alg} = header, claims)
+      when alg in ["PS256", "PS384", "PS512"] and is_map(claims) do
+    sign_ps_compact(jwk, header, JSON.encode!(claims), alg)
+  end
+
+  def sign_compact_jwk(%JOSE.JWK{} = jwk, header, claims) when is_map(header) and is_map(claims) do
+    sign_compact_with_jwk(jwk, header, claims)
+  end
+
   defp sign_compact_with_jwk(jwk, header, claims) do
     alg = header |> Map.fetch!("alg") |> SigningAlg.validate!()
     payload = JSON.encode!(claims)
@@ -631,7 +680,7 @@ defmodule Attesto.JWS do
       :public_key.sign(
         signing_input,
         hash_alg(alg),
-        private_key(jwk),
+        rsa_private_key!(jwk),
         pss_opts(alg)
       )
 
@@ -646,10 +695,18 @@ defmodule Attesto.JWS do
 
   defp private_key(jwk), do: jwk |> JOSE.JWK.to_key() |> elem(1)
 
+  defp rsa_private_key!(jwk) do
+    case private_key(jwk) do
+      {:RSAPrivateKey, _, _, _, _, _, _, _, _, _, _} = key -> key
+      _key -> raise ArgumentError, "PSS signing requires an RSA private key"
+    end
+  end
+
   defp pss_opts(alg) do
     [
       {:rsa_padding, :rsa_pkcs1_pss_padding},
-      {:rsa_pss_saltlen, salt_length(alg)}
+      {:rsa_pss_saltlen, salt_length(alg)},
+      {:rsa_mgf1_md, hash_alg(alg)}
     ]
   end
 

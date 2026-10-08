@@ -70,13 +70,12 @@ defmodule Attesto.ClientAssertion do
 
     * `:accepted_algs` - the JOSE algorithms a candidate trusted key may use.
       Defaults to `SigningAlg.fapi_algs/0` (PS256, ES256, EdDSA over Ed25519,
-      and explicit Ed25519). Supplying a list selects an explicit non-FAPI
-      algorithm policy unless `:enforce_fapi_alg_policy` is also `true`.
+      and explicit Ed25519). An empty list always denies all algorithms.
     * `:enforce_fapi_alg_policy` - enforce the FAPI RSA modulus and Edwards
       curve restrictions in addition to `:accepted_algs`. Defaults to `true`
-      when `:accepted_algs` is omitted and `false` when the caller supplies an
-      explicit algorithm policy. Composed FAPI profiles that narrow the
-      allowlist must pass `true`.
+      when `:accepted_algs` is omitted or narrows the default list, and `false`
+      for an explicitly broader algorithm policy. Explicit `false` relaxes
+      these gates.
   """
   @spec verify(String.t(), String.t(), String.t() | [String.t()], map() | [map()] | map(), verify_opts()) ::
           {:ok, map()} | {:error, verify_error()}
@@ -104,7 +103,7 @@ defmodule Attesto.ClientAssertion do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
     candidates =
       JWS.verification_candidates(trusted_jwks,
@@ -124,7 +123,7 @@ defmodule Attesto.ClientAssertion do
   defp validate_policy_options!(opts) do
     enforce_fapi_policy =
       case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
-        :error -> not Keyword.has_key?(opts, :accepted_algs)
+        :error -> SigningAlg.default_fapi_policy?(opts)
         {:ok, value} when is_boolean(value) -> value
         {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
       end

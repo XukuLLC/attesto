@@ -3,6 +3,7 @@ defmodule Attesto.CIBA.RequestTest do
   use ExUnit.Case, async: false
 
   alias Attesto.CIBA.Request
+  alias Attesto.Test.JWT
 
   @client_id "ciba-client-1"
   @issuer "https://op.example.com"
@@ -265,8 +266,7 @@ defmodule Attesto.CIBA.RequestTest do
       |> Map.reject(fn {_k, v} -> v == :absent end)
 
     header = Map.merge(%{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}, header_overrides)
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   defp signing_client(jwk, overrides \\ %{}, alg \\ "ES256") do
@@ -379,7 +379,7 @@ defmodule Attesto.CIBA.RequestTest do
                Request.validate(
                  client,
                  %{"request" => jwt},
-                 signed_opts() ++ [accepted_algs: ["PS256"]]
+                 signed_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: false]
                )
     end
 
@@ -446,7 +446,7 @@ defmodule Attesto.CIBA.RequestTest do
                  Request.validate(
                    client,
                    %{"request" => jwt},
-                   signed_opts() ++ [accepted_algs: [alg]]
+                   signed_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: false]
                  )
       end
     end

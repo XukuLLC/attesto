@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-10-08
+
+### Security
+
+- Treat explicitly empty signature algorithm allowlists as deny-all across
+  public and composed verifiers. Low-level JWS verification retains its
+  unrestricted trusted-key behavior only when the option is omitted.
+- Preserve FAPI key-strength checks when an explicit algorithm list narrows
+  the default set. SD-JWT issuer verification now applies these checks by
+  default, including PS256 RSA moduli of at least 2048 bits. Broader algorithm
+  profiles remain explicit; `enforce_fapi_alg_policy: false` deliberately
+  relaxes key restrictions and never changes empty-list rejection.
+- Verify PS256, PS384 and PS512 signatures with exact 32-, 48- and 64-byte PSS
+  salt lengths and the corresponding MGF1 hash, independent of JOSE backend
+  defaults. Reject otherwise valid signatures with different salt lengths.
+- Pin the same PSS parameters when the DPoP testing helper signs proofs,
+  ensuring conforming signatures across native and fallback crypto backends.
+
+### Changed
+
+- Require non-empty presentation arrays per query ID in `VpToken.verify/2`
+  and presentation sessions, as required by final OID4VP. Scalar values require
+  explicit `legacy_scalar_values: true`; array inputs retain list results.
+- Allow certificate-identified SD-JWT VC credentials to omit `iss` using
+  `issuer_identity: :certificate` after the caller validates the issuer chain
+  and supplies its verified leaf key. Existing issuer-claim requirements
+  remain the default; a present malformed issuer still fails.
+
+### Added
+
+- Add an explicit `RequestObject` OID4VP profile that enforces request typing
+  and client identity while ignoring `iss`, as required by OpenID4VP 1.0.
+  Existing JAR issuer-binding behavior remains the default.
+- Add `Attesto.JWE.encrypt/4` and `decrypt/3` for bounded compact credential
+  encryption using ECDH-ES with P-256 and A128GCM or A256GCM. Callers select
+  algorithms from trusted protocol metadata and can narrow the accepted set.
+- Validate encoded sizes, canonical Base64URL, duplicate protected JSON
+  members, ephemeral public keys, fixed GCM parameters, and key-use constraints
+  before decryption. Reject compression and unsupported critical extensions;
+  return controlled errors for malformed input and authentication failure.
+
 ## [2.2.2] - 2026-10-04
 
 ### Security

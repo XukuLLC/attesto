@@ -110,8 +110,9 @@ defmodule Attesto.KeyAttestation do
     * `:enforce_fapi_alg_policy` - additionally enforce the FAPI RSA modulus
       and Edwards-curve restrictions on the attestation signer's key (parity
       with `Attesto.ClientAssertion` and `Attesto.WalletAttestation`). Defaults
-      to `true` when `:accepted_algs` is omitted and `false` when the caller
-      supplies its own `:accepted_algs`.
+      to `true` when `:accepted_algs` is omitted or narrows the default list,
+      and `false` for an explicitly broader algorithm policy. Explicit `false`
+      relaxes these gates; an empty list always denies all algorithms.
 
   Returns `{:ok, %{attested_keys:, key_storage:, user_authentication:,
   certification:, claims:}}`, where `attested_keys` is the list of public
@@ -210,9 +211,9 @@ defmodule Attesto.KeyAttestation do
 
     # Parity with client_assertion/wallet_attestation: also enforce the FAPI
     # RSA-modulus / Edwards-curve strength gate on the attestation signer,
-    # unless the caller narrowed `:accepted_algs` itself.
+    # unless the caller explicitly selects a broader profile or relaxes it.
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
     candidates =
       JWS.verification_candidates(trusted,

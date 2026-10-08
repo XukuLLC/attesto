@@ -372,7 +372,7 @@ defmodule Attesto.JwtVc do
 
     case Map.get(header, "alg") do
       alg when is_binary(alg) and alg != "none" ->
-        if is_list(accepted) and alg in SigningAlg.allowed() and (accepted == [] or alg in accepted),
+        if is_list(accepted) and alg in SigningAlg.allowed() and alg in accepted,
           do: :ok,
           else: {:error, :unsupported_alg}
 

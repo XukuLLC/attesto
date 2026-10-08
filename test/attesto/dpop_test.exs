@@ -4,6 +4,7 @@ defmodule Attesto.DPoPTest do
 
   alias Attesto.DPoP
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -42,9 +43,7 @@ defmodule Attesto.DPoPTest do
   end
 
   defp sign_proof(key, header, claims) do
-    signed = JOSE.JWT.sign(key, header, claims)
-    {_protected, compact} = JOSE.JWS.compact(signed)
-    compact
+    JWT.sign_compact(key, header, claims)
   end
 
   # Compact-form DPoP proof signed by a freshly-generated key. The header
@@ -115,13 +114,17 @@ defmodule Attesto.DPoPTest do
 
     test "rejects RSA proof keys with moduli below 2048 bits" do
       key = gen_rsa_key(1024)
+      ps512_key = gen_rsa_key(1536)
 
       for alg <- ~w(RS256 RS384 RS512 PS256 PS384 PS512) do
+        # A 1024-bit modulus cannot encode the required SHA-512 digest and
+        # 64-byte PSS salt. The 1536-bit fixture is still below the policy floor.
+        key = if alg == "PS512", do: ps512_key, else: key
         header = build_header(public_map(key), %{"alg" => alg})
         proof = sign_proof(key, header, build_claims())
 
         assert {:error, :invalid_jwk} = DPoP.verify_proof(proof, base_opts()),
-               "expected 1024-bit #{alg} proof key to be rejected"
+               "expected undersized #{alg} proof key to be rejected"
       end
     end
 

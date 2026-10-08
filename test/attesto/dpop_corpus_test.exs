@@ -42,6 +42,7 @@ defmodule Attesto.DPoPCorpusTest do
 
   alias Attesto.DPoP
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -88,15 +89,10 @@ defmodule Attesto.DPoPCorpusTest do
     )
   end
 
-  # Sign a proof normally: JOSE derives the wire `alg` from `header["alg"]`,
-  # so the signature is genuinely consistent with the declared alg.
+  # Produce a signature consistent with the declared algorithm, including
+  # exact JWA PSS parameters on native and fallback crypto backends.
   defp sign(key, header, claims) do
-    {_protected, compact} =
-      key
-      |> JOSE.JWT.sign(header, claims)
-      |> JOSE.JWS.compact()
-
-    compact
+    JWT.sign_compact(key, header, claims)
   end
 
   defp encode_segment(map) do

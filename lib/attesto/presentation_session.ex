@@ -95,6 +95,10 @@ defmodule Attesto.PresentationSession do
   Invalid presentations return `{:invalid_presentation, reason}` and do not
   complete the session. When concurrent valid responses race, exactly one can
   complete it; all losing calls return `:already_completed`.
+  Query values must be non-empty arrays. `:legacy_scalar_values` is forwarded
+  to `Attesto.VpToken.verify/2` only when explicitly supplied by the caller.
+  `:accepted_algs` and `:enforce_fapi_alg_policy` apply to SD-JWT issuer
+  signatures and are also forwarded; holder-binding verification stays separate.
   """
   @spec verify_response(module(), correlation(), map(), keyword()) ::
           {:ok, map()}
@@ -367,7 +371,9 @@ defmodule Attesto.PresentationSession do
       |> Keyword.merge(response_uri_opts(data))
       |> Keyword.merge(response_encryption_jwk_opts(data))
       |> Keyword.merge(query_constraints_opts(data))
-      |> Keyword.merge(Keyword.take(opts, [:now, :formats]))
+      |> Keyword.merge(
+        Keyword.take(opts, [:now, :formats, :legacy_scalar_values, :accepted_algs, :enforce_fapi_alg_policy])
+      )
 
     case VpToken.verify(vp_token, verify_opts) do
       {:ok, results} -> {:ok, results}

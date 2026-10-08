@@ -4,6 +4,7 @@ defmodule Attesto.RequestObjectTest do
 
   alias Attesto.RequestObject
   alias Attesto.RequestObject.Policy
+  alias Attesto.Test.JWT
 
   @client_id "client-123"
   @issuer @client_id
@@ -33,8 +34,7 @@ defmodule Attesto.RequestObjectTest do
       )
 
     header = Map.merge(%{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}, header_overrides)
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   defp base_opts, do: [issuer: @issuer, audience: @audience]
@@ -112,7 +112,7 @@ defmodule Attesto.RequestObjectTest do
                RequestObject.verify(
                  jwt,
                  %{"keys" => [trusted]},
-                 base_opts() ++ [accepted_algs: ["PS256"]]
+                 base_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: false]
                )
     end
 
@@ -170,11 +170,16 @@ defmodule Attesto.RequestObjectTest do
                    base_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: true]
                  )
 
+        if alg == "EdDSA" do
+          assert {:error, :invalid_signature} =
+                   RequestObject.verify(jwt, %{"keys" => [trusted]}, base_opts() ++ [accepted_algs: [alg]])
+        end
+
         assert {:ok, _params} =
                  RequestObject.verify(
                    jwt,
                    %{"keys" => [trusted]},
-                   base_opts() ++ [accepted_algs: [alg]]
+                   base_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: false]
                  )
       end
     end

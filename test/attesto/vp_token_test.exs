@@ -2,7 +2,7 @@ defmodule Attesto.VpTokenTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
-  alias Attesto.{Cose, JWS, Mdoc, SdJwtVc, VpToken}
+  alias Attesto.{Cose, JWS, Mdoc, SdJwt, SdJwtVc, VpToken}
 
   @doc_type "org.iso.18013.5.1.mDL"
   @mdl_namespace "org.iso.18013.5.1"
@@ -60,8 +60,8 @@ defmodule Attesto.VpTokenTest do
   test "verifies a single credential and returns only safe fields" do
     ctx = valid_context()
 
-    assert {:ok, %{"id" => result}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+    assert {:ok, %{"id" => [result]}} =
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -82,7 +82,7 @@ defmodule Attesto.VpTokenTest do
     caller = self()
 
     assert {:ok, %{"id" => _}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -90,7 +90,7 @@ defmodule Attesto.VpTokenTest do
              )
 
     assert {:ok, %{"id" => _}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                resolve_issuer: fn iss ->
@@ -107,7 +107,7 @@ defmodule Attesto.VpTokenTest do
     ctx = valid_context()
 
     assert {:error, {"id", _reason}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: "wrong",
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -115,7 +115,7 @@ defmodule Attesto.VpTokenTest do
              )
 
     assert {:error, {"id", _reason}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: ctx.nonce,
                audience: "wrong",
                issuer_jwks: ctx.issuer_jwk,
@@ -128,7 +128,7 @@ defmodule Attesto.VpTokenTest do
     [jwt | _] = String.split(ctx.vc, "~")
 
     assert {:error, {"id", :missing_key_binding}} =
-             VpToken.verify(%{"id" => jwt <> "~"},
+             VpToken.verify(%{"id" => [jwt <> "~"]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -150,7 +150,7 @@ defmodule Attesto.VpTokenTest do
     presentation = vc <> kb_jwt(holder_pem, vc, "nonce-1", "client-1", now)
 
     assert {:error, {"id", :missing_holder_key}} =
-             VpToken.verify(%{"id" => presentation},
+             VpToken.verify(%{"id" => [presentation]},
                nonce: "nonce-1",
                audience: "client-1",
                issuer_jwks: issuer_jwk,
@@ -164,12 +164,12 @@ defmodule Attesto.VpTokenTest do
     opts = [nonce: ctx.nonce, audience: ctx.audience, now: ctx.now]
 
     assert {:error, {"id", _reason}} =
-             VpToken.verify(%{"id" => tampered}, opts ++ [issuer_jwks: ctx.issuer_jwk])
+             VpToken.verify(%{"id" => [tampered]}, opts ++ [issuer_jwks: ctx.issuer_jwk])
 
     {_other_pem, wrong_jwk} = keypair()
 
     assert {:error, {"id", _reason}} =
-             VpToken.verify(%{"id" => ctx.presentation}, opts ++ [issuer_jwks: wrong_jwk])
+             VpToken.verify(%{"id" => [ctx.presentation]}, opts ++ [issuer_jwks: wrong_jwk])
   end
 
   test "rejects an expired credential" do
@@ -186,7 +186,7 @@ defmodule Attesto.VpTokenTest do
     expired = expired_vc <> kb_jwt(ctx.holder_pem, expired_vc, ctx.nonce, ctx.audience, ctx.now)
 
     assert {:error, {"id", :expired}} =
-             VpToken.verify(%{"id" => expired},
+             VpToken.verify(%{"id" => [expired]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -210,11 +210,76 @@ defmodule Attesto.VpTokenTest do
     assert Enum.all?(results, &(&1.vct == "identity"))
   end
 
+  test "final OID4VP arrays are required unless scalar compatibility is explicitly enabled" do
+    ctx = valid_context()
+    opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: ctx.issuer_jwk, now: ctx.now]
+
+    for mode <- [[], [legacy_scalar_values: false]] do
+      assert_raise ArgumentError, fn -> VpToken.verify(%{"id" => ctx.presentation}, opts ++ mode) end
+    end
+
+    assert {:ok, %{"id" => [array_result]}} = VpToken.verify(%{"id" => [ctx.presentation]}, opts)
+
+    assert {:ok, %{"id" => scalar_result}} =
+             VpToken.verify(%{"id" => ctx.presentation}, opts ++ [legacy_scalar_values: true])
+
+    assert scalar_result == array_result
+
+    assert {:error, {"id", :invalid_key_binding}} =
+             VpToken.verify(
+               %{"id" => ctx.presentation},
+               Keyword.merge(opts, audience: "wrong", legacy_scalar_values: true)
+             )
+  end
+
+  test "legacy scalar compatibility never permits malformed arrays or non-boolean options" do
+    ctx = valid_context()
+    opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: ctx.issuer_jwk, now: ctx.now]
+
+    for legacy? <- [false, true], value <- [[], [""], [ctx.presentation, 123], "", 123, %{}] do
+      assert_raise ArgumentError, fn ->
+        VpToken.verify(%{"id" => value}, opts ++ [legacy_scalar_values: legacy?])
+      end
+    end
+
+    for value <- [nil, "true", 1] do
+      assert_raise ArgumentError, fn ->
+        VpToken.verify(%{"id" => [ctx.presentation]}, opts ++ [legacy_scalar_values: value])
+      end
+    end
+  end
+
+  test "issuer policy is forwarded without restricting a different holder algorithm" do
+    ctx = valid_context()
+    {issuer_pem, issuer_jwk} = keypair({:rsa, 2048})
+
+    vc =
+      SdJwt.issue(
+        %{
+          "iss" => "https://issuer.example",
+          "vct" => "identity",
+          "iat" => ctx.now,
+          "cnf" => %{"jwk" => ctx.holder_jwk}
+        },
+        pem: issuer_pem,
+        alg: "PS256",
+        typ: "dc+sd-jwt"
+      )
+
+    presentation = vc <> kb_jwt(ctx.holder_pem, vc, ctx.nonce, ctx.audience, ctx.now)
+    token = %{"id" => [presentation]}
+    opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: issuer_jwk, now: ctx.now]
+
+    assert {:ok, %{"id" => [_result]}} = VpToken.verify(token, opts ++ [accepted_algs: ["PS256"]])
+    assert {:error, {"id", :unsupported_alg}} = VpToken.verify(token, opts ++ [accepted_algs: []])
+    assert {:error, {"id", :unsupported_alg}} = VpToken.verify(token, opts ++ [accepted_algs: ["ES256"]])
+  end
+
   test "checks expected query IDs before accepting the response" do
     ctx = valid_context()
 
     assert {:error, {:missing_credentials, ["missing"]}} =
-             VpToken.verify(%{"id" => ctx.presentation},
+             VpToken.verify(%{"id" => [ctx.presentation]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -229,7 +294,7 @@ defmodule Attesto.VpTokenTest do
     presentation = ctx.vc <> wrong_kb
 
     assert {:error, {"id", :invalid_key_binding}} =
-             VpToken.verify(%{"id" => presentation},
+             VpToken.verify(%{"id" => [presentation]},
                nonce: ctx.nonce,
                audience: ctx.audience,
                issuer_jwks: ctx.issuer_jwk,
@@ -354,8 +419,8 @@ defmodule Attesto.VpTokenTest do
     test "verifies a DCQL entry declared as mso_mdoc via :formats" do
       mctx = mdoc_valid_context()
 
-      assert {:ok, %{"mdl" => result}} =
-               VpToken.verify(%{"mdl" => mctx.device_response},
+      assert {:ok, %{"mdl" => [result]}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
                  nonce: mctx.nonce,
                  audience: mctx.audience,
                  issuer_jwks: mctx.issuer_jwk,
@@ -369,11 +434,11 @@ defmodule Attesto.VpTokenTest do
       assert result.device_namespaces == %{}
     end
 
-    test "detects mso_mdoc by shape when :formats is omitted" do
+    test "detects mso_mdoc by encoding when :formats is omitted" do
       mctx = mdoc_valid_context()
 
-      assert {:ok, %{"mdl" => result}} =
-               VpToken.verify(%{"mdl" => mctx.device_response},
+      assert {:ok, %{"mdl" => [result]}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
                  nonce: mctx.nonce,
                  audience: mctx.audience,
                  issuer_jwks: mctx.issuer_jwk,
@@ -388,7 +453,7 @@ defmodule Attesto.VpTokenTest do
       sd_jwt_ctx = valid_context()
       mctx = mdoc_valid_context()
 
-      vp_token = %{"identity" => sd_jwt_ctx.presentation, "mdl" => mctx.device_response}
+      vp_token = %{"identity" => [sd_jwt_ctx.presentation], "mdl" => [mctx.device_response]}
 
       assert {:ok, results} =
                VpToken.verify(vp_token,
@@ -399,8 +464,8 @@ defmodule Attesto.VpTokenTest do
                  now: sd_jwt_ctx.now
                )
 
-      assert results["identity"].vct == "identity"
-      assert results["mdl"].doc_type == @doc_type
+      assert hd(results["identity"]).vct == "identity"
+      assert hd(results["mdl"]).doc_type == @doc_type
     end
 
     test "rejects a wrong nonce, client_id, and response_uri" do
@@ -409,18 +474,18 @@ defmodule Attesto.VpTokenTest do
 
       assert {:error, {"mdl", _reason}} =
                VpToken.verify(
-                 %{"mdl" => mctx.device_response},
+                 %{"mdl" => [mctx.device_response]},
                  [nonce: "wrong-nonce", audience: mctx.audience] ++ base_opts
                )
 
       assert {:error, {"mdl", _reason}} =
                VpToken.verify(
-                 %{"mdl" => mctx.device_response},
+                 %{"mdl" => [mctx.device_response]},
                  [nonce: mctx.nonce, audience: "wrong-client"] ++ base_opts
                )
 
       assert {:error, {"mdl", _reason}} =
-               VpToken.verify(%{"mdl" => mctx.device_response},
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
                  nonce: mctx.nonce,
                  audience: mctx.audience,
                  issuer_jwks: mctx.issuer_jwk,
@@ -433,7 +498,7 @@ defmodule Attesto.VpTokenTest do
       mctx = mdoc_valid_context()
 
       assert {:error, {"mdl", :missing_response_uri}} =
-               VpToken.verify(%{"mdl" => mctx.device_response},
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
                  nonce: mctx.nonce,
                  audience: mctx.audience,
                  issuer_jwks: mctx.issuer_jwk,
@@ -445,8 +510,8 @@ defmodule Attesto.VpTokenTest do
       mctx = mdoc_valid_context()
       caller = self()
 
-      assert {:ok, %{"mdl" => result}} =
-               VpToken.verify(%{"mdl" => mctx.device_response},
+      assert {:ok, %{"mdl" => [result]}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
                  nonce: mctx.nonce,
                  audience: mctx.audience,
                  response_uri: mctx.response_uri,
@@ -465,7 +530,7 @@ defmodule Attesto.VpTokenTest do
       mctx = mdoc_valid_context()
 
       assert_raise ArgumentError, fn ->
-        VpToken.verify(%{"mdl" => mctx.device_response},
+        VpToken.verify(%{"mdl" => [mctx.device_response]},
           nonce: mctx.nonce,
           audience: mctx.audience,
           issuer_jwks: mctx.issuer_jwk,
@@ -487,7 +552,7 @@ defmodule Attesto.VpTokenTest do
 
   describe "DCQL query-constraint enforcement" do
     defp verify_with_constraints(ctx, constraints) do
-      VpToken.verify(%{"id" => ctx.presentation},
+      VpToken.verify(%{"id" => [ctx.presentation]},
         nonce: ctx.nonce,
         audience: ctx.audience,
         issuer_jwks: ctx.issuer_jwk,
@@ -547,7 +612,7 @@ defmodule Attesto.VpTokenTest do
       # different id. With no :expected_query_ids, the "pid" constraint must
       # still make "pid" required rather than silently going unlooked-up.
       assert {:error, {:missing_credentials, ["pid"]}} =
-               VpToken.verify(%{"swapped" => ctx.presentation},
+               VpToken.verify(%{"swapped" => [ctx.presentation]},
                  nonce: ctx.nonce,
                  audience: ctx.audience,
                  issuer_jwks: ctx.issuer_jwk,
