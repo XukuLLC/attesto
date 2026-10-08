@@ -67,6 +67,14 @@ defmodule Attesto.VpToken do
   verifiers. See the moduledoc for `:formats` and `:response_uri`.
   `:accepted_algs` and `:enforce_fapi_alg_policy` are forwarded to SD-JWT
   issuer verification only, independently of the holder Key Binding JWT.
+  `:expected_query_ids` identifies required entries; `:permitted_query_ids`
+  can include optional requested entries. When omitted, the permitted set is
+  derived from expected IDs and `:query_constraints` keys. Entries outside that
+  set are rejected before format detection or issuer lookup. Only low-level
+  calls omitting all three query-policy options accept arbitrary query IDs.
+  Constraints remain enforced on optional entries when they are present.
+  Malformed response maps and values return `{:error, :invalid_vp_token}`;
+  malformed trusted options still raise `ArgumentError`.
 
   > #### `:resolve_issuer` receives UNVERIFIED issuer material {: .warning}
   >
@@ -89,7 +97,6 @@ defmodule Attesto.VpToken do
   """
   @spec verify(term(), keyword()) :: verify_result()
   def verify(vp_token, opts \\ []) do
-    validate_vp_token!(vp_token)
     opts = MapParams.ensure_keyword!(opts)
     nonce = required_option!(opts, :nonce)
     audience = required_option!(opts, :audience)
@@ -97,18 +104,14 @@ defmodule Attesto.VpToken do
     expected_query_ids = expected_query_ids!(opts)
     formats = formats!(opts)
     constraints = query_constraints!(opts)
-    validate_presentations!(vp_token, legacy_scalar_values!(opts))
+    permitted_ids = permitted_query_ids!(opts, expected_query_ids, constraints)
+    required_ids = required_query_ids(opts, expected_query_ids, constraints)
+    legacy? = legacy_scalar_values!(opts)
 
-    # A stored constraint means that query id WAS requested, so it is required
-    # even if the caller did not also list it in `:expected_query_ids`. Without
-    # this, a wallet could return a valid credential under a DIFFERENT id and the
-    # constraint for the requested id would simply never be looked up (its entry
-    # is absent), dodging the type/claim binding entirely.
-    required_ids = Enum.uniq(expected_query_ids ++ Map.keys(constraints))
-
-    case missing_query_ids(vp_token, required_ids) do
-      [] -> verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts)
-      missing_ids -> {:error, {:missing_credentials, missing_ids}}
+    with :ok <- validate_presentations(vp_token, legacy?),
+         :ok <- check_permitted_query_ids(vp_token, permitted_ids),
+         :ok <- check_required_query_ids(vp_token, required_ids) do
+      verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts)
     end
   end
 
@@ -541,13 +544,6 @@ defmodule Attesto.VpToken do
   defp reverse_list_result({:ok, results}), do: {:ok, Enum.reverse(results)}
   defp reverse_list_result({:error, _reason} = error), do: error
 
-  defp validate_vp_token!(vp_token) when is_map(vp_token), do: :ok
-
-  defp validate_vp_token!(vp_token) do
-    raise ArgumentError,
-          "Attesto.VpToken.verify/2 expects a map; got #{inspect(vp_token)}"
-  end
-
   defp required_option!(opts, key) do
     case Keyword.fetch(opts, key) do
       {:ok, value} -> value
@@ -648,6 +644,55 @@ defmodule Attesto.VpToken do
     end
   end
 
+  defp permitted_query_ids!(opts, expected, constraints) do
+    requested = Enum.uniq(expected ++ Map.keys(constraints))
+
+    case Keyword.fetch(opts, :permitted_query_ids) do
+      {:ok, ids} ->
+        validate_permitted_query_ids!(ids, requested)
+
+      :error ->
+        if Keyword.has_key?(opts, :expected_query_ids) or Keyword.has_key?(opts, :query_constraints),
+          do: requested,
+          else: :unrestricted
+    end
+  end
+
+  defp validate_permitted_query_ids!(ids, requested) do
+    if is_list(ids) and Enum.all?(ids, &(is_binary(&1) and &1 != "")) and
+         Enum.uniq(ids) == ids and Enum.all?(requested, &(&1 in ids)) do
+      ids
+    else
+      raise ArgumentError, ":permitted_query_ids must contain every required or constrained query ID"
+    end
+  end
+
+  defp required_query_ids(opts, expected, constraints) do
+    if Keyword.has_key?(opts, :expected_query_ids) or Keyword.has_key?(opts, :permitted_query_ids),
+      do: expected,
+      else: Map.keys(constraints)
+  end
+
+  defp check_permitted_query_ids(_vp_token, :unrestricted), do: :ok
+
+  defp check_permitted_query_ids(vp_token, permitted) do
+    vp_token
+    |> Map.keys()
+    |> Enum.reject(&(&1 in permitted))
+    |> Enum.sort()
+    |> case do
+      [] -> :ok
+      unexpected -> {:error, {:unexpected_query_ids, unexpected}}
+    end
+  end
+
+  defp check_required_query_ids(vp_token, required) do
+    case missing_query_ids(vp_token, required) do
+      [] -> :ok
+      missing -> {:error, {:missing_credentials, missing}}
+    end
+  end
+
   defp legacy_scalar_values!(opts) do
     case Keyword.get(opts, :legacy_scalar_values, false) do
       value when is_boolean(value) -> value
@@ -655,28 +700,23 @@ defmodule Attesto.VpToken do
     end
   end
 
-  defp validate_presentations!(vp_token, legacy?) do
-    Enum.each(vp_token, fn {_id, presentation} -> validate_presentation!(presentation, legacy?) end)
+  defp validate_presentations(vp_token, legacy?) when is_map(vp_token) and not is_struct(vp_token) do
+    if Enum.all?(vp_token, fn {id, value} ->
+         is_binary(id) and id != "" and valid_presentation?(value, legacy?)
+       end),
+       do: :ok,
+       else: {:error, :invalid_vp_token}
   end
 
-  defp validate_presentation!(presentation, true) when is_binary(presentation) and presentation != "", do: :ok
+  defp validate_presentations(_vp_token, _legacy?), do: {:error, :invalid_vp_token}
 
-  defp validate_presentation!(presentations, _legacy?) when is_list(presentations) and presentations != [] do
-    if Enum.all?(presentations, &(is_binary(&1) and &1 != "")) do
-      :ok
-    else
-      invalid_presentation!(presentations)
-    end
+  defp valid_presentation?(presentation, true) when is_binary(presentation) and presentation != "", do: true
+
+  defp valid_presentation?(presentations, _legacy?) when is_list(presentations) and presentations != [] do
+    Enum.all?(presentations, &(is_binary(&1) and &1 != ""))
   end
 
-  defp validate_presentation!(presentation, _legacy?), do: invalid_presentation!(presentation)
-
-  defp invalid_presentation!(presentation) do
-    raise ArgumentError,
-          "Attesto.VpToken presentation must be a non-empty list of non-empty binaries " <>
-            "(a scalar requires legacy_scalar_values: true); " <>
-            "got #{inspect(presentation)}"
-  end
+  defp valid_presentation?(_presentation, _legacy?), do: false
 
   defp missing_query_ids(_vp_token, []), do: []
 
