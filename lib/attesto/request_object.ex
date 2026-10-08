@@ -16,6 +16,7 @@ defmodule Attesto.RequestObject do
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
+          | {:profile, :jar | :oid4vp}
           | {:issuer, String.t() | nil}
           | {:audience, String.t() | [String.t()]}
           | {:accepted_algs, [SigningAlg.alg()]}
@@ -85,6 +86,10 @@ defmodule Attesto.RequestObject do
     * `:accepted_typ` - when a list, require the JOSE header `typ` to be a
       member; `nil` in the list permits an absent `typ`. Defaults to `nil`,
       which accepts any `typ` including its absence.
+    * `:profile` - defaults to `:jar`. The explicit `:oid4vp` profile requires
+      `typ: oauth-authz-req+jwt` and a nonempty `client_id`, and ignores `iss`
+      as required by OpenID4VP 1.0 §5. Audience and temporal checks remain
+      enforced; the host must bind `client_id` to its registered client.
     * `:string_valued_claims` - when a list of claim names, each named claim
       that is present MUST be a JSON string, else `:invalid_request_object`.
       This runs BEFORE the claim → parameter coercion, so a non-string value
@@ -123,11 +128,11 @@ defmodule Attesto.RequestObject do
     with {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
          :ok <- check_supported_alg(header),
-         :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
+         :ok <- check_profile_typ(header, opts),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
          :ok <- check_no_nested_request(claims),
          :ok <- check_claim_issuer(claims, opts),
-         :ok <- check_issuer(claims, Keyword.get(opts, :issuer)),
+         :ok <- check_profile_issuer(claims, opts),
          :ok <- check_audience(claims, Keyword.get(opts, :audience)),
          :ok <- check_expiry(claims, opts),
          :ok <- check_iat(claims, opts),
@@ -142,6 +147,9 @@ defmodule Attesto.RequestObject do
   def verify_with_claims(_jwt, _trusted_jwks, _opts), do: {:error, :invalid_request_object}
 
   defp validate_options!(opts) do
+    if Keyword.get(opts, :profile, :jar) not in [:jar, :oid4vp],
+      do: raise(ArgumentError, ":profile must be :jar or :oid4vp")
+
     Enum.each(
       [
         :enforce_fapi_alg_policy,
@@ -193,6 +201,15 @@ defmodule Attesto.RequestObject do
         malformed_key: :reject_set
       )
 
+    candidates =
+      if Keyword.get(opts, :profile, :jar) == :oid4vp do
+        Enum.filter(candidates, fn {_kid, alg, jwk} ->
+          alg != "PS256" or SigningAlg.rsa_modulus_at_least?(jwk, 2048)
+        end)
+      else
+        candidates
+      end
+
     JWS.verify_strict(jwt, candidates,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
@@ -218,6 +235,17 @@ defmodule Attesto.RequestObject do
   # §7.1.1) opts out with `require_client_id_claim: false`; `iss` is still
   # matched against the caller-supplied `:issuer` in `check_issuer/2`.
   defp check_claim_issuer(claims, opts) do
+    if Keyword.get(opts, :profile, :jar) == :oid4vp do
+      case claims do
+        %{"client_id" => client_id} when is_binary(client_id) and client_id != "" -> :ok
+        _ -> {:error, :invalid_issuer}
+      end
+    else
+      check_jar_claim_issuer(claims, opts)
+    end
+  end
+
+  defp check_jar_claim_issuer(claims, opts) do
     if Keyword.get(opts, :require_client_id_claim, true) do
       case claims do
         %{"client_id" => client_id, "iss" => client_id} when is_binary(client_id) and client_id != "" -> :ok
@@ -226,6 +254,20 @@ defmodule Attesto.RequestObject do
     else
       :ok
     end
+  end
+
+  defp check_profile_typ(header, opts) do
+    if Keyword.get(opts, :profile, :jar) == :oid4vp do
+      if header["typ"] == "oauth-authz-req+jwt", do: :ok, else: {:error, :invalid_typ}
+    else
+      check_typ(header, Keyword.get(opts, :accepted_typ))
+    end
+  end
+
+  defp check_profile_issuer(claims, opts) do
+    if Keyword.get(opts, :profile, :jar) == :oid4vp,
+      do: :ok,
+      else: check_issuer(claims, Keyword.get(opts, :issuer))
   end
 
   defp check_issuer(_claims, nil), do: {:error, :invalid_issuer}

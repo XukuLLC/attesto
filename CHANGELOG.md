@@ -6,6 +6,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.3.0] - Unreleased
 
+### Security
+
+- Verify PS256, PS384 and PS512 signatures with exact 32-, 48- and 64-byte PSS
+  salt lengths and the corresponding MGF1 hash, independent of JOSE backend
+  defaults. Reject otherwise valid signatures with different salt lengths.
+
 ### Changed
 
 - Allow certificate-identified SD-JWT VC credentials to omit `iss` using
@@ -15,6 +21,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add an explicit `RequestObject` OID4VP profile that enforces request typing
+  and client identity while ignoring `iss`, as required by OpenID4VP 1.0.
+  Existing JAR issuer-binding behavior remains the default.
 - Add `Attesto.JWE.encrypt/4` and `decrypt/3` for bounded compact credential
   encryption using ECDH-ES with P-256 and A128GCM or A256GCM. Callers select
   algorithms from trusted protocol metadata and can narrow the accepted set.

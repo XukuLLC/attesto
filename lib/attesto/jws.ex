@@ -359,7 +359,9 @@ defmodule Attesto.JWS do
   defp verify_candidate(candidate, acc, jwt, opts) do
     case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
       {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
-        verified_candidate_result(claims, candidate, acc, opts)
+        if signature_parameters_valid?(jwt, candidate, opts),
+          do: verified_candidate_result(claims, candidate, acc, opts),
+          else: {:cont, acc}
 
       {false, _jwt, _jws} ->
         {:cont, acc}
@@ -370,6 +372,26 @@ defmodule Attesto.JWS do
         malformed_verification_result(acc, malformed_result, malformed_error)
     end
   end
+
+  # JOSE's RSA-PSS verifier permits an automatically detected salt length.
+  # RFC 7518 §3.5 fixes both the salt length and MGF1 hash for each PS* name.
+  # Recheck successful PSS signatures with those explicit OTP parameters.
+  defp signature_parameters_valid?(jwt, {_kid, alg, jwk}, opts) when alg in ["PS256", "PS384", "PS512"] do
+    with {:ok, compact} <- decode_compact(jwt, opts),
+         {:ok, signature} <- decode64(compact.signature_segment) do
+      signing_input = compact.protected_segment <> "." <> compact.payload_segment
+      public_key = jwk |> JOSE.JWK.to_public() |> JOSE.JWK.to_key() |> elem(1)
+      :public_key.verify(signing_input, hash_alg(alg), signature, public_key, pss_opts(alg))
+    else
+      _invalid -> false
+    end
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp signature_parameters_valid?(_jwt, _candidate, _opts), do: true
 
   defp verified_candidate_result(claims, candidate, acc, opts) do
     claims_map? = Keyword.get(opts, :claims_map?, false)
@@ -649,7 +671,8 @@ defmodule Attesto.JWS do
   defp pss_opts(alg) do
     [
       {:rsa_padding, :rsa_pkcs1_pss_padding},
-      {:rsa_pss_saltlen, salt_length(alg)}
+      {:rsa_pss_saltlen, salt_length(alg)},
+      {:rsa_mgf1_md, hash_alg(alg)}
     ]
   end
 

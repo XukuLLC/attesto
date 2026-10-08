@@ -5,5 +5,5 @@
 # convert that gap to an opaque verification error instead of crashing.
 [
   {"lib/attesto/request_object.ex", :pattern_match_cov},
-  {"lib/attesto/jws.ex", :pattern_match_cov, {367, 7}}
+  {"lib/attesto/jws.ex", :pattern_match_cov, {369, 7}}
 ]
