@@ -259,9 +259,8 @@ defmodule Attesto.PresentationSessionTest do
     %{@query_id => [presentation]} = valid_vp_token(ctx, session.nonce)
     scalar_token = %{@query_id => presentation}
 
-    assert_raise ArgumentError, fn ->
-      PresentationSession.verify_response(Store, {:state, session.id}, scalar_token, now: ctx.now)
-    end
+    assert {:error, {:invalid_presentation, :invalid_vp_token}} =
+             PresentationSession.verify_response(Store, {:state, session.id}, scalar_token, now: ctx.now)
 
     assert_pending(session.id)
 

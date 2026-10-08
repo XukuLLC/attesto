@@ -215,7 +215,7 @@ defmodule Attesto.VpTokenTest do
     opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: ctx.issuer_jwk, now: ctx.now]
 
     for mode <- [[], [legacy_scalar_values: false]] do
-      assert_raise ArgumentError, fn -> VpToken.verify(%{"id" => ctx.presentation}, opts ++ mode) end
+      assert {:error, :invalid_vp_token} = VpToken.verify(%{"id" => ctx.presentation}, opts ++ mode)
     end
 
     assert {:ok, %{"id" => [array_result]}} = VpToken.verify(%{"id" => [ctx.presentation]}, opts)
@@ -237,9 +237,7 @@ defmodule Attesto.VpTokenTest do
     opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: ctx.issuer_jwk, now: ctx.now]
 
     for legacy? <- [false, true], value <- [[], [""], [ctx.presentation, 123], "", 123, %{}] do
-      assert_raise ArgumentError, fn ->
-        VpToken.verify(%{"id" => value}, opts ++ [legacy_scalar_values: legacy?])
-      end
+      assert {:error, :invalid_vp_token} = VpToken.verify(%{"id" => value}, opts ++ [legacy_scalar_values: legacy?])
     end
 
     for value <- [nil, "true", 1] do
@@ -306,10 +304,10 @@ defmodule Attesto.VpTokenTest do
     test "requires a map and valid presentation values" do
       opts = [nonce: "nonce", audience: "client", issuer_jwks: %{}]
 
-      assert_raise ArgumentError, fn -> VpToken.verify([], opts) end
-      assert_raise ArgumentError, fn -> VpToken.verify(%{"id" => 123}, opts) end
-      assert_raise ArgumentError, fn -> VpToken.verify(%{"id" => []}, opts) end
-      assert_raise ArgumentError, fn -> VpToken.verify(%{"id" => [123]}, opts) end
+      assert {:error, :invalid_vp_token} = VpToken.verify([], opts)
+      assert {:error, :invalid_vp_token} = VpToken.verify(%{"id" => 123}, opts)
+      assert {:error, :invalid_vp_token} = VpToken.verify(%{"id" => []}, opts)
+      assert {:error, :invalid_vp_token} = VpToken.verify(%{"id" => [123]}, opts)
     end
 
     test "requires the nonce and audience" do
@@ -611,7 +609,7 @@ defmodule Attesto.VpTokenTest do
       # Constraint requests "pid"; the wallet returns a credential under a
       # different id. With no :expected_query_ids, the "pid" constraint must
       # still make "pid" required rather than silently going unlooked-up.
-      assert {:error, {:missing_credentials, ["pid"]}} =
+      assert {:error, {:unexpected_query_ids, ["swapped"]}} =
                VpToken.verify(%{"swapped" => [ctx.presentation]},
                  nonce: ctx.nonce,
                  audience: ctx.audience,

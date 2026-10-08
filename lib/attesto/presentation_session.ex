@@ -38,6 +38,7 @@ defmodule Attesto.PresentationSession do
   @type create_attrs :: %{
           required(:audience) => String.t(),
           required(:expected_query_ids) => [String.t()],
+          optional(:permitted_query_ids) => [String.t()],
           required(:issuer_trust) => issuer_trust(),
           optional(:request_object) => String.t(),
           optional(:response_uri) => String.t(),
@@ -95,6 +96,8 @@ defmodule Attesto.PresentationSession do
   Invalid presentations return `{:invalid_presentation, reason}` and do not
   complete the session. When concurrent valid responses race, exactly one can
   complete it; all losing calls return `:already_completed`.
+  The session's stored expected IDs and optional `:permitted_query_ids` bind
+  responses to the request. Verification options cannot widen that stored set.
   Query values must be non-empty arrays. `:legacy_scalar_values` is forwarded
   to `Attesto.VpToken.verify/2` only when explicitly supplied by the caller.
   `:accepted_algs` and `:enforce_fapi_alg_policy` apply to SD-JWT issuer
@@ -242,7 +245,8 @@ defmodule Attesto.PresentationSession do
 
     if non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
          valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) and
-         valid_response_uri?(response_uri) and valid_query_constraints?(query_constraints) do
+         valid_response_uri?(response_uri) and valid_query_constraints?(query_constraints) and
+         valid_permitted_query_ids?(attrs) do
       {:ok,
        %{
          audience: audience,
@@ -251,6 +255,7 @@ defmodule Attesto.PresentationSession do
        }
        |> MapParams.put_optional(:request_object, request_object)
        |> MapParams.put_optional(:response_uri, response_uri)
+       |> MapParams.put_optional(:permitted_query_ids, Map.get(attrs, :permitted_query_ids))
        |> MapParams.put_optional(:query_constraints, query_constraints)}
     else
       {:error, :invalid_attrs}
@@ -271,6 +276,21 @@ defmodule Attesto.PresentationSession do
 
   defp valid_query_ids?(ids) when is_list(ids), do: Enum.all?(ids, &non_empty_string?/1)
   defp valid_query_ids?(_ids), do: false
+
+  defp valid_permitted_query_ids?(data) do
+    case Map.fetch(data, :permitted_query_ids) do
+      :error -> true
+      {:ok, ids} -> valid_permitted_query_set?(ids, data)
+    end
+  end
+
+  defp valid_permitted_query_set?(ids, data) do
+    expected = Map.get(data, :expected_query_ids, [])
+    constraints = Map.get(data, :query_constraints) || %{}
+
+    valid_query_ids?(ids) and Enum.uniq(ids) == ids and is_list(expected) and is_map(constraints) and
+      Enum.all?(expected ++ Map.keys(constraints), &(&1 in ids))
+  end
 
   defp valid_issuer_trust?({:issuer_jwks, jwks}), do: is_map(jwks) or is_list(jwks)
   defp valid_issuer_trust?({:resolve_issuer, resolver}), do: is_function(resolver, 1)
@@ -350,6 +370,7 @@ defmodule Attesto.PresentationSession do
     valid_optional_field?(data, :request_object, &valid_request_object?/1) and
       valid_optional_field?(data, :response_uri, &valid_response_uri?/1) and
       valid_optional_field?(data, :query_constraints, &valid_query_constraints?/1) and
+      valid_permitted_query_ids?(data) and
       valid_optional_field?(data, :response_encryption_jwk, &is_map/1)
   end
 
@@ -371,6 +392,7 @@ defmodule Attesto.PresentationSession do
       |> Keyword.merge(response_uri_opts(data))
       |> Keyword.merge(response_encryption_jwk_opts(data))
       |> Keyword.merge(query_constraints_opts(data))
+      |> Keyword.merge(permitted_query_ids_opts(data))
       |> Keyword.merge(
         Keyword.take(opts, [:now, :formats, :legacy_scalar_values, :accepted_algs, :enforce_fapi_alg_policy])
       )
@@ -391,6 +413,9 @@ defmodule Attesto.PresentationSession do
     do: [query_constraints: constraints]
 
   defp query_constraints_opts(_data), do: []
+
+  defp permitted_query_ids_opts(%{permitted_query_ids: ids}), do: [permitted_query_ids: ids]
+  defp permitted_query_ids_opts(_data), do: []
 
   # For an mdoc presentation over `direct_post.jwt`, the OpenID4VPHandover binds
   # to the verifier's response-encryption public key thumbprint; pass the key so
