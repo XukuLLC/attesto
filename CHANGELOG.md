@@ -4,16 +4,27 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.3.0] - Unreleased
+## [2.3.0] - 2026-10-08
 
 ### Security
 
+- Treat explicitly empty signature algorithm allowlists as deny-all across
+  public and composed verifiers. Low-level JWS verification retains its
+  unrestricted trusted-key behavior only when the option is omitted.
+- Preserve FAPI key-strength checks when an explicit algorithm list narrows
+  the default set. SD-JWT issuer verification now applies these checks by
+  default, including PS256 RSA moduli of at least 2048 bits. Broader algorithm
+  profiles remain explicit; `enforce_fapi_alg_policy: false` deliberately
+  relaxes key restrictions and never changes empty-list rejection.
 - Verify PS256, PS384 and PS512 signatures with exact 32-, 48- and 64-byte PSS
   salt lengths and the corresponding MGF1 hash, independent of JOSE backend
   defaults. Reject otherwise valid signatures with different salt lengths.
 
 ### Changed
 
+- Require non-empty presentation arrays per query ID in `VpToken.verify/2`
+  and presentation sessions, as required by final OID4VP. Scalar values require
+  explicit `legacy_scalar_values: true`; array inputs retain list results.
 - Allow certificate-identified SD-JWT VC credentials to omit `iss` using
   `issuer_identity: :certificate` after the caller validates the issuer chain
   and supplies its verified leaf key. Existing issuer-claim requirements

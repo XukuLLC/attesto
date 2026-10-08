@@ -3,7 +3,7 @@ defmodule Attesto.VpToken do
   OID4VP `vp_token` verification for SD-JWT VC (`dc+sd-jwt`) and ISO mdoc
   (`mso_mdoc`) presentations (OID4VP §7).
 
-  The response is a DCQL-shaped map from credential-query IDs to one or more
+  The response is a map from credential-query IDs to non-empty arrays of
   presentations. Verification is conn-free. SD-JWT VC entries delegate issuer
   signature, disclosure, VC claim, and holder Key Binding JWT checks to
   `Attesto.SdJwtVc` and `Attesto.SdJwt`; `mso_mdoc` entries delegate `Device`-
@@ -16,7 +16,7 @@ defmodule Attesto.VpToken do
   ## Format dispatch
 
   Each query ID's format is resolved via the optional `:formats` option — a
-  map of query ID to `"dc+sd-jwt"` or `"mso_mdoc"` — falling back to shape
+  map of query ID to `"dc+sd-jwt"` or `"mso_mdoc"` — falling back to format
   detection when a query ID is absent from `:formats` (or the option itself is
   omitted): a `~`-delimited string is SD-JWT VC, a plain base64url string is
   `mso_mdoc`. Prefer `:formats` when the DCQL query is known ahead of time;
@@ -65,6 +65,8 @@ defmodule Attesto.VpToken do
   callback receiving the presentation's (unverified) issuer identity. The
   optional `:now` value is passed to both the VC/mdoc and holder-binding
   verifiers. See the moduledoc for `:formats` and `:response_uri`.
+  `:accepted_algs` and `:enforce_fapi_alg_policy` are forwarded to SD-JWT
+  issuer verification only, independently of the holder Key Binding JWT.
 
   > #### `:resolve_issuer` receives UNVERIFIED issuer material {: .warning}
   >
@@ -79,9 +81,11 @@ defmodule Attesto.VpToken do
   > the presenter controls it, so a naive fetch is an SSRF sink. Resolve from
   > a trusted issuer registry, not by dereferencing the peeked value.
 
-  A string presentation produces one safe result for its query ID. A list of
-  presentations produces a list of safe results. Raw JWTs and raw
-  `DeviceResponse` bytes are never returned.
+  Each query ID must contain a non-empty list of presentation strings and
+  produces a list of safe results, as required by OID4VP 1.0. The explicit
+  `:legacy_scalar_values` option (default `false`) also accepts a non-empty
+  presentation string and returns one safe result for that legacy entry.
+  Raw JWTs and raw `DeviceResponse` bytes are never returned.
   """
   @spec verify(term(), keyword()) :: verify_result()
   def verify(vp_token, opts \\ []) do
@@ -93,7 +97,7 @@ defmodule Attesto.VpToken do
     expected_query_ids = expected_query_ids!(opts)
     formats = formats!(opts)
     constraints = query_constraints!(opts)
-    validate_presentations!(vp_token)
+    validate_presentations!(vp_token, legacy_scalar_values!(opts))
 
     # A stored constraint means that query id WAS requested, so it is required
     # even if the caller did not also list it in `:expected_query_ids`. Without
@@ -198,14 +202,14 @@ defmodule Attesto.VpToken do
   defp claim_values(_values), do: nil
 
   defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts) do
-    verify_opts = now_opts(opts)
+    verify_opts = Keyword.take(opts, [:now, :accepted_algs, :enforce_fapi_alg_policy])
 
     ctx = %{
       formats: formats,
       constraints: constraints,
       issuer_source: issuer_source,
       verify_opts: verify_opts,
-      binding_opts: [nonce: nonce, audience: audience] ++ verify_opts,
+      binding_opts: [nonce: nonce, audience: audience] ++ now_opts(opts),
       mdoc_context: mdoc_context(nonce, audience, opts)
     }
 
@@ -644,13 +648,20 @@ defmodule Attesto.VpToken do
     end
   end
 
-  defp validate_presentations!(vp_token) do
-    Enum.each(vp_token, fn {_id, presentation} -> validate_presentation!(presentation) end)
+  defp legacy_scalar_values!(opts) do
+    case Keyword.get(opts, :legacy_scalar_values, false) do
+      value when is_boolean(value) -> value
+      _invalid -> raise ArgumentError, "Attesto.VpToken :legacy_scalar_values must be true or false"
+    end
   end
 
-  defp validate_presentation!(presentation) when is_binary(presentation) and presentation != "", do: :ok
+  defp validate_presentations!(vp_token, legacy?) do
+    Enum.each(vp_token, fn {_id, presentation} -> validate_presentation!(presentation, legacy?) end)
+  end
 
-  defp validate_presentation!(presentations) when is_list(presentations) and presentations != [] do
+  defp validate_presentation!(presentation, true) when is_binary(presentation) and presentation != "", do: :ok
+
+  defp validate_presentation!(presentations, _legacy?) when is_list(presentations) and presentations != [] do
     if Enum.all?(presentations, &(is_binary(&1) and &1 != "")) do
       :ok
     else
@@ -658,11 +669,12 @@ defmodule Attesto.VpToken do
     end
   end
 
-  defp validate_presentation!(presentation), do: invalid_presentation!(presentation)
+  defp validate_presentation!(presentation, _legacy?), do: invalid_presentation!(presentation)
 
   defp invalid_presentation!(presentation) do
     raise ArgumentError,
-          "Attesto.VpToken presentation must be a non-empty binary or list of non-empty binaries; " <>
+          "Attesto.VpToken presentation must be a non-empty list of non-empty binaries " <>
+            "(a scalar requires legacy_scalar_values: true); " <>
             "got #{inspect(presentation)}"
   end
 

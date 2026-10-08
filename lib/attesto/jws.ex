@@ -174,7 +174,8 @@ defmodule Attesto.JWS do
   Options:
 
     * `:kid` narrows the result after conversion and algorithm filtering.
-    * `:accepted_algs` filters algorithms; an empty list means no filter.
+    * `:accepted_algs` filters algorithms; an explicit empty list denies all.
+      Omitting the option leaves algorithms unrestricted at this low-level API.
     * `:fapi?` applies `SigningAlg.fapi_compatible?/2` after algorithm
       filtering.
     * `:malformed_key` is `:reject_set` (default), `:skip`, or `:raise`.
@@ -205,6 +206,8 @@ defmodule Attesto.JWS do
   `:claims_map?` treats a successful JOSE result with non-map claims as a
   malformed result when set.
   `:return_key?` optionally includes the successful candidate in the result.
+  `:accepted_algs` and `:fapi?` also filter supplied candidates; an explicit
+  empty algorithm list denies all, including manually constructed candidates.
   """
   @spec verify_strict(binary(), [verification_candidate()], keyword()) ::
           {:ok, map()} | {:ok, map(), verification_candidate()} | {:error, atom()}
@@ -357,6 +360,12 @@ defmodule Attesto.JWS do
   end
 
   defp verify_candidate(candidate, acc, jwt, opts) do
+    if allow_verification_candidate(candidate, opts, :skip) == true,
+      do: verify_allowed_candidate(candidate, acc, jwt, opts),
+      else: {:cont, acc}
+  end
+
+  defp verify_allowed_candidate(candidate, acc, jwt, opts) do
     case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
       {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
         if signature_parameters_valid?(jwt, candidate, opts),
@@ -444,8 +453,13 @@ defmodule Attesto.JWS do
   defp validate_candidate!(_candidate), do: raise(ArgumentError, "verification candidate must be {kid, alg, jwk}")
 
   defp candidate_allowed?({_kid, alg, jwk}, opts) do
-    accepted_algs = Keyword.get(opts, :accepted_algs, [])
-    accepted? = accepted_algs == [] or alg in accepted_algs
+    accepted? =
+      case Keyword.fetch(opts, :accepted_algs) do
+        :error -> true
+        {:ok, accepted_algs} when is_list(accepted_algs) -> alg in accepted_algs
+        {:ok, _invalid} -> false
+      end
+
     fapi? = Keyword.get(opts, :fapi?, false)
     accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk))
   end

@@ -182,7 +182,12 @@ defmodule Attesto.SdJwt do
   Issuer-signed JWT. Options:
 
     * `:accepted_algs` - JWS algorithms accepted for the issuer signature.
-      Defaults to `Attesto.SigningAlg.fapi_algs/0`.
+      Defaults to `Attesto.SigningAlg.fapi_algs/0`. An empty list denies all.
+    * `:enforce_fapi_alg_policy` - enforce the FAPI issuer-key restrictions,
+      including RSA moduli of at least 2048 bits for PS256 and Ed25519 for
+      legacy EdDSA. Defaults to `true` when the algorithm option is omitted
+      or narrows the default list. An explicitly broader list selects a
+      broader deployment profile; explicit `false` relaxes key restrictions.
 
   Returns `{:ok, %{claims:, key_binding_jwt:, issuer_jwt:}}` where `claims` is
   the payload with every `_sd`/array digest resolved from the presented
@@ -194,6 +199,8 @@ defmodule Attesto.SdJwt do
   @spec verify(String.t(), map() | [map()] | list(), keyword()) ::
           {:ok, verified()} | {:error, verify_error()}
   def verify(combined, jwks, opts \\ []) when is_binary(combined) do
+    validate_fapi_policy!(opts)
+
     with {:ok, issuer_jwt, disclosures, kb_jwt} <- split(combined),
          {:ok, payload} <- verify_issuer_signature(issuer_jwt, jwks, opts),
          {:ok, sd_alg} <- sd_alg(payload),
@@ -435,8 +442,8 @@ defmodule Attesto.SdJwt do
          :ok <- check_crit(header, :malformed),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
-         true <- alg in accepted do
-      verify_against_keys(jwt, alg, keys(jwks))
+         true <- is_list(accepted) and alg in accepted do
+      verify_against_keys(jwt, alg, keys(jwks), opts)
     else
       false -> {:error, :unsupported_alg}
       :missing -> {:error, :unsupported_alg}
@@ -461,10 +468,19 @@ defmodule Attesto.SdJwt do
     end
   end
 
-  defp verify_against_keys(jwt, alg, keys) do
+  defp validate_fapi_policy!(opts) do
+    case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
+    end
+  end
+
+  defp verify_against_keys(jwt, alg, keys, opts) do
     candidates =
       JWS.verification_candidates(keys,
         alg: alg,
+        fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts)),
         malformed_key: :skip
       )
 

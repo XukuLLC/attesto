@@ -112,7 +112,7 @@ defmodule Attesto.RequestObjectTest do
                RequestObject.verify(
                  jwt,
                  %{"keys" => [trusted]},
-                 base_opts() ++ [accepted_algs: ["PS256"]]
+                 base_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: false]
                )
     end
 
@@ -170,11 +170,16 @@ defmodule Attesto.RequestObjectTest do
                    base_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: true]
                  )
 
+        if alg == "EdDSA" do
+          assert {:error, :invalid_signature} =
+                   RequestObject.verify(jwt, %{"keys" => [trusted]}, base_opts() ++ [accepted_algs: [alg]])
+        end
+
         assert {:ok, _params} =
                  RequestObject.verify(
                    jwt,
                    %{"keys" => [trusted]},
-                   base_opts() ++ [accepted_algs: [alg]]
+                   base_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: false]
                  )
       end
     end

@@ -54,12 +54,23 @@ defmodule Attesto.SigningAlg do
 
   Equal to `fapi_algs/0`: PS256, ES256, legacy EdDSA over Ed25519, and explicit
   Ed25519. A host with a non-FAPI profile can pass an explicit `:accepted_algs`
-  option to the relevant verifier. A composed FAPI profile that narrows this
-  list also passes `enforce_fapi_alg_policy: true` to retain the FAPI 2
-  key-strength and curve gates.
+  option to the relevant verifier. Narrowing this list retains the FAPI 2
+  key-strength and curve gates. An explicitly broader list selects a broader
+  profile unless `enforce_fapi_alg_policy: true` is also supplied; explicit
+  `false` relaxes those gates. An empty list always denies all algorithms.
   """
   @spec default_client_algs() :: [alg()]
   def default_client_algs, do: @fapi_algs
+
+  @doc false
+  @spec default_fapi_policy?(keyword()) :: boolean()
+  def default_fapi_policy?(opts) do
+    case Keyword.fetch(opts, :accepted_algs) do
+      :error -> true
+      {:ok, accepted} when is_list(accepted) -> Enum.all?(accepted, &(&1 in @fapi_algs))
+      {:ok, _invalid} -> true
+    end
+  end
 
   @doc """
   Resolve the algorithm for a key in `keystore`.

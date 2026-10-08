@@ -241,7 +241,7 @@ defmodule Attesto.StatusList do
 
     case Map.get(header, "alg") do
       alg when is_binary(alg) and alg != "none" ->
-        if is_list(accepted) and (accepted == [] or alg in accepted),
+        if is_list(accepted) and alg in accepted,
           do: {:ok, alg},
           else: {:error, :unsupported_alg}
 

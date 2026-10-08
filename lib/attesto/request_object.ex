@@ -59,9 +59,9 @@ defmodule Attesto.RequestObject do
       and explicit Ed25519).
     * `:enforce_fapi_alg_policy` - additionally enforce the FAPI key/algorithm
       policy, rejecting RSA moduli below 2048 bits and legacy `EdDSA` over
-      Ed448. Defaults to `true` when `:accepted_algs` is omitted and `false`
-      when the caller supplies an explicit non-FAPI algorithm policy. Composed
-      FAPI profiles that narrow the allowlist must pass `true`.
+      Ed448. Defaults to `true` when `:accepted_algs` is omitted or narrows the
+      default list, and `false` for an explicitly broader algorithm policy.
+      Explicit `false` relaxes these gates; an empty list always denies all.
     * `:require_nbf` - when `true`, reject an object without an `nbf` claim.
       Defaults to `false`. (RFC 9101 / FAPI Message Signing 2.0 §5.3.1.)
     * `:max_nbf_age_seconds` - when set, reject an `nbf` older than `now - N`.
@@ -191,7 +191,7 @@ defmodule Attesto.RequestObject do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
     candidates =
       JWS.verification_candidates(trusted_jwks,

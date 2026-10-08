@@ -188,7 +188,10 @@ defmodule Attesto.ClientAssertionTest do
              )
 
     assert {:ok, _claims} =
-             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: ["PS256"])
+             ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+               accepted_algs: ["PS256"],
+               enforce_fapi_alg_policy: false
+             )
   end
 
   test "default :accepted_algs keeps the FAPI set (current behaviour)" do
@@ -262,8 +265,16 @@ defmodule Attesto.ClientAssertionTest do
                  enforce_fapi_alg_policy: true
                )
 
+      if alg == "EdDSA" do
+        assert {:error, :invalid_signature} =
+                 ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: [alg])
+      end
+
       assert {:ok, _claims} =
-               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]}, accepted_algs: [alg])
+               ClientAssertion.verify(jwt, @client_id, @audience, %{"keys" => [trusted]},
+                 accepted_algs: [alg],
+                 enforce_fapi_alg_policy: false
+               )
     end
   end
 

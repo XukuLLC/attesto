@@ -379,7 +379,7 @@ defmodule Attesto.CIBA.RequestTest do
                Request.validate(
                  client,
                  %{"request" => jwt},
-                 signed_opts() ++ [accepted_algs: ["PS256"]]
+                 signed_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: false]
                )
     end
 
@@ -446,7 +446,7 @@ defmodule Attesto.CIBA.RequestTest do
                  Request.validate(
                    client,
                    %{"request" => jwt},
-                   signed_opts() ++ [accepted_algs: [alg]]
+                   signed_opts() ++ [accepted_algs: [alg], enforce_fapi_alg_policy: false]
                  )
       end
     end

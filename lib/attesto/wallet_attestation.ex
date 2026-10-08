@@ -145,8 +145,9 @@ defmodule Attesto.WalletAttestation do
       Defaults to `Attesto.SigningAlg.fapi_algs/0`.
     * `:enforce_fapi_alg_policy` - additionally enforce the FAPI RSA
       modulus / Edwards curve restrictions on the Client Attestation
-      signer's key. Defaults to `true` when `:accepted_algs` is omitted,
-      `false` otherwise (matches `Attesto.ClientAssertion.verify/5`).
+      signer's key. Defaults to `true` when `:accepted_algs` is omitted or
+      narrows the default list, and `false` for an explicitly broader policy.
+      Explicit `false` relaxes these gates; an empty list always denies all.
     * `:replay_check` - a 2-arity function `(replay_key, ttl_seconds) -> :ok
       | {:error, :replay}`, called after every other PoP check passes.
       `replay_key` is a fixed-length digest namespacing the `jti` by the
@@ -183,7 +184,7 @@ defmodule Attesto.WalletAttestation do
   defp validate_policy_options!(opts) do
     enforce_fapi_policy =
       case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
-        :error -> not Keyword.has_key?(opts, :accepted_algs)
+        :error -> SigningAlg.default_fapi_policy?(opts)
         {:ok, value} when is_boolean(value) -> value
         {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
       end
@@ -221,7 +222,7 @@ defmodule Attesto.WalletAttestation do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, not Keyword.has_key?(opts, :accepted_algs))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
     candidates =
       JWS.verification_candidates(trusted,
