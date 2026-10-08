@@ -46,6 +46,26 @@ defmodule Attesto.SiopTest do
              Siop.verify(token, audience: @audience, nonce: @nonce, now: @now)
   end
 
+  test "rejects every malformed allowlist even when it includes the valid token algorithm", context do
+    token = sign(context.key, context.claims)
+    opts = [audience: @audience, nonce: @nonce, now: @now]
+
+    for policy <- [
+          [],
+          nil,
+          "ES256",
+          ["ES256", nil],
+          ["ES256", "ES25X"],
+          ["ES256", "ES256"],
+          ["ES256", :ES256],
+          ["ES256", %{}]
+        ] do
+      assert {:error, :invalid_alg} = Siop.verify(token, Keyword.put(opts, :accepted_algs, policy))
+    end
+
+    assert {:ok, _} = Siop.verify(token, Keyword.put(opts, :accepted_algs, ["ES256", "ES384"]))
+  end
+
   test "accepts sub_jwk in the protected header", context do
     claims = Map.delete(context.claims, "sub_jwk")
     token = sign(context.key, claims, %{"sub_jwk" => context.jwk})

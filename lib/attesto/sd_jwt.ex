@@ -185,9 +185,8 @@ defmodule Attesto.SdJwt do
       Defaults to `Attesto.SigningAlg.fapi_algs/0`. An empty list denies all.
     * `:enforce_fapi_alg_policy` - enforce the FAPI issuer-key restrictions,
       including RSA moduli of at least 2048 bits for PS256 and Ed25519 for
-      legacy EdDSA. Defaults to `true` when the algorithm option is omitted
-      or narrows the default list. An explicitly broader list selects a
-      broader deployment profile; explicit `false` relaxes key restrictions.
+      legacy EdDSA. Defaults to `true` for every algorithm allowlist. A broader
+      deployment profile must explicitly set `false` to relax these gates.
 
   Returns `{:ok, %{claims:, key_binding_jwt:, issuer_jwt:}}` where `claims` is
   the payload with every `_sd`/array digest resolved from the presented
@@ -442,7 +441,7 @@ defmodule Attesto.SdJwt do
          :ok <- check_crit(header, :malformed),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
-         true <- is_list(accepted) and alg in accepted do
+         true <- SigningAlg.valid_verification_algorithms?(accepted) and alg in accepted do
       verify_against_keys(jwt, alg, keys(jwks), opts)
     else
       false -> {:error, :unsupported_alg}
@@ -518,7 +517,8 @@ defmodule Attesto.SdJwt do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
     alg = Map.get(header, "alg")
 
-    if is_binary(alg) and alg in accepted and alg != "none" and SigningAlg.rsa_params_ok?(holder_jwk) do
+    if SigningAlg.valid_verification_algorithms?(accepted) and is_binary(alg) and alg in accepted and
+         alg != "none" and SigningAlg.rsa_params_ok?(holder_jwk) do
       # `rsa_params_ok?` guards the holder key here because the KB-JWT candidate
       # is built directly (not through `JWS.map_candidate!`), so an oversized-
       # exponent holder `cnf.jwk` would otherwise reach a scheduler-pinning

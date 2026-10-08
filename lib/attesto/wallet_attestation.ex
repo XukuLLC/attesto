@@ -145,8 +145,7 @@ defmodule Attesto.WalletAttestation do
       Defaults to `Attesto.SigningAlg.fapi_algs/0`.
     * `:enforce_fapi_alg_policy` - additionally enforce the FAPI RSA
       modulus / Edwards curve restrictions on the Client Attestation
-      signer's key. Defaults to `true` when `:accepted_algs` is omitted or
-      narrows the default list, and `false` for an explicitly broader policy.
+      signer's key. Defaults to `true` for every algorithm allowlist.
       Explicit `false` relaxes these gates; an empty list always denies all.
     * `:replay_check` - a 2-arity function `(replay_key, ttl_seconds) -> :ok
       | {:error, :replay}`, called after every other PoP check passes.

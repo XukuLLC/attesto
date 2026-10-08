@@ -5,16 +5,14 @@ defmodule Attesto.RequestObject.PolicyTest do
   alias Attesto.RequestObject.Policy
 
   describe "to_verify_opts/1" do
-    test "generic/0 materializes no strict opts (only the false require flags)" do
+    test "generic/0 materializes secure algorithm defaults without strict claim-presence opts" do
       opts = Policy.to_verify_opts(Policy.generic())
 
-      # nils are dropped so RequestObject.verify/3 keeps its own defaults
-      # (notably :accepted_algs -> SigningAlg.fapi_algs()).
-      refute Keyword.has_key?(opts, :accepted_algs)
+      assert Keyword.get(opts, :accepted_algs) == Attesto.SigningAlg.fapi_algs()
       refute Keyword.has_key?(opts, :max_nbf_age_seconds)
       refute Keyword.has_key?(opts, :max_lifetime_seconds)
       refute Keyword.has_key?(opts, :accepted_typ)
-      refute Keyword.has_key?(opts, :enforce_fapi_alg_policy)
+      assert Keyword.get(opts, :enforce_fapi_alg_policy) == true
       assert Keyword.get(opts, :require_nbf) == false
       assert Keyword.get(opts, :require_exp) == false
     end
@@ -30,8 +28,7 @@ defmodule Attesto.RequestObject.PolicyTest do
       # Signing conformance suite signs request objects without a `typ` header,
       # and §5.3.1 only requires the OP to ACCEPT the type, not mandate it.
       assert Keyword.get(opts, :accepted_typ) == ["oauth-authz-req+jwt", nil]
-      # accepted_algs is left nil so verify/3's fapi_algs() default applies.
-      refute Keyword.has_key?(opts, :accepted_algs)
+      assert Keyword.get(opts, :accepted_algs) == Attesto.SigningAlg.fapi_algs()
       assert Keyword.get(opts, :enforce_fapi_alg_policy) == true
     end
 

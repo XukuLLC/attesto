@@ -14,8 +14,8 @@ defmodule Attesto.RequestObject.Policy do
   alias Attesto.SigningAlg
 
   @type t :: %__MODULE__{
-          accepted_algs: [SigningAlg.alg()] | nil,
-          enforce_fapi_alg_policy: boolean() | nil,
+          accepted_algs: [SigningAlg.alg()],
+          enforce_fapi_alg_policy: boolean(),
           require_nbf: boolean(),
           max_nbf_age_seconds: pos_integer() | nil,
           require_exp: boolean(),
@@ -24,8 +24,8 @@ defmodule Attesto.RequestObject.Policy do
           require_request_object: boolean()
         }
 
-  defstruct accepted_algs: nil,
-            enforce_fapi_alg_policy: nil,
+  defstruct accepted_algs: SigningAlg.fapi_algs(),
+            enforce_fapi_alg_policy: true,
             require_nbf: false,
             max_nbf_age_seconds: nil,
             require_exp: false,
@@ -57,8 +57,8 @@ defmodule Attesto.RequestObject.Policy do
     * JOSE header `typ`, when present, must be `"oauth-authz-req+jwt"`, but is
       NOT required.
 
-  `accepted_algs` is left `nil` to inherit `Attesto.RequestObject.verify/3`'s
-  default (`Attesto.SigningAlg.fapi_algs/0`: PS256, ES256, legacy EdDSA over
+  `accepted_algs` retains the default (`Attesto.SigningAlg.fapi_algs/0`:
+  PS256, ES256, legacy EdDSA over
   Ed25519, and explicit Ed25519). `enforce_fapi_alg_policy` is set explicitly
   so a caller can narrow `accepted_algs` without disabling the profile's RSA
   modulus and Edwards-curve checks.
@@ -96,9 +96,10 @@ defmodule Attesto.RequestObject.Policy do
 
   @doc """
   Flatten the policy to `Attesto.RequestObject.verify/3` options, dropping
-  `nil` values so `verify/3` keeps its own defaults (notably `accepted_algs`,
-  which defaults to `Attesto.SigningAlg.fapi_algs/0`) and the non-verification
-  presence fields (`#{inspect(@non_verify_keys)}`). Boolean `false` remains
+  optional `nil` claim policies and the non-verification presence fields
+  (`#{inspect(@non_verify_keys)}`). Algorithm and enforcement values remain
+  present, including malformed `nil` values, so verification fails closed.
+  Boolean `false` remains
   present, allowing a generic non-FAPI policy to opt out of the FAPI key gate
   explicitly.
   """
@@ -107,7 +108,7 @@ defmodule Attesto.RequestObject.Policy do
     policy
     |> Map.from_struct()
     |> Map.drop(@non_verify_keys)
-    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.reject(fn {key, value} -> is_nil(value) and key not in [:accepted_algs, :enforce_fapi_alg_policy] end)
     |> Keyword.new()
   end
 end

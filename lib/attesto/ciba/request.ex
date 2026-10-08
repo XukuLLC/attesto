@@ -171,8 +171,7 @@ defmodule Attesto.CIBA.Request do
       only accepted algorithm.
     * `:enforce_fapi_alg_policy` - enforce the FAPI RSA modulus and Edwards
       curve restrictions in addition to `:accepted_algs`. Defaults to `true`
-      when `:accepted_algs` is omitted or narrows the default list, and `false`
-      for an explicitly broader algorithm policy. Explicit `false` relaxes
+      for every algorithm allowlist. Only explicit `false` relaxes
       these gates; an empty list always denies all algorithms.
     * `:max_request_lifetime_seconds` - bound on a signed request's
       `nbf`→`exp` lifetime. Default `#{@default_max_request_lifetime_seconds}`
@@ -323,12 +322,19 @@ defmodule Attesto.CIBA.Request do
   defp signed_request_algs(client, opts) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.default_client_algs())
 
-    case Map.get(client, :request_signing_alg) do
-      nil -> {:ok, accepted}
-      alg when is_binary(alg) -> if alg in accepted, do: {:ok, [alg]}, else: {:error, :invalid_request}
-      _other -> {:error, :invalid_request}
+    if SigningAlg.valid_verification_algorithms?(accepted) do
+      registered_request_alg(Map.get(client, :request_signing_alg), accepted)
+    else
+      {:error, :invalid_request}
     end
   end
+
+  defp registered_request_alg(nil, accepted), do: {:ok, accepted}
+
+  defp registered_request_alg(alg, accepted) when is_binary(alg),
+    do: if(alg in accepted, do: {:ok, [alg]}, else: {:error, :invalid_request})
+
+  defp registered_request_alg(_alg, _accepted), do: {:error, :invalid_request}
 
   defp registered_jwks(%{jwks: jwks}) when is_map(jwks) or is_list(jwks), do: {:ok, jwks}
   # A client with no registered keys cannot have signed anything.

@@ -59,6 +59,27 @@ defmodule Attesto.CredentialProofTest do
     assert jkt == JOSE.JWK.thumbprint(key)
   end
 
+  test "rejects every malformed allowlist even when it includes the valid proof algorithm" do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    proof = sign_proof(key, public_map(key))
+
+    for policy <- [
+          [],
+          nil,
+          "ES256",
+          ["ES256", nil],
+          ["ES256", "ES25X"],
+          ["ES256", "ES256"],
+          ["ES256", :ES256],
+          ["ES256", %{}]
+        ] do
+      assert {:error, :invalid_alg} =
+               CredentialProof.verify_jwt(proof, Keyword.put(verify_opts(), :accepted_algs, policy))
+    end
+
+    assert {:ok, _} = CredentialProof.verify_jwt(proof, Keyword.put(verify_opts(), :accepted_algs, ["ES256", "ES384"]))
+  end
+
   test "rejects a proof header containing private-key material" do
     key = JOSE.JWK.generate_key({:ec, "P-256"})
     jwk_map = public_map(key) |> Map.put("d", "private")

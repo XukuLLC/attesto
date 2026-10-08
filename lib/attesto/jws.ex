@@ -190,10 +190,14 @@ defmodule Attesto.JWS do
     malformed_key = Keyword.get(opts, :malformed_key, :reject_set)
     validate_malformed_key!(malformed_key)
 
-    keys
-    |> normalize_verification_keys()
-    |> Enum.reduce_while([], &reduce_verification_candidate(&1, &2, opts, malformed_key))
-    |> finish_verification_candidates(opts)
+    if valid_verification_policy?(opts) do
+      keys
+      |> normalize_verification_keys()
+      |> Enum.reduce_while([], &reduce_verification_candidate(&1, &2, opts, malformed_key))
+      |> finish_verification_candidates(opts)
+    else
+      []
+    end
   end
 
   @doc """
@@ -221,16 +225,29 @@ defmodule Attesto.JWS do
 
     validate_verification_result_options!(malformed_result, claims_map?, return_key?)
 
-    case decode_and_validate_jwt(jwt, opts) do
+    case valid_verification_policy?(opts) and decode_and_validate_jwt(jwt, opts) do
       :ok ->
         Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, opts))
 
       {:error, _reason} ->
         {:error, Keyword.get(opts, :malformed_error, terminal_error)}
+
+      false ->
+        {:error, terminal_error}
     end
   end
 
   def verify_strict(_jwt, _candidates, _opts), do: {:error, :invalid_signature}
+
+  defp valid_verification_policy?(opts) do
+    accepted? =
+      case Keyword.fetch(opts, :accepted_algs) do
+        :error -> true
+        {:ok, algs} -> SigningAlg.valid_verification_algorithms?(algs)
+      end
+
+    accepted? and is_boolean(Keyword.get(opts, :fapi?, false))
+  end
 
   # Split at most twice, then scan the final segment for one extra separator.
   # `:binary.split(..., [:global])` builds one list entry per attacker supplied

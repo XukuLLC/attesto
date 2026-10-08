@@ -22,6 +22,7 @@ defmodule Attesto.SigningAlg do
           | {:xof, :shake256, pos_integer(), pos_integer()}
 
   @allowed ~w(RS256 PS256 ES256 ES384 ES512 EdDSA Ed25519 Ed448)
+  @verification_algs @allowed ++ ~w(RS384 RS512 PS384 PS512 HS256 HS384 HS512 ES256K)
 
   @doc "Algorithms Attesto can sign/verify when backed by a matching key."
   @spec allowed() :: [alg()]
@@ -54,23 +55,24 @@ defmodule Attesto.SigningAlg do
 
   Equal to `fapi_algs/0`: PS256, ES256, legacy EdDSA over Ed25519, and explicit
   Ed25519. A host with a non-FAPI profile can pass an explicit `:accepted_algs`
-  option to the relevant verifier. Narrowing this list retains the FAPI 2
-  key-strength and curve gates. An explicitly broader list selects a broader
-  profile unless `enforce_fapi_alg_policy: true` is also supplied; explicit
-  `false` relaxes those gates. An empty list always denies all algorithms.
+  option to the relevant verifier. Algorithm lists never relax the FAPI 2
+  key-strength and curve gates; only explicit `enforce_fapi_alg_policy: false`
+  selects a broader profile. An empty list always denies all algorithms.
   """
   @spec default_client_algs() :: [alg()]
   def default_client_algs, do: @fapi_algs
 
   @doc false
   @spec default_fapi_policy?(keyword()) :: boolean()
-  def default_fapi_policy?(opts) do
-    case Keyword.fetch(opts, :accepted_algs) do
-      :error -> true
-      {:ok, accepted} when is_list(accepted) -> Enum.all?(accepted, &(&1 in @fapi_algs))
-      {:ok, _invalid} -> true
-    end
+  def default_fapi_policy?(_opts), do: true
+
+  @doc false
+  @spec valid_verification_algorithms?(term()) :: boolean()
+  def valid_verification_algorithms?(algs) when is_list(algs) do
+    Enum.all?(algs, &(&1 in @verification_algs)) and length(Enum.uniq(algs)) == length(algs)
   end
+
+  def valid_verification_algorithms?(_algs), do: false
 
   @doc """
   Resolve the algorithm for a key in `keystore`.
