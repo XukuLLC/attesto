@@ -37,6 +37,12 @@ defmodule Attesto.ResourceIndicatorTest do
       assert ResourceIndicator.validate("api.example.com") == {:error, :invalid_target}
     end
 
+    test "rejects HTTP resource indicators with an empty authority" do
+      for value <- ["https://", "https:///path", "https://?q=x", "http:///path"] do
+        assert ResourceIndicator.validate(value) == {:error, :invalid_target}
+      end
+    end
+
     test "rejects a URI carrying a fragment (RFC 8707 §2.1)" do
       assert ResourceIndicator.validate("https://api.example.com/a#frag") ==
                {:error, :invalid_target}

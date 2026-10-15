@@ -43,8 +43,9 @@ defmodule Attesto.KeyAttestation do
   As of this draft, the key attestation JWT carries no formal `iss`/`aud`
   claim (unlike the Client/Wallet Attestation JWT) - the spec's own example
   includes `iss`, but the normative claim list does not. `verify/2` still
-  lets a caller pin `:issuer` for deployments that populate and rely on it
-  by convention; it is not checked unless supplied.
+  lets a caller require and pin `:issuer` for deployments that populate and
+  rely on it by convention. When that option is supplied, an absent `iss`
+  fails closed.
   """
 
   alias Attesto.{JWS, NumericDate, SecureCompare, SigningAlg, Thumbprint}
@@ -98,9 +99,9 @@ defmodule Attesto.KeyAttestation do
 
   ## Optional opts
 
-    * `:issuer` - when set, the attestation's `iss` (if present) MUST equal
-      it. Not required to be present unless the caller relies on it -
-      see the module doc.
+    * `:issuer` - when set, the attestation MUST carry an `iss` claim equal
+      to it. Omit this option when using the specification's issuer-less
+      form and scope the trusted JWKS to the intended attester instead.
     * `:nonce` - the expected `c_nonce`; when set, the attestation's
       `nonce` claim MUST match it exactly.
     * `:now` - clock reference (DateTime or unix seconds).
@@ -234,7 +235,7 @@ defmodule Attesto.KeyAttestation do
   defp check_issuer(claims, opts) do
     case {Keyword.get(opts, :issuer), Map.get(claims, "iss")} do
       {nil, _iss} -> :ok
-      {_expected, nil} -> :ok
+      {_expected, nil} -> {:error, :invalid_issuer}
       {expected, iss} -> if iss == expected, do: :ok, else: {:error, :invalid_issuer}
     end
   end

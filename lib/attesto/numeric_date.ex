@@ -77,11 +77,11 @@ defmodule Attesto.NumericDate do
 
   def fresh?(_iat, _now, _opts), do: :invalid
 
-  @doc "Return whether `finish` is no more than `max_seconds` after `start`."
+  @doc "Return whether `finish` is at or after `start` and no more than `max_seconds` later."
   @spec within_lifetime?(term(), term(), term()) :: boolean()
   def within_lifetime?(finish, start, max_seconds)
       when is_integer(finish) and is_integer(start) and is_integer(max_seconds) do
-    finish <= start + max_seconds
+    finish >= start and finish <= start + max_seconds
   end
 
   def within_lifetime?(_finish, _start, _max_seconds), do: false

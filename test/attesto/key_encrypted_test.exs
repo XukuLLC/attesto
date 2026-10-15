@@ -4,9 +4,7 @@ defmodule Attesto.KeyEncryptedTest do
   # PEM (one carrying `Proc-Type: 4,ENCRYPTED` / `DEK-Info:` headers)
   # probed WITHOUT supplying the passphrase. Attesto.Key takes a plain PEM
   # string and has no passphrase parameter, so an encrypted PEM is simply
-  # un-decodable material. These tests pin the CURRENT behaviour so a
-  # maintainer who later decides to support encrypted PEMs (or to reject
-  # them with a uniform clear message) has a regression anchor.
+  # un-decodable material. These tests pin the documented uniform error.
   #
   # Attesto.Key is pure, so async: true is safe.
   use ExUnit.Case, async: true
@@ -56,21 +54,13 @@ defmodule Attesto.KeyEncryptedTest do
   end
 
   describe "public_pem/1 on an encrypted PEM (no passphrase)" do
-    test "raises (the key cannot be derived without the passphrase)", %{pem: pem} do
-      # public_pem/1 must NOT silently succeed: there is no way to derive a
-      # public key from an undecrypted private entry. It does raise.
-      assert_raise FunctionClauseError, fn -> Key.public_pem(pem) end
+    test "raises the documented clear ArgumentError", %{pem: pem} do
+      assert_raise ArgumentError, ~r/invalid RSA private key PEM/, fn ->
+        Key.public_pem(pem)
+      end
     end
 
-    test "the raised error is the OPAQUE internal one, not the clear ArgumentError" do
-      # CURRENT, flagged-as-buggy behaviour: unlike jwk/1 and kid/1,
-      # public_pem/1 does NOT produce the friendly ArgumentError. Its
-      # `decode_rsa_private_key!/1` sees the encrypted entry as a single
-      # entry (pem_decode returns `[entry]`), then calls the 1-arity
-      # `:public_key.pem_entry_decode/1`, which has no clause for an
-      # encrypted entry and raises a raw FunctionClauseError that leaks an
-      # Erlang stdlib function name. That is the inconsistency captured in
-      # source_bugs.
+    test "does not expose the internal PEM decoder exception" do
       pem = encrypted_rsa_pem()
 
       err =
@@ -81,10 +71,8 @@ defmodule Attesto.KeyEncryptedTest do
           e -> e
         end
 
-      assert is_struct(err, FunctionClauseError)
-      # Pin the contrast: it is specifically NOT the clear ArgumentError
-      # that jwk/1 and kid/1 raise for the very same input.
-      refute is_struct(err, ArgumentError)
+      assert is_struct(err, ArgumentError)
+      assert Exception.message(err) == "invalid RSA private key PEM"
     end
   end
 end

@@ -123,6 +123,120 @@ defmodule Attesto.Federation.EntityStatementTest do
     assert {:error, :invalid_typ} = EntityStatement.verify(wrong_typ, jwks(pem), now: @now)
   end
 
+  test "requires the metadata_policy claim to use all three levels" do
+    issuer_pem = Factory.ec_pem()
+    subject_pem = Factory.ec_pem()
+
+    valid =
+      EntityStatement.build(
+        issuer_pem,
+        %{"iss" => @superior, "sub" => @entity, "jwks" => jwks(subject_pem)},
+        now: @now
+      )
+
+    {:ok, claims} = JWS.peek_json(valid, :payload)
+
+    invalid =
+      JWS.sign_compact(
+        issuer_pem,
+        %{"alg" => "ES256", "kid" => Key.kid(issuer_pem), "typ" => "entity-statement+jwt"},
+        Map.put(claims, "metadata_policy", %{
+          "grant_types" => %{"default" => ["authorization_code"]}
+        })
+      )
+
+    assert {:error, :invalid_entity_statement} =
+             EntityStatement.verify(invalid, jwks(issuer_pem), now: @now)
+  end
+
+  test "accepts and ignores an object-valued extension operator at the third level" do
+    issuer_pem = Factory.ec_pem()
+    subject_pem = Factory.ec_pem()
+    extension_config = %{"configuration" => true}
+
+    jwt =
+      EntityStatement.build(
+        issuer_pem,
+        %{
+          "iss" => @superior,
+          "sub" => @entity,
+          "jwks" => jwks(subject_pem),
+          "metadata_policy" => %{
+            "openid_provider" => %{
+              "client_name" => %{"future_operator" => extension_config}
+            }
+          }
+        },
+        now: @now
+      )
+
+    assert {:ok, claims} = EntityStatement.verify(jwt, jwks(issuer_pem), now: @now)
+
+    assert get_in(claims, ["metadata_policy", "openid_provider", "client_name", "future_operator"]) ==
+             extension_config
+  end
+
+  test "rejects RSA verification keys below 2048 bits" do
+    weak_signer = Factory.rsa_pem(1024)
+    subject_pem = Factory.ec_pem()
+
+    jwt =
+      EntityStatement.build(
+        weak_signer,
+        %{"iss" => @superior, "sub" => @entity, "jwks" => jwks(subject_pem)},
+        now: @now
+      )
+
+    assert {:error, :invalid_signature} = EntityStatement.verify(jwt, jwks(weak_signer), now: @now)
+  end
+
+  test "rejects an embedded RSA subject key below 2048 bits" do
+    issuer_pem = Factory.ec_pem()
+    strong_subject_pem = Factory.ec_pem()
+    weak_subject_pem = Factory.rsa_pem(1024)
+
+    valid =
+      EntityStatement.build(
+        issuer_pem,
+        %{"iss" => @superior, "sub" => @entity, "jwks" => jwks(strong_subject_pem)},
+        now: @now
+      )
+
+    {:ok, claims} = JWS.peek_json(valid, :payload)
+
+    invalid =
+      JWS.sign_compact(
+        issuer_pem,
+        %{"alg" => "ES256", "kid" => Key.kid(issuer_pem), "typ" => "entity-statement+jwt"},
+        Map.put(claims, "jwks", jwks(weak_subject_pem))
+      )
+
+    assert {:error, :invalid_entity_statement} =
+             EntityStatement.verify(invalid, jwks(issuer_pem), now: @now)
+  end
+
+  test "rejects oversized raw RSA parameters before algorithm inference" do
+    signer = Factory.ec_pem()
+    subject_pem = Factory.ec_pem()
+
+    jwt =
+      EntityStatement.build(
+        signer,
+        %{"iss" => @superior, "sub" => @entity, "jwks" => jwks(subject_pem)},
+        now: @now
+      )
+
+    oversized_key = %{
+      "kty" => "RSA",
+      "kid" => Key.kid(signer),
+      "n" => Base.url_encode64(:binary.copy(<<255>>, 1025), padding: false),
+      "e" => "AQAB"
+    }
+
+    assert {:error, :invalid_signature} =
+             EntityStatement.verify(jwt, %{"keys" => [oversized_key]}, now: @now)
+  end
+
   defp jwks(pem) do
     jwk = Key.jwk(pem)
     {_metadata, public} = JOSE.JWK.to_public_map(jwk)

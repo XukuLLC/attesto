@@ -24,7 +24,7 @@ defmodule Attesto.AuthorizationRequestPropertyTest do
               scopes <- list_of(member_of(@scope_tokens), max_length: 8),
               state <- one_of([constant(nil), suffix_generator()]),
               nonce <- one_of([constant(nil), suffix_generator()]),
-              prompt <- list_of(member_of(~w(none login consent select_account)), max_length: 4),
+              prompt <- valid_prompt_generator(),
               acr_values <- list_of(member_of(["urn:mace:incommon:iap:silver", "phr", "loa2"]), max_length: 4),
               max_age <- one_of([constant(nil), integer(0..86_400)]),
               max_runs: 80
@@ -130,5 +130,12 @@ defmodule Attesto.AuthorizationRequestPropertyTest do
     gen all(chars <- list_of(member_of(Enum.concat([?a..?z, ?0..?9])), min_length: 1, max_length: 16)) do
       List.to_string(chars)
     end
+  end
+
+  defp valid_prompt_generator do
+    one_of([
+      list_of(member_of(~w(login consent select_account)), max_length: 4),
+      list_of(constant("none"), min_length: 1, max_length: 4)
+    ])
   end
 end

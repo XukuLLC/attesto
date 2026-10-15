@@ -131,4 +131,37 @@ defmodule Attesto.Federation.MetadataPolicyTest do
     assert {:ok, %{"client_name" => "other"}} =
              MetadataPolicy.apply(higher, %{"client_name" => "other"})
   end
+
+  test "rejects an object-valued standard value operator" do
+    entity_type_policy = %{
+      "jwks" => %{"value" => %{"keys" => []}}
+    }
+
+    federation_policy = %{
+      "openid_provider" => %{
+        "jwks" => %{"value" => %{"keys" => []}}
+      }
+    }
+
+    assert {:error, :policy_error} = MetadataPolicy.merge(%{}, entity_type_policy)
+    assert {:error, :policy_error} = MetadataPolicy.apply(entity_type_policy, %{})
+
+    assert {:error, :policy_error} = MetadataPolicy.merge(%{}, federation_policy)
+
+    assert {:error, :policy_error} =
+             MetadataPolicy.apply(federation_policy, %{"openid_provider" => %{}})
+  end
+
+  test "ignores object-valued unknown operators in a complete policy" do
+    policy = %{
+      "openid_relying_party" => %{
+        "client_name" => %{"future_operator" => %{"configuration" => true}}
+      }
+    }
+
+    metadata = %{"openid_relying_party" => %{"client_name" => "Leaf"}}
+
+    assert {:ok, %{}} = MetadataPolicy.merge(%{}, policy)
+    assert {:ok, ^metadata} = MetadataPolicy.apply(policy, metadata)
+  end
 end

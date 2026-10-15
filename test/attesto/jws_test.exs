@@ -291,6 +291,18 @@ defmodule Attesto.JWSTest do
 
   defp b64(bytes), do: JWS.encode64(bytes)
 
+  defp noncanonical_equivalent(encoded) do
+    {:ok, decoded} = Base.url_decode64(encoded, padding: false)
+    prefix = binary_part(encoded, 0, byte_size(encoded) - 1)
+
+    Enum.find_value(~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", fn character ->
+      candidate = prefix <> <<character>>
+
+      if candidate != encoded and Base.url_decode64(candidate, padding: false) == {:ok, decoded},
+        do: candidate
+    end)
+  end
+
   describe "decode_compact/2" do
     test "splits a canonical three-segment JWT" do
       jwt = "#{b64("h")}.#{b64("p")}.#{b64("s")}"
@@ -349,6 +361,23 @@ defmodule Attesto.JWSTest do
       # "AAB" decodes to <<0, 0>> but canonically re-encodes to "AAA".
       jwt = "AAB.#{b64("p")}.#{b64("s")}"
       assert {:error, :non_canonical_base64url} = JWS.decode_compact(jwt)
+    end
+
+    test "verify_strict honors canonical: false throughout JSON segment validation" do
+      protected = b64(JSON.encode!(%{"alg" => "ES256"}))
+      payload = JSON.encode!(%{"ok" => true})
+      noncanonical_payload = payload |> b64() |> noncanonical_equivalent()
+      jwt = protected <> "." <> noncanonical_payload <> "." <> b64("signature")
+
+      assert {:error, :malformed} =
+               JWS.verify_strict(jwt, [], terminal_error: :no_candidates, malformed_error: :malformed)
+
+      assert {:error, :no_candidates} =
+               JWS.verify_strict(jwt, [],
+                 canonical: false,
+                 terminal_error: :no_candidates,
+                 malformed_error: :malformed
+               )
     end
 
     test "rejects non-binary input" do

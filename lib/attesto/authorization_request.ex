@@ -8,8 +8,9 @@ defmodule Attesto.AuthorizationRequest do
   `response_type`, the presence of `client_id` and `redirect_uri`, the requested
   scope (surfacing whether the OpenID Connect `openid` scope was requested), and
   the PKCE parameters (`code_challenge` + `code_challenge_method`). It carries
-  `state`, `nonce`, `claims`, and the optional `prompt` / `max_age` / `acr_values`
-  parameters through to the normalized result.
+  `state`, `nonce`, `claims`, validated RFC 9396 `authorization_details`, and
+  the optional `prompt` / `max_age` / `acr_values` parameters through to the
+  normalized result.
 
   It deliberately does NOT:
 
@@ -54,6 +55,7 @@ defmodule Attesto.AuthorizationRequest do
   alias Attesto.RequestObject.Policy
   alias Attesto.ResourceIndicator
   alias Attesto.Scope
+  alias Attesto.Thumbprint
 
   @response_type_code "code"
   @openid_scope "openid"
@@ -107,6 +109,7 @@ defmodule Attesto.AuthorizationRequest do
           prompt: [String.t()],
           max_age: non_neg_integer() | nil,
           claims: map(),
+          authorization_details: [map()],
           acr_values: [String.t()],
           response_mode: String.t() | nil,
           dpop_jkt: String.t() | nil
@@ -132,6 +135,7 @@ defmodule Attesto.AuthorizationRequest do
     :redirect_uri,
     :response_type,
     :state,
+    authorization_details: [],
     acr_values: [],
     openid?: false,
     prompt: [],
@@ -264,16 +268,6 @@ defmodule Attesto.AuthorizationRequest do
   # OIDC Core §3.1.2.1: an OpenID Connect Authentication Request is one whose
   # (effective) `scope` carries the reserved `openid` value.
   defp oidc_request?(params), do: @openid_scope in parse_space_list(Map.get(params, "scope"))
-
-  # RFC 9449 §10: the `dpop_jkt` authorization-request parameter (the JWK SHA-256
-  # thumbprint the issued code is bound to). Read from the effective params so a
-  # signed request object's value wins; the format is enforced at code redemption.
-  defp dpop_jkt(params) do
-    case Map.get(params, "dpop_jkt") do
-      jkt when is_binary(jkt) and jkt != "" -> jkt
-      _ -> nil
-    end
-  end
 
   @doc """
   The response modes this authorization-code server accepts (OAuth 2.0 Response
@@ -418,7 +412,9 @@ defmodule Attesto.AuthorizationRequest do
          {:ok, max_age} <- validate_max_age(params, redirect_uri, state),
          {:ok, prompt} <- validate_prompt(params, redirect_uri, state),
          {:ok, claims} <- validate_claims(params, redirect_uri, state),
+         {:ok, authorization_details} <- validate_authorization_details(params, redirect_uri, state),
          {:ok, nonce} <- validate_nonce(params, require_nonce, redirect_uri, state),
+         {:ok, dpop_jkt} <- validate_dpop_jkt(params, redirect_uri, state),
          {:ok, response_mode} <- validate_response_mode(params, redirect_uri, state) do
       {:ok,
        %__MODULE__{
@@ -435,14 +431,15 @@ defmodule Attesto.AuthorizationRequest do
          prompt: prompt,
          max_age: max_age,
          claims: claims,
+         authorization_details: authorization_details,
          acr_values: parse_space_list(Map.get(params, "acr_values")),
          response_mode: response_mode,
          # RFC 9449 §10: the DPoP key thumbprint to bind the issued code to,
          # read from the EFFECTIVE params - so a signed request object's
          # `dpop_jkt` is authoritative and an unsigned outer-query `dpop_jkt` is
          # ignored when a request object is present (the object replaces the
-         # outer params above). A bare/empty value is treated as absent.
-         dpop_jkt: dpop_jkt(params)
+         # outer params above).
+         dpop_jkt: dpop_jkt
        }}
     else
       # JARM §2.3 / FAPI 2.0 Message Signing §5.4: a redirectable error must be
@@ -678,7 +675,10 @@ defmodule Attesto.AuthorizationRequest do
   defp validate_prompt(params, redirect_uri, state) do
     tokens = parse_space_list(Map.get(params, "prompt"))
 
-    if Enum.all?(tokens, &(&1 in @prompt_values)) do
+    none_with_other_value? =
+      "none" in tokens and Enum.any?(tokens, &(&1 != "none"))
+
+    if Enum.all?(tokens, &(&1 in @prompt_values)) and not none_with_other_value? do
       {:ok, tokens}
     else
       {:error,
@@ -688,6 +688,25 @@ defmodule Attesto.AuthorizationRequest do
          redirect_uri,
          state
        )}
+    end
+  end
+
+  # RFC 9449 §10: a present dpop_jkt is the canonical base64url SHA-256 JWK
+  # thumbprint to bind to the authorization code. Validate it at the request
+  # boundary so malformed input receives a protocol error before issuance.
+  defp validate_dpop_jkt(params, redirect_uri, state) do
+    case Map.get(params, "dpop_jkt") do
+      nil ->
+        {:ok, nil}
+
+      jkt when is_binary(jkt) ->
+        if Thumbprint.valid?(jkt),
+          do: {:ok, jkt},
+          else:
+            {:error, redirect_error("invalid_request", "dpop_jkt is not a valid JWK thumbprint", redirect_uri, state)}
+
+      _invalid ->
+        {:error, redirect_error("invalid_request", "dpop_jkt is not a valid JWK thumbprint", redirect_uri, state)}
     end
   end
 
@@ -713,6 +732,64 @@ defmodule Attesto.AuthorizationRequest do
         {:error, redirect_error("invalid_request", "claims must be a JSON object", redirect_uri, state)}
     end
   end
+
+  # RFC 9396 §2: `authorization_details` is a non-empty JSON array of
+  # objects and every object carries a non-empty string `type`. Direct
+  # authorization requests arrive as the JSON-encoded form parameter; a
+  # verified Request Object reaches this point as the decoded array preserved
+  # by `Attesto.RequestObject`. Normalize both paths to the same trusted list so
+  # callers never have to inspect raw parameters or repeat JAR precedence rules.
+  defp validate_authorization_details(params, redirect_uri, state) do
+    case Map.fetch(params, "authorization_details") do
+      :error ->
+        {:ok, []}
+
+      {:ok, value} ->
+        with {:ok, details} <- decode_authorization_details(value),
+             true <- valid_authorization_details?(details) do
+          {:ok, details}
+        else
+          _invalid ->
+            {:error,
+             redirect_error(
+               "invalid_authorization_details",
+               "authorization_details must be a non-empty JSON array of objects with a non-empty string type",
+               redirect_uri,
+               state
+             )}
+        end
+    end
+  end
+
+  defp decode_authorization_details(value) when is_binary(value) do
+    case JSON.decode(value) do
+      {:ok, decoded} -> {:ok, decoded}
+      _error -> :error
+    end
+  end
+
+  defp decode_authorization_details(value) when is_list(value), do: {:ok, value}
+  defp decode_authorization_details(_value), do: :error
+
+  defp valid_authorization_details?([_ | _] = details), do: Enum.all?(details, &valid_authorization_detail?/1)
+
+  defp valid_authorization_details?(_details), do: false
+
+  defp valid_authorization_detail?(%{"type" => type} = detail)
+       when is_binary(type) and type != "" and not is_struct(detail) do
+    Enum.all?(detail, fn {key, value} -> is_binary(key) and json_value?(value) end)
+  end
+
+  defp valid_authorization_detail?(_detail), do: false
+
+  defp json_value?(nil), do: true
+  defp json_value?(value) when is_binary(value) or is_boolean(value) or is_number(value), do: true
+  defp json_value?(values) when is_list(values), do: Enum.all?(values, &json_value?/1)
+
+  defp json_value?(value) when is_map(value) and not is_struct(value),
+    do: Enum.all?(value, fn {key, nested} -> is_binary(key) and json_value?(nested) end)
+
+  defp json_value?(_value), do: false
 
   # OIDC Core §3.1.2.1: nonce is OPTIONAL for the code flow (RFC 6749 stays at
   # SHOULD), but REQUIRED when the OP policy demands it. The caller signals that

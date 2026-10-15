@@ -14,7 +14,11 @@ if Code.ensure_loaded?(CBOR) do
     @ecdsa_signature_bytes 64
 
     @type verify_error ::
-            :invalid_cose | :invalid_key | :invalid_signature | :unsupported_algorithm
+            :invalid_cose
+            | :invalid_key
+            | :invalid_signature
+            | :unsupported_algorithm
+            | :unsupported_critical_header
 
     @doc """
     Sign `payload_bstr` as an ES256 `COSE_Sign1` and return its CBOR bytes.
@@ -48,8 +52,8 @@ if Code.ensure_loaded?(CBOR) do
     @spec verify1(binary(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
             {:ok, binary()} | {:error, verify_error()}
     def verify1(cose_sign1_bytes, jwk_or_pem, opts) when is_binary(cose_sign1_bytes) and is_list(opts) do
-      with {:ok, protected, payload, signature} <- decode_sign1(cose_sign1_bytes),
-           :ok <- validate_protected(protected),
+      with {:ok, protected, unprotected, payload, signature} <- decode_sign1(cose_sign1_bytes),
+           :ok <- validate_protected(protected, unprotected),
            {:ok, jwk} <- verification_jwk(jwk_or_pem),
            true <- verify_signature(jwk, protected, payload, signature) do
         {:ok, payload}
@@ -101,8 +105,8 @@ if Code.ensure_loaded?(CBOR) do
             :ok | {:error, verify_error()}
     def verify1_detached(cose_sign1_bytes, external_payload, jwk_or_pem, opts)
         when is_binary(cose_sign1_bytes) and is_binary(external_payload) and is_list(opts) do
-      with {:ok, protected, signature} <- decode_detached_sign1(cose_sign1_bytes),
-           :ok <- validate_protected(protected),
+      with {:ok, protected, unprotected, signature} <- decode_detached_sign1(cose_sign1_bytes),
+           :ok <- validate_protected(protected, unprotected),
            {:ok, jwk} <- verification_jwk(jwk_or_pem),
            true <- verify_signature(jwk, protected, external_payload, signature) do
         :ok
@@ -166,11 +170,11 @@ if Code.ensure_loaded?(CBOR) do
 
     defp decode_detached_sign1(encoded) do
       with {:ok, [protected_value, unprotected, nil, signature_value]} <- decode_complete(encoded),
-           true <- is_map(unprotected),
+           true <- plain_map?(unprotected),
            {:ok, protected} <- byte_string(protected_value),
            {:ok, signature} <- byte_string(signature_value),
            true <- byte_size(signature) == @ecdsa_signature_bytes do
-        {:ok, protected, signature}
+        {:ok, protected, unprotected, signature}
       else
         _other -> {:error, :invalid_cose}
       end
@@ -178,24 +182,74 @@ if Code.ensure_loaded?(CBOR) do
 
     defp decode_sign1(encoded) do
       with {:ok, [protected_value, unprotected, payload_value, signature_value]} <- decode_complete(encoded),
-           true <- is_map(unprotected),
+           true <- plain_map?(unprotected),
            {:ok, protected} <- byte_string(protected_value),
            {:ok, payload} <- byte_string(payload_value),
            {:ok, signature} <- byte_string(signature_value),
            true <- byte_size(signature) == @ecdsa_signature_bytes do
-        {:ok, protected, payload, signature}
+        {:ok, protected, unprotected, payload, signature}
       else
         _other -> {:error, :invalid_cose}
       end
     end
 
-    defp validate_protected(protected) do
-      case decode_complete(protected) do
-        {:ok, %{1 => @alg_es256}} -> :ok
-        {:ok, %{} = header} when is_map_key(header, 1) -> {:error, :unsupported_algorithm}
+    defp validate_protected(protected, unprotected) do
+      with {:ok, header} <- decode_complete(protected),
+           true <- plain_map?(header),
+           :ok <- validate_header_locations(header, unprotected),
+           :ok <- validate_algorithm(header) do
+        validate_critical_headers(header)
+      else
+        {:error, _reason} = error -> error
         _other -> {:error, :invalid_cose}
       end
     end
+
+    defp validate_header_locations(protected, unprotected) do
+      protected_labels = Map.keys(protected)
+      unprotected_labels = Map.keys(unprotected)
+
+      if Map.has_key?(unprotected, 2) or
+           not MapSet.disjoint?(MapSet.new(protected_labels), MapSet.new(unprotected_labels)) do
+        {:error, :invalid_cose}
+      else
+        :ok
+      end
+    end
+
+    defp validate_algorithm(%{1 => @alg_es256}), do: :ok
+    defp validate_algorithm(header) when is_map_key(header, 1), do: {:error, :unsupported_algorithm}
+    defp validate_algorithm(_header), do: {:error, :invalid_cose}
+
+    defp validate_critical_headers(header) do
+      case Map.fetch(header, 2) do
+        :error ->
+          :ok
+
+        {:ok, [_ | _] = labels} ->
+          cond do
+            not Enum.all?(labels, &valid_header_label?/1) ->
+              {:error, :invalid_cose}
+
+            not Enum.all?(labels, &Map.has_key?(header, &1)) ->
+              {:error, :invalid_cose}
+
+            not Enum.all?(labels, &understood_critical_header?/1) ->
+              {:error, :unsupported_critical_header}
+
+            true ->
+              :ok
+          end
+
+        {:ok, _invalid} ->
+          {:error, :invalid_cose}
+      end
+    end
+
+    defp valid_header_label?(label), do: is_integer(label) or is_binary(label)
+    defp understood_critical_header?(1), do: true
+    defp understood_critical_header?(2), do: true
+    defp understood_critical_header?(_label), do: false
 
     defp verification_jwk(%JOSE.JWK{} = jwk), do: validate_verification_jwk(jwk)
 
@@ -315,6 +369,8 @@ if Code.ensure_loaded?(CBOR) do
 
     defp byte_string(%CBOR.Tag{tag: :bytes, value: value}) when is_binary(value), do: {:ok, value}
     defp byte_string(_other), do: {:error, :invalid_cose}
+
+    defp plain_map?(value), do: is_map(value) and not is_struct(value)
   end
 else
   defmodule Attesto.Cose do

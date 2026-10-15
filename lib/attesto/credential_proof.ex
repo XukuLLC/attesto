@@ -31,7 +31,8 @@ defmodule Attesto.CredentialProof do
   release. Supplying `:key_attestation_trusted_jwks` opts a caller into
   verifying a present `key_attestation` header and rejecting a proof whose
   key is not among its `attested_keys`; `:require_key_attestation` additionally
-  rejects a proof that carries no `key_attestation` header at all.
+  rejects a proof that carries no `key_attestation` header at all. Requiring
+  key attestation without also supplying trusted keys fails closed.
   """
 
   alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SecureCompare, SigningAlg, Thumbprint}
@@ -81,8 +82,12 @@ defmodule Attesto.CredentialProof do
       attestation's `attested_keys`. Omitted (the default), no such header is
       looked at.
     * `:require_key_attestation` - when true, a proof with no `key_attestation`
-      header is rejected. Only meaningful alongside
-      `:key_attestation_trusted_jwks`; defaults to `false`.
+      header is rejected. Trusted keys MUST also be supplied; a required
+      attestation never becomes optional because its trust source is absent.
+      Defaults to `false`.
+    * `:enforce_fapi_alg_policy` - forwarded, together with `:accepted_algs`,
+      to embedded key-attestation verification so both signatures obey the
+      caller's algorithm policy.
 
   Returns `{:ok, %{jwk: holder_public_jwk, jkt: thumbprint, key_attestation:
   verified_attestation_or_nil}}`. `key_attestation` is `nil` unless
@@ -215,9 +220,10 @@ defmodule Attesto.CredentialProof do
   # ── key attestation cross-check (opt-in) ────────────────────────────────
 
   defp check_key_attestation(header, jwk_map, opts) do
-    case Keyword.get(opts, :key_attestation_trusted_jwks) do
-      nil -> {:ok, nil}
-      trusted_jwks -> check_key_attestation_header(header, jwk_map, trusted_jwks, opts)
+    case {Keyword.get(opts, :key_attestation_trusted_jwks), Keyword.get(opts, :require_key_attestation, false)} do
+      {nil, true} -> {:error, :invalid_key_attestation}
+      {nil, _optional} -> {:ok, nil}
+      {trusted_jwks, _required?} -> check_key_attestation_header(header, jwk_map, trusted_jwks, opts)
     end
   end
 
@@ -246,6 +252,8 @@ defmodule Attesto.CredentialProof do
       [trusted_jwks: trusted_jwks]
       |> put_if_present(:nonce, Keyword.get(opts, :nonce))
       |> put_if_present(:now, Keyword.get(opts, :now))
+      |> put_if_present(:accepted_algs, Keyword.get(opts, :accepted_algs))
+      |> put_if_present(:enforce_fapi_alg_policy, Keyword.get(opts, :enforce_fapi_alg_policy))
 
     case KeyAttestation.verify(attestation, key_attestation_opts) do
       {:ok, %{attested_keys: attested_keys} = result} ->

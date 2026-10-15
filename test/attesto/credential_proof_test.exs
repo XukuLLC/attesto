@@ -117,8 +117,8 @@ defmodule Attesto.CredentialProofTest do
   end
 
   describe "optional key_attestation cross-check" do
-    defp key_attestation_jwt(signer, attested_keys, overrides \\ %{}) do
-      header = %{"alg" => "ES256", "typ" => "key-attestation+jwt", "kid" => "ks-1"}
+    defp key_attestation_jwt(signer, attested_keys, overrides \\ %{}, alg \\ "ES256") do
+      header = %{"alg" => alg, "typ" => "key-attestation+jwt", "kid" => "ks-1"}
 
       claims =
         Map.merge(
@@ -238,6 +238,38 @@ defmodule Attesto.CredentialProofTest do
         |> Keyword.put(:require_key_attestation, true)
 
       assert {:error, :missing_key_attestation} = CredentialProof.verify_jwt(proof, opts)
+    end
+
+    test "require_key_attestation: true fails closed without trusted attestation keys" do
+      holder = JOSE.JWK.generate_key({:ec, "P-256"})
+      proof = sign_proof(holder, public_map(holder))
+
+      assert {:error, :invalid_key_attestation} =
+               CredentialProof.verify_jwt(proof, Keyword.put(verify_opts(), :require_key_attestation, true))
+    end
+
+    test "embedded key attestation obeys the proof algorithm allowlist" do
+      holder = JOSE.JWK.generate_key({:ec, "P-256"})
+      signer = JOSE.JWK.generate_key({:ec, "P-384"})
+      holder_map = public_map(holder)
+      attestation = key_attestation_jwt(signer, [holder_map], %{}, "ES384")
+
+      header = %{
+        "alg" => "ES256",
+        "jwk" => holder_map,
+        "typ" => "openid4vci-proof+jwt",
+        "key_attestation" => attestation
+      }
+
+      claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
+      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+
+      opts =
+        verify_opts()
+        |> Keyword.put(:accepted_algs, ["ES256"])
+        |> Keyword.put(:key_attestation_trusted_jwks, trusted_key_attestation_signer(signer))
+
+      assert {:error, :invalid_key_attestation} = CredentialProof.verify_jwt(proof, opts)
     end
   end
 end

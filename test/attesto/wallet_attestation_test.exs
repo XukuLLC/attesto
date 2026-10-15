@@ -37,8 +37,8 @@ defmodule Attesto.WalletAttestationTest do
     sign(wallet_provider_key, header, claims)
   end
 
-  defp pop(instance_key, overrides \\ %{}) do
-    header = %{"alg" => "ES256", "typ" => "oauth-client-attestation-pop+jwt"}
+  defp pop(instance_key, overrides \\ %{}, alg \\ "ES256") do
+    header = %{"alg" => alg, "typ" => "oauth-client-attestation-pop+jwt"}
 
     claims =
       Map.merge(
@@ -91,6 +91,14 @@ defmodule Attesto.WalletAttestationTest do
       assert_raise ArgumentError, ~r/:max_age_seconds must be a positive integer/, fn ->
         WalletAttestation.verify("not-a-jwt", "not-a-jwt", max_age_seconds: invalid)
       end
+    end
+
+    assert_raise ArgumentError, ~r/invalid :now override/, fn ->
+      WalletAttestation.verify("not-a-jwt", "not-a-jwt", now: "now")
+    end
+
+    assert_raise ArgumentError, ~r/:now must be a non-negative NumericDate/, fn ->
+      WalletAttestation.verify("not-a-jwt", "not-a-jwt", now: -1)
     end
   end
 
@@ -146,10 +154,29 @@ defmodule Attesto.WalletAttestationTest do
     omitted = sign(provider, header, claims)
     assert {:ok, _} = WalletAttestation.verify(omitted, pop(instance), opts)
 
-    for invalid <- [nil, false, "issued", %{}, [], 1.5] do
+    assert {:ok, _} =
+             WalletAttestation.verify(
+               attestation(provider, public_map(instance), %{"iat" => @now + 60}),
+               pop(instance),
+               opts
+             )
+
+    for invalid <- [-1, @now + 61, nil, false, "issued", %{}, [], 1.5] do
       invalid_attestation = attestation(provider, public_map(instance), %{"iat" => invalid})
       assert {:error, :invalid_attestation} = WalletAttestation.verify(invalid_attestation, pop(instance), opts)
     end
+  end
+
+  test "rejects attestation expiry before issued-at inside clock skew" do
+    provider = ec_key()
+    instance = ec_key()
+    opts = [trusted_wallet_provider_jwks: trusted(provider)] ++ verify_opts()
+
+    invalid_attestation =
+      attestation(provider, public_map(instance), %{"iat" => @now + 60, "exp" => @now + 30})
+
+    assert {:error, :invalid_attestation} =
+             WalletAttestation.verify(invalid_attestation, pop(instance), opts)
   end
 
   test "rejects a PoP JWT with the wrong audience" do
@@ -301,6 +328,22 @@ defmodule Attesto.WalletAttestationTest do
              WalletAttestation.verify(att, pop_jwt, [
                {:trusted_wallet_provider_jwks, trusted(wallet_provider)} | verify_opts()
              ])
+  end
+
+  test "applies the FAPI algorithm policy to the client instance key" do
+    provider = ec_key()
+    instance = JOSE.JWK.generate_key({:ec, "P-384"})
+    att = attestation(provider, public_map(instance))
+    pop_jwt = pop(instance, %{}, "ES384")
+    base_opts = [trusted_wallet_provider_jwks: trusted(provider), accepted_algs: ["ES256", "ES384"]] ++ verify_opts()
+
+    assert {:error, :invalid_cnf} = WalletAttestation.verify(att, pop_jwt, base_opts)
+
+    assert {:error, :invalid_cnf} =
+             WalletAttestation.verify(att, pop_jwt, [enforce_fapi_alg_policy: true] ++ base_opts)
+
+    assert {:ok, _} =
+             WalletAttestation.verify(att, pop_jwt, [enforce_fapi_alg_policy: false] ++ base_opts)
   end
 
   test "rejects an attestation with the wrong typ header" do

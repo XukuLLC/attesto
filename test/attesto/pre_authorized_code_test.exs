@@ -122,6 +122,19 @@ defmodule Attesto.PreAuthorizedCodeTest do
     assert {:ok, _grant} = PreAuthorizedCode.redeem(Store, code, %{tx_code: "1234"}, now: @now)
   end
 
+  test "a Phoenix-style string transaction-code parameter redeems successfully" do
+    {:ok, code} = PreAuthorizedCode.issue(Store, attrs(%{tx_code: "1234"}), now: @now)
+
+    assert {:ok, _grant} = PreAuthorizedCode.redeem(Store, code, %{"tx_code" => "1234"}, now: @now)
+  end
+
+  test "the atom transaction-code key takes precedence when both spellings are present" do
+    {:ok, code} = PreAuthorizedCode.issue(Store, attrs(%{tx_code: "1234"}), now: @now)
+
+    params = %{"tx_code" => "wrong", tx_code: "1234"}
+    assert {:ok, _grant} = PreAuthorizedCode.redeem(Store, code, params, now: @now)
+  end
+
   test "a bound transaction code is required" do
     {:ok, code} = PreAuthorizedCode.issue(Store, attrs(%{tx_code: "1234"}), now: @now)
 
@@ -135,11 +148,25 @@ defmodule Attesto.PreAuthorizedCodeTest do
              PreAuthorizedCode.redeem(Store, code, %{tx_code: "4321"}, now: @now)
   end
 
+  test "a wrong string-keyed transaction code mismatches" do
+    {:ok, code} = PreAuthorizedCode.issue(Store, attrs(%{tx_code: "1234"}), now: @now)
+
+    assert {:error, :tx_code_mismatch} =
+             PreAuthorizedCode.redeem(Store, code, %{"tx_code" => "4321"}, now: @now)
+  end
+
   test "an unexpected transaction code is rejected" do
     {:ok, code} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
 
     assert {:error, :tx_code_unexpected} =
              PreAuthorizedCode.redeem(Store, code, %{tx_code: "1234"}, now: @now)
+  end
+
+  test "an unexpected string-keyed transaction code is rejected" do
+    {:ok, code} = PreAuthorizedCode.issue(Store, attrs(), now: @now)
+
+    assert {:error, :tx_code_unexpected} =
+             PreAuthorizedCode.redeem(Store, code, %{"tx_code" => "1234"}, now: @now)
   end
 
   test "the plaintext transaction code is never stored" do

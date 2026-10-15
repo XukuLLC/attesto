@@ -119,6 +119,14 @@ defmodule Attesto.ScopeTest do
       refute Scope.known?(catalog, "webhooks.*")
     end
 
+    test "wildcards remain unknown even when present in the catalog" do
+      catalog = Scope.new_catalog(["*", "documents.*", "documents.read.*"])
+
+      refute Scope.known?(catalog, "*")
+      refute Scope.known?(catalog, "documents.*")
+      refute Scope.known?(catalog, "documents.read.*")
+    end
+
     test "false for unknown concrete strings", %{catalog: catalog} do
       refute Scope.known?(catalog, "totally.fake")
       refute Scope.known?(catalog, "documents.write")
@@ -295,6 +303,15 @@ defmodule Attesto.ScopeTest do
       refute Scope.grants?(catalog, ["*"], "documents.*")
     end
 
+    test "required wildcards are rejected even when present in the catalog" do
+      for required <- ["*", "documents.*", "documents.read.*"] do
+        catalog = Scope.new_catalog([required])
+
+        refute Scope.grants?(catalog, [required], required)
+        refute Scope.grants?(catalog, ["*"], required)
+      end
+    end
+
     test "non-string required scope returns false", %{catalog: catalog} do
       refute Scope.grants?(catalog, ["documents.read"], nil)
       refute Scope.grants?(catalog, ["documents.read"], :documents_read)
@@ -321,6 +338,12 @@ defmodule Attesto.ScopeTest do
 
     test "wildcard grant covers multiple required scopes", %{catalog: catalog} do
       assert Scope.grants_all?(catalog, ["webhooks.*"], ["webhooks.read", "webhooks.write"])
+    end
+
+    test "rejects a wildcard requirement even when it is present in the catalog" do
+      catalog = Scope.new_catalog(["documents.*"])
+
+      refute Scope.grants_all?(catalog, ["documents.*"], ["documents.*"])
     end
 
     test "raises on a nil required list (fail-loud against a misconfigured endpoint)", %{

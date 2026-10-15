@@ -70,6 +70,17 @@ defmodule Attesto.Federation.MetadataPolicy do
 
   def merge(_policy_higher, _policy_lower), do: {:error, :policy_error}
 
+  @doc false
+  @spec validate_federation_policy(policy()) :: :ok | {:error, error()}
+  def validate_federation_policy(policy) when is_map(policy) and map_size(policy) > 0 do
+    case normalize_federation_policy(policy) do
+      {:ok, _normalized} -> :ok
+      {:error, :policy_error} = error -> error
+    end
+  end
+
+  def validate_federation_policy(_policy), do: {:error, :policy_error}
+
   defp merge_at_level(_higher, _lower, :empty, :empty), do: {:ok, %{}}
   defp merge_at_level(_higher, lower, :empty, :entity_type), do: normalize_entity_type_policy(lower)
   defp merge_at_level(_higher, lower, :empty, :federation), do: normalize_federation_policy(lower)
@@ -86,21 +97,21 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp policy_level(policy) do
     cond do
       not string_keyed_map?(policy) -> :invalid
-      Enum.all?(policy, &entity_type_policy_entry?/1) -> :federation
       Enum.all?(policy, &parameter_policy_entry?/1) -> :entity_type
+      Enum.all?(policy, &entity_type_policy_entry?/1) -> :federation
       true -> :invalid
     end
   end
 
-  defp entity_type_policy_entry?({_entity_type, type_policy}) when is_map(type_policy) and map_size(type_policy) > 0,
-    do: Enum.all?(type_policy, &parameter_policy_entry?/1)
+  defp entity_type_policy_entry?({_entity_type, type_policy}), do: federation_entity_type_policy?(type_policy)
 
   defp entity_type_policy_entry?(_entry), do: false
 
   defp parameter_policy_entry?({_parameter, parameter_policy})
        when is_map(parameter_policy) and map_size(parameter_policy) > 0 do
     string_keyed_map?(parameter_policy) and
-      Enum.all?(parameter_policy, fn {_operator, value} -> not is_map(value) end)
+      (Enum.any?(Map.keys(parameter_policy), &(&1 in @operators)) or
+         Enum.all?(parameter_policy, fn {_operator, value} -> not is_map(value) end))
   end
 
   defp parameter_policy_entry?(_entry), do: false
@@ -224,15 +235,39 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp apply_essential(_policy, state), do: {:ok, state}
 
   defp normalize_federation_policy(policy) do
-    if policy_level(policy) in [:federation, :empty] do
-      normalize_entries(policy, &normalize_entity_type_policy/1)
+    if is_map(policy) and string_keyed_map?(policy) and
+         (map_size(policy) == 0 or Enum.all?(policy, &entity_type_policy_entry?/1)) do
+      normalize_entries(policy, &normalize_federation_entity_type_policy/1)
     else
       {:error, :policy_error}
     end
   end
 
+  # Entity Statement claims are always complete, three-level policies. Walk
+  # that depth explicitly so an extension operator with an object-valued
+  # configuration is ignored at the operator level instead of confusing the
+  # public API's two-level/three-level convenience detection.
+  defp normalize_federation_entity_type_policy(policy) do
+    if federation_entity_type_policy?(policy) do
+      normalize_entries(policy, &normalize_parameter_policy/1)
+    else
+      {:error, :policy_error}
+    end
+  end
+
+  defp federation_entity_type_policy?(policy) when is_map(policy) and map_size(policy) > 0 do
+    string_keyed_map?(policy) and
+      Enum.all?(policy, fn {_parameter, parameter_policy} ->
+        is_map(parameter_policy) and map_size(parameter_policy) > 0 and
+          string_keyed_map?(parameter_policy)
+      end)
+  end
+
+  defp federation_entity_type_policy?(_policy), do: false
+
   defp normalize_entity_type_policy(policy) do
-    if policy_level(policy) in [:entity_type, :empty] do
+    if is_map(policy) and string_keyed_map?(policy) and
+         (map_size(policy) == 0 or Enum.all?(policy, &parameter_policy_entry?/1)) do
       normalize_entries(policy, &normalize_parameter_policy/1)
     else
       {:error, :policy_error}

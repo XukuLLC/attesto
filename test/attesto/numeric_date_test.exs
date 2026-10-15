@@ -50,8 +50,10 @@ defmodule Attesto.NumericDateTest do
     end
 
     test "lifetime accepts the configured maximum" do
+      assert NumericDate.within_lifetime?(@now, @now, 300)
       assert NumericDate.within_lifetime?(@now + 300, @now, 300)
       refute NumericDate.within_lifetime?(@now + 301, @now, 300)
+      refute NumericDate.within_lifetime?(@now - 1, @now, 300)
     end
   end
 

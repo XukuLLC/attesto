@@ -79,6 +79,69 @@ defmodule Attesto.ClientAssertionTest do
              )
   end
 
+  test "honors an optional nbf with the same 60-second future skew" do
+    key = ec_key()
+    now = 1_700_000_000
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    assert {:ok, _} =
+             ClientAssertion.verify(
+               assertion(key, %{"iat" => now, "nbf" => now + 60, "exp" => now + 300}),
+               @client_id,
+               @audience,
+               trusted,
+               now: now
+             )
+
+    assert {:error, :not_yet_valid} =
+             ClientAssertion.verify(
+               assertion(key, %{"iat" => now, "nbf" => now + 61, "exp" => now + 300}),
+               @client_id,
+               @audience,
+               trusted,
+               now: now
+             )
+
+    for invalid <- [-1, "soon"] do
+      assert {:error, :not_yet_valid} =
+               ClientAssertion.verify(
+                 assertion(key, %{"iat" => now, "nbf" => invalid, "exp" => now + 300}),
+                 @client_id,
+                 @audience,
+                 trusted,
+                 now: now
+               )
+    end
+  end
+
+  test "rejects expiry before iat or nbf even inside clock skew" do
+    key = ec_key()
+    now = 1_700_000_000
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    for claims <- [
+          %{"iat" => now + 60, "exp" => now + 30},
+          %{"iat" => now, "nbf" => now + 60, "exp" => now + 30}
+        ] do
+      assert {:error, :invalid_assertion} =
+               ClientAssertion.verify(
+                 assertion(key, claims),
+                 @client_id,
+                 @audience,
+                 trusted,
+                 now: now
+               )
+    end
+  end
+
+  test "rejects an empty client identifier even when iss and sub match it" do
+    key = ec_key()
+    jwt = assertion(key, %{"iss" => "", "sub" => ""})
+
+    assert {:error, :invalid_client_id} =
+             ClientAssertion.verify(jwt, "", @audience, %{"keys" => [public_jwk(key)]})
+  end
+
   test "rejects the whole trusted set when one candidate JWK is malformed" do
     key = ec_key()
     jwt = assertion(key)

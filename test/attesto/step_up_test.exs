@@ -26,6 +26,12 @@ defmodule Attesto.StepUpTest do
       assert_raise ArgumentError, ~r/max_age/, fn -> Requirement.parse(max_age: "5") end
     end
 
+    test "raises on unknown option keys instead of silently dropping them" do
+      assert_raise ArgumentError, ~r/unknown keys/, fn ->
+        Requirement.parse(max_age: 300, acr: ["phr"])
+      end
+    end
+
     test "raises on an acr value that could break out of the challenge quoted-string" do
       for bad <- ["", "a b", ~s(a"b), "a,b", "a\\b"] do
         assert_raise ArgumentError, ~r/acr_values/, fn -> Requirement.parse(acr_values: [bad]) end
@@ -49,6 +55,7 @@ defmodule Attesto.StepUpTest do
       assert StepUp.satisfied?(req, %{"auth_time" => @now - 100}, @now)
       assert StepUp.satisfied?(req, %{"auth_time" => @now}, @now)
       refute StepUp.satisfied?(req, %{"auth_time" => @now - 301}, @now)
+      refute StepUp.satisfied?(req, %{"auth_time" => @now + 1}, @now)
       refute StepUp.satisfied?(req, %{}, @now)
       refute StepUp.satisfied?(req, %{"auth_time" => "old"}, @now)
     end

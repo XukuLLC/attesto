@@ -88,10 +88,10 @@ defmodule Attesto.EndSession do
   """
   @spec parse(Config.t(), map()) :: {:ok, t()} | {:error, parse_error()}
   def parse(%Config{} = config, params) when is_map(params) do
-    hint = param(params, "id_token_hint")
     client_id_param = param(params, "client_id")
 
-    with {:ok, claims} <- verify_hint(config, hint),
+    with {:ok, hint} <- id_token_hint(params),
+         {:ok, claims} <- verify_hint(config, hint),
          {:ok, client_id} <- resolve_client_id(claims, client_id_param) do
       {:ok,
        %__MODULE__{
@@ -126,6 +126,9 @@ defmodule Attesto.EndSession do
   @spec confirm_redirect(t(), [String.t()]) ::
           {:ok, String.t() | :no_redirect} | {:error, :invalid_post_logout_redirect_uri}
   def confirm_redirect(%__MODULE__{post_logout_redirect_uri: nil}, _registered), do: {:ok, :no_redirect}
+
+  def confirm_redirect(%__MODULE__{post_logout_redirect_uri: requested, client_id: nil}, _registered)
+      when is_binary(requested), do: {:error, :invalid_post_logout_redirect_uri}
 
   def confirm_redirect(%__MODULE__{post_logout_redirect_uri: requested} = request, registered)
       when is_binary(requested) and is_list(registered) do
@@ -178,8 +181,30 @@ defmodule Attesto.EndSession do
 
   defp append_state(uri, state) when is_binary(state) do
     parsed = URI.parse(uri)
-    query = URI.decode_query(parsed.query || "") |> Map.put("state", state)
-    parsed |> Map.put(:query, URI.encode_query(query)) |> URI.to_string()
+    encoded_state = URI.encode_query(%{"state" => state})
+
+    query =
+      case parsed.query do
+        query when is_binary(query) and query != "" -> query <> "&" <> encoded_state
+        _empty -> encoded_state
+      end
+
+    parsed |> Map.put(:query, query) |> URI.to_string()
+  end
+
+  defp id_token_hint(params) do
+    value =
+      case Map.fetch(params, "id_token_hint") do
+        {:ok, value} -> value
+        :error -> Map.get(params, :id_token_hint)
+      end
+
+    case value do
+      nil -> {:ok, nil}
+      "" -> {:ok, nil}
+      hint when is_binary(hint) -> {:ok, hint}
+      _invalid -> {:error, :invalid_id_token_hint}
+    end
   end
 
   defp param(params, key) do

@@ -123,4 +123,41 @@ defmodule Attesto.Federation.TrustMarkTest do
 
     assert {:error, :invalid_trust_mark} = TrustMark.verify(jwt, jwks(pem), now: @now)
   end
+
+  test "requires a non-empty protected kid" do
+    pem = Factory.ec_pem()
+
+    without_kid =
+      JWS.sign_compact(
+        pem,
+        %{"alg" => "ES256", "typ" => "trust-mark+jwt"},
+        claims()
+      )
+
+    empty_kid = trust_mark(pem, claims(), %{"kid" => ""})
+
+    assert {:error, :invalid_trust_mark} = TrustMark.verify(without_kid, jwks(pem), now: @now)
+    assert {:error, :invalid_trust_mark} = TrustMark.verify(empty_kid, jwks(pem), now: @now)
+  end
+
+  test "requires a non-negative numeric iat" do
+    pem = Factory.ec_pem()
+
+    for invalid_claims <- [
+          Map.delete(claims(), "iat"),
+          claims(%{"iat" => "recently"}),
+          claims(%{"iat" => -1})
+        ] do
+      jwt = trust_mark(pem, invalid_claims)
+      assert {:error, :invalid_trust_mark} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    end
+  end
+
+  test "rejects an iat in the future beyond the configured leeway" do
+    pem = Factory.ec_pem()
+    jwt = trust_mark(pem, claims(%{"iat" => @now + 10}))
+
+    assert {:error, :not_yet_valid} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:ok, _claims} = TrustMark.verify(jwt, jwks(pem), now: @now, leeway: 10)
+  end
 end

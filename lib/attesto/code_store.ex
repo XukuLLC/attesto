@@ -45,7 +45,8 @@ defmodule Attesto.CodeStore do
       as before. Single use is unaffected.
     * A store that DOES implement reuse tracking calls `mark_consumed/2`
       when a redemption succeeds, recording the `code_hash` together with
-      `meta` (the `family_id`/`subject` for that redemption). The family is
+      `meta` (the `family_id`/`subject` for that redemption, plus its optional
+      `replay_retain_until` deadline). The family is
       `nil` for `finalize/3` no-refresh flows and is the exact issued family
       only for `issue_refresh_and_finalize/6`. A later
       `take/1` of the same hash then returns `{:error, :consumed, meta}`,
@@ -83,9 +84,12 @@ defmodule Attesto.CodeStore do
   Reuse metadata recorded at the first redemption and replayed to a later
   `take/1` of the same `code_hash`. Opaque to `Attesto.CodeStore`; carried
   through `Attesto.AuthorizationCode.redeem/4` to the caller. Conventionally
-  holds `:family_id` and `:subject`; the family is `nil` for a no-refresh
-  `finalize/3` marker and non-nil only when the refresh composition captured
-  an actually issued family.
+  holds `:family_id`, `:subject`, and `:replay_retain_until`; the family is
+  `nil` for a no-refresh `finalize/3` marker and non-nil only when the refresh
+  composition captured an actually issued family. `:replay_retain_until` is
+  the immutable refresh-family deadline as unix seconds. It is `nil` for a
+  family with no configured maximum lifetime, which tells persistent stores
+  to retain the marker indefinitely while that family may remain active.
   """
   @type consumed_meta :: map()
 
@@ -130,15 +134,18 @@ defmodule Attesto.CodeStore do
   Implemented only by stores that support code-reuse detection (OAuth 2.0
   Security BCP §4.13 / RFC 6749 §4.1.2). `Attesto.AuthorizationCode` calls
   it exactly once, after a redemption fully validates, with `meta` carrying
-  that redemption's `:family_id` and `:subject` (or a nil family when
+  that redemption's `:family_id`, `:subject`, and optional
+  `:replay_retain_until` family deadline (or a nil family and deadline when
   `finalize/3` is used for a no-refresh flow). A store that does not
   implement this callback simply omits it from the behaviour; the redeemer
   detects its absence (`function_exported?/3`) and skips the call, leaving
   single-use behaviour unchanged.
 
-  Returns `:ok`. The marker SHOULD persist at least as long as the code's
-  original lifetime would have remained useful; a store MAY key it by
-  `code_hash` alongside the consumed-token bookkeeping it already keeps.
+  Returns `:ok`. A marker for a refresh family SHOULD persist through
+  `:replay_retain_until`; a nil deadline on a non-nil family means the family
+  has no fixed maximum lifetime and the marker must not be expired on a local
+  timer. A store MAY key it by `code_hash` alongside the consumed-token
+  bookkeeping it already keeps.
   """
   @callback mark_consumed(code_hash(), consumed_meta()) :: :ok
 

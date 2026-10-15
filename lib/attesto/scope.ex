@@ -155,7 +155,9 @@ defmodule Attesto.Scope do
   Returns `true` iff `scope` is a concrete catalog entry (no wildcards).
   """
   @spec known?(t(), term()) :: boolean()
-  def known?(%__MODULE__{entries: entries}, scope) when is_binary(scope), do: MapSet.member?(entries, scope)
+  def known?(%__MODULE__{entries: entries}, scope) when is_binary(scope) do
+    not String.contains?(scope, "*") and MapSet.member?(entries, scope)
+  end
 
   def known?(%__MODULE__{}, _), do: false
 

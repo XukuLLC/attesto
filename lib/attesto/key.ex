@@ -48,6 +48,11 @@ defmodule Attesto.Key do
     |> rsa_public_from_private()
     |> encode_spki_pem()
     |> normalize_pem()
+  rescue
+    error in ArgumentError -> reraise error, __STACKTRACE__
+    _error -> raise ArgumentError, "invalid RSA private key PEM"
+  catch
+    _kind, _reason -> raise ArgumentError, "invalid RSA private key PEM"
   end
 
   @doc """

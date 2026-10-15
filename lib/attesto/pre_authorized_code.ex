@@ -63,12 +63,15 @@ defmodule Attesto.PreAuthorizedCode do
   Atomically consume and redeem a pre-authorized code.
 
   The code is taken from the store before expiry or transaction-code
-  validation. A failed PIN check therefore burns the code. Returns a plain
-  grant-context map or an error atom.
+  validation. A failed PIN check therefore burns the code. The transaction
+  code may be supplied under either the atom key `:tx_code` or the string key
+  `"tx_code"`; when both are present, the atom key takes precedence. Returns a
+  plain grant-context map or an error atom.
   """
   @spec redeem(module(), String.t(), map(), keyword()) :: {:ok, grant()} | {:error, atom()}
   def redeem(store, code, params, opts \\ [])
       when is_atom(store) and is_binary(code) and is_map(params) and is_list(opts) do
+    params = normalize_redeem_params(params)
     now = numeric_date!(opts)
     code_hash = Secret.hash(code)
 
@@ -127,6 +130,14 @@ defmodule Attesto.PreAuthorizedCode do
   defp check_unbound_tx_code(params) do
     if Map.has_key?(params, :tx_code), do: {:error, :tx_code_unexpected}, else: :ok
   end
+
+  defp normalize_redeem_params(%{"tx_code" => tx_code} = params) do
+    params
+    |> Map.put_new(:tx_code, tx_code)
+    |> Map.delete("tx_code")
+  end
+
+  defp normalize_redeem_params(params), do: params
 
   defp normalize_attrs(attrs) do
     subject = Map.get(attrs, :subject)

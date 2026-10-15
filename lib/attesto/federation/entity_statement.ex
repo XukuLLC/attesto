@@ -24,6 +24,7 @@ defmodule Attesto.Federation.EntityStatement do
   @typ "entity-statement+jwt"
   @default_lifetime_seconds 3600
   @private_jwk_members ~w(d p q dp dq qi oth k)
+  @minimum_rsa_bits 2048
 
   @type signing_key :: module() | String.t()
   @type verify_error ::
@@ -361,8 +362,8 @@ defmodule Attesto.Federation.EntityStatement do
   defp validate_metadata_policy(:absent), do: :ok
 
   defp validate_metadata_policy(policy) when is_map(policy) and map_size(policy) > 0 do
-    case MetadataPolicy.merge(%{}, policy) do
-      {:ok, _normalized} -> :ok
+    case MetadataPolicy.validate_federation_policy(policy) do
+      :ok -> :ok
       {:error, :policy_error} -> {:error, :invalid_entity_statement}
     end
   end
@@ -459,10 +460,15 @@ defmodule Attesto.Federation.EntityStatement do
   end
 
   defp valid_public_key_map?(key) when is_map(key) do
-    alg = trusted_key_alg(key)
-
-    not Enum.any?(@private_jwk_members, &Map.has_key?(key, &1)) and
-      match?({:ok, %JOSE.JWK{}}, Key.verification_jwk(key, alg: alg, minimum_rsa_bits: 1))
+    with false <- Enum.any?(@private_jwk_members, &Map.has_key?(key, &1)),
+         true <- SigningAlg.rsa_params_ok?(key),
+         {:ok, alg} <- trusted_key_alg(key),
+         {:ok, %JOSE.JWK{}} <-
+           Key.verification_jwk(key, alg: alg, minimum_rsa_bits: @minimum_rsa_bits) do
+      true
+    else
+      _other -> false
+    end
   rescue
     _ -> false
   catch
@@ -471,9 +477,25 @@ defmodule Attesto.Federation.EntityStatement do
 
   defp valid_public_key_map?(_key), do: false
 
+  # Resolve the default algorithm from raw JWK members. This deliberately
+  # avoids handing untrusted RSA integers to JOSE before
+  # `Key.verification_jwk/2` has applied its raw size and exponent bounds.
   defp trusted_key_alg(key) do
-    Map.get(key, "alg") || key |> JOSE.JWK.from_map() |> SigningAlg.infer()
+    case Map.fetch(key, "alg") do
+      {:ok, alg} when is_binary(alg) and alg != "" -> {:ok, alg}
+      {:ok, _invalid} -> :error
+      :error -> infer_trusted_key_alg(key)
+    end
   end
+
+  defp infer_trusted_key_alg(%{"kty" => "RSA"}), do: {:ok, "RS256"}
+  defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "P-256"}), do: {:ok, "ES256"}
+  defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "P-384"}), do: {:ok, "ES384"}
+  defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "P-521"}), do: {:ok, "ES512"}
+  defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "secp256k1"}), do: {:ok, "ES256K"}
+  defp infer_trusted_key_alg(%{"kty" => "OKP", "crv" => curve}) when curve in ["Ed25519", "Ed448"], do: {:ok, "EdDSA"}
+
+  defp infer_trusted_key_alg(_key), do: :error
 
   defp normalize_keys(%{"keys" => keys}) when is_list(keys), do: keys
   defp normalize_keys(keys) when is_list(keys), do: keys

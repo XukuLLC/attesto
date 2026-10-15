@@ -17,12 +17,12 @@ defmodule Attesto.Revocation do
 
   ## Client binding (RFC 7009 §2.1)
 
-  When the token carries a `client_id`, revocation is fail-closed: the
-  caller MUST present a matching `:client_id` or the call returns
-  `{:error, :unauthorized_client}`, so one client cannot revoke another
-  client's tokens. A caller that cannot authenticate the client passes
-  `allow_missing_client_id?: true`. A token issued without a client
-  binding skips the check.
+  When the token carries a `client_id`, only a matching `:client_id` may
+  revoke its family. A mismatch is the same no-op `:ok` response as an
+  unknown token, so the revocation endpoint does not reveal another client's
+  token state. A caller that cannot authenticate the client passes
+  `allow_missing_client_id?: true`. A token issued without a client binding
+  skips the check.
 
   ## Issuer binding
 
@@ -42,21 +42,19 @@ defmodule Attesto.Revocation do
 
   alias Attesto.{RefreshToken, Secret}
 
-  @type revoke_error :: :unauthorized_client
-
   @doc """
   Revoke the refresh token `token` (and its whole family) via `store`.
 
   Returns `:ok` whether or not the token existed (no-existence oracle).
-  Returns `{:error, :unauthorized_client}` only when the token carries a
-  `client_id` and the presented `:client_id` does not match (or is absent
-  without `allow_missing_client_id?: true`).
+  When the token carries a `client_id`, a mismatch or an absent client without
+  `allow_missing_client_id?: true` is an indistinguishable no-op `:ok` and
+  never revokes the family.
 
   Options: `:client_id` (the authenticated revoking client),
   `:allow_missing_client_id?`, and `:issuer` (the expected authorization
   server issuer).
   """
-  @spec revoke(module(), String.t(), keyword()) :: :ok | {:error, revoke_error()}
+  @spec revoke(module(), String.t(), keyword()) :: :ok
   def revoke(store, token, opts \\ []) when is_atom(store) and is_binary(token) and is_list(opts) do
     _allow_missing_client = allow_missing_client?(opts)
     token_hash = Secret.hash(token)
@@ -76,11 +74,11 @@ defmodule Attesto.Revocation do
     end
   end
 
-  # An expired record remains a valid handle for revoking a family whose later
-  # successor may still be live. Preserve the no-existence oracle for an
-  # unauthorized caller: a wrong/missing client still receives `:ok`, but does
-  # not revoke. A matching (or explicitly allowed missing) client revokes the
-  # family and receives that same indistinguishable `:ok` response.
+  # A record remains a valid handle for revoking a family whose later successor
+  # may still be live. Preserve the no-existence oracle for an unauthorized
+  # caller: a wrong/missing client receives `:ok`, but does not revoke. A
+  # matching (or explicitly allowed missing) client revokes the family and
+  # receives that same indistinguishable `:ok` response.
   defp revoke_present(store, record, opts) do
     case check_issuer(record.data, opts) do
       :ok -> revoke_for_client(store, record, opts)
@@ -89,15 +87,9 @@ defmodule Attesto.Revocation do
   end
 
   defp revoke_for_client(store, record, opts) do
-    if expired?(record) do
-      case check_client(record.data, opts) do
-        :ok -> revoke_family(store, record.family_id)
-        {:error, :unauthorized_client} -> :ok
-      end
-    else
-      with :ok <- check_client(record.data, opts) do
-        revoke_family(store, record.family_id)
-      end
+    case check_client(record.data, opts) do
+      :ok -> revoke_family(store, record.family_id)
+      {:error, :unauthorized_client} -> :ok
     end
   end
 
@@ -107,12 +99,6 @@ defmodule Attesto.Revocation do
       _unexpected -> store_contract_error(:revoke_family)
     end
   end
-
-  defp expired?(%{expires_at: expires_at}) when is_integer(expires_at) do
-    expires_at <= System.system_time(:second)
-  end
-
-  defp expired?(_record), do: false
 
   defp valid_record?(
          %{token_hash: token_hash, family_id: family_id, data: data, expires_at: expires_at, consumed: consumed},

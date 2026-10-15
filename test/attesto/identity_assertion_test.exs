@@ -158,8 +158,20 @@ defmodule Attesto.IdentityAssertionTest do
       header = %{"alg" => "HS256", "kid" => JOSE.JWK.thumbprint(rsa), "typ" => @typ}
       {_header, jwt} = hmac_key |> JOSE.JWT.sign(header, claims(%{})) |> JOSE.JWS.compact()
 
-      assert {:error, :invalid_signature} =
+      assert {:error, :unsupported_alg} =
                IdentityAssertion.verify(jwt, public_jwks(rsa, "RS256"), opts())
+    end
+
+    test "reports an algorithm outside the caller allowlist as unsupported" do
+      key = ec_key()
+      jwt = assertion(key, "ES256")
+
+      assert {:error, :unsupported_alg} =
+               IdentityAssertion.verify(
+                 jwt,
+                 public_jwks(key, "ES256"),
+                 opts(accepted_algs: ["RS256"])
+               )
     end
 
     test "rejects a non-compact token" do
@@ -336,6 +348,19 @@ defmodule Attesto.IdentityAssertionTest do
                  jwt,
                  public_jwks(key, "RS256"),
                  opts(max_lifetime_seconds: 600)
+               )
+    end
+
+    test "rejects expiry before issued-at even inside clock skew" do
+      key = rsa_key()
+      now = 1_700_000_000
+      jwt = assertion(key, "RS256", %{"iat" => now + 60, "exp" => now + 30})
+
+      assert {:error, :expired} =
+               IdentityAssertion.verify(
+                 jwt,
+                 public_jwks(key, "RS256"),
+                 opts(now: now)
                )
     end
 

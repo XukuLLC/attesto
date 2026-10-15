@@ -20,3 +20,6 @@ __pycache__/
 
 # JS parity reference deps (installed via npm; not shipped)
 /test/support/js/node_modules/
+
+# Local browser-automation traces; never include them in package/release commits.
+/.playwright-mcp/

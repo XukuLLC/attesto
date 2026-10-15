@@ -89,10 +89,15 @@ defmodule Attesto.ResourceIndicator do
   defp absolute_uri_no_fragment?(value) do
     case URI.new(value) do
       {:ok, %URI{scheme: scheme, fragment: nil} = uri} when is_binary(scheme) and scheme != "" ->
-        is_binary(uri.host) or (is_binary(uri.path) and uri.path != "")
+        valid_location?(String.downcase(scheme), uri)
 
       _ ->
         false
     end
   end
+
+  defp valid_location?(scheme, %URI{host: host}) when scheme in ["http", "https"], do: is_binary(host) and host != ""
+
+  defp valid_location?(_scheme, %URI{host: host, path: path}),
+    do: (is_binary(host) and host != "") or (is_binary(path) and path != "")
 end

@@ -42,6 +42,12 @@ defmodule Attesto.EndSessionTest do
       _ = tampered
     end
 
+    test "a present non-string hint is :invalid_id_token_hint", %{config: config} do
+      for invalid <- [false, 123, %{}] do
+        assert {:error, :invalid_id_token_hint} = EndSession.parse(config, %{"id_token_hint" => invalid})
+      end
+    end
+
     test "a client_id param disagreeing with the hint aud is :client_id_mismatch", %{config: config, hint: hint} do
       assert {:error, :client_id_mismatch} =
                EndSession.parse(config, %{"id_token_hint" => hint, "client_id" => "other-client"})
@@ -111,6 +117,14 @@ defmodule Attesto.EndSessionTest do
       assert {:error, :invalid_post_logout_redirect_uri} = EndSession.confirm_redirect(request, [])
     end
 
+    test "a requested uri is refused when the RP could not be identified", %{config: config} do
+      registered = "https://rp.example/after"
+      {:ok, request} = EndSession.parse(config, %{"post_logout_redirect_uri" => registered})
+
+      assert {:error, :invalid_post_logout_redirect_uri} =
+               EndSession.confirm_redirect(request, [registered])
+    end
+
     test "state merges into an existing query on the registered uri", %{config: config} do
       registered = "https://rp.example/after?theme=dark"
 
@@ -124,6 +138,20 @@ defmodule Attesto.EndSessionTest do
       assert {:ok, url} = EndSession.confirm_redirect(request, [registered])
       assert url =~ "theme=dark"
       assert url =~ "state=xyz"
+    end
+
+    test "state append preserves repeated registered query parameters", %{config: config} do
+      registered = "https://rp.example/after?a=1&a=2"
+
+      {:ok, request} =
+        EndSession.parse(config, %{
+          "client_id" => @client_id,
+          "post_logout_redirect_uri" => registered,
+          "state" => "x y"
+        })
+
+      assert {:ok, "https://rp.example/after?a=1&a=2&state=x+y"} =
+               EndSession.confirm_redirect(request, [registered])
     end
   end
 end

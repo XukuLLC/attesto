@@ -2,7 +2,7 @@ defmodule Attesto.PresentationSessionTest do
   @moduledoc false
   use ExUnit.Case, async: false
 
-  alias Attesto.{Cose, JWS, Mdoc, PresentationSession, SdJwtVc}
+  alias Attesto.{Cose, JWS, Mdoc, PresentationSession, SdJwtVc, VpToken}
   alias Attesto.PresentationSessionStore.ETS
   alias Attesto.PresentationSessionStore.ETS, as: Store
 
@@ -494,6 +494,36 @@ defmodule Attesto.PresentationSessionTest do
 
     assert {:error, :invalid_attrs} =
              PresentationSession.create(Store, %{valid | issuer_trust: {:resolve_issuer, :not_a_function}})
+  end
+
+  test "DCQL alternatives cannot complete a session with an empty VP Token", ctx do
+    query_constraints =
+      VpToken.constraints_from_dcql(%{
+        credentials: [
+          %{id: "identity", format: "dc+sd-jwt"},
+          %{id: "alternate", format: "dc+sd-jwt"}
+        ],
+        credential_sets: [%{options: [["identity"], ["alternate"]]}]
+      })
+
+    {:ok, session} =
+      create_session(ctx,
+        expected_query_ids: [],
+        query_constraints: query_constraints
+      )
+
+    assert {:error, {:invalid_presentation, {:unsatisfied_credential_sets, [0]}}} =
+             PresentationSession.verify_response(Store, {:state, session.id}, %{}, now: ctx.now)
+
+    assert_pending(session.id)
+
+    assert {:ok, %{"identity" => [_]}} =
+             PresentationSession.verify_response(
+               Store,
+               {:state, session.id},
+               valid_vp_token(ctx, session.nonce),
+               now: ctx.now
+             )
   end
 
   describe "mso_mdoc round trip" do

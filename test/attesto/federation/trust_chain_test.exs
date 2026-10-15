@@ -84,6 +84,94 @@ defmodule Attesto.Federation.TrustChainTest do
              TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
   end
 
+  test "requires the leaf authority_hints to name its immediate superior" do
+    missing = chain_fixture(authority_hints: :absent)
+    mismatched = chain_fixture(authority_hints: ["https://other-superior.example"])
+
+    assert {:error, :broken_trust_chain} =
+             TrustChain.validate(missing.chain, missing.anchor_jwks, now: @now)
+
+    assert {:error, :broken_trust_chain} =
+             TrustChain.validate(mismatched.chain, mismatched.anchor_jwks, now: @now)
+  end
+
+  test "enforces permitted and excluded naming constraints on every subordinate entity" do
+    permitted =
+      chain_fixture(
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{"permitted" => [".example"]}
+        }
+      )
+
+    assert {:ok, _result} = TrustChain.validate(permitted.chain, permitted.anchor_jwks, now: @now)
+
+    excluded =
+      chain_fixture(
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{
+            "permitted" => [".example"],
+            "excluded" => ["leaf.example"]
+          }
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(excluded.chain, excluded.anchor_jwks, now: @now)
+
+    # OpenID Federation 1.0 §3.1.3 applies constraints to the subject of the
+    # Subordinate Statement as well as every Entity beneath it. A bare domain
+    # is an exact-host constraint, so permitting only the leaf still excludes
+    # the intermediate named by the anchor's statement.
+    exact_only =
+      chain_fixture(
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{"permitted" => ["leaf.example"]}
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(exact_only.chain, exact_only.anchor_jwks, now: @now)
+
+    apex_is_not_a_subdomain =
+      chain_fixture(
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{
+            "permitted" => [".leaf.example", "intermediate.example"]
+          }
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(apex_is_not_a_subdomain.chain, apex_is_not_a_subdomain.anchor_jwks, now: @now)
+  end
+
+  test "applies an intermediate statement's naming constraints to its leaf subject" do
+    fixture =
+      chain_fixture(
+        intermediate_constraints: %{
+          "naming_constraints" => %{"permitted" => ["other.example"]}
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+  end
+
+  test "fails closed on malformed naming constraints while ignoring unrelated extensions" do
+    malformed =
+      chain_fixture(anchor_constraints: %{"naming_constraints" => %{"permitted" => []}})
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(malformed.chain, malformed.anchor_jwks, now: @now)
+
+    extension = chain_fixture(anchor_constraints: %{"future_constraint" => %{"mode" => "strict"}})
+    assert {:ok, _result} = TrustChain.validate(extension.chain, extension.anchor_jwks, now: @now)
+  end
+
   test "fails closed when policy forbids leaf metadata" do
     forbidden_policy = %{
       "openid_relying_party" => %{
@@ -105,20 +193,26 @@ defmodule Attesto.Federation.TrustChainTest do
     intermediate_jwks = jwks(intermediate_pem)
     anchor_jwks = jwks(anchor_pem)
 
-    leaf =
-      EntityStatement.entity_configuration(leaf_pem, @leaf,
-        now: @now,
-        exp: @now + 300,
-        authority_hints: [@intermediate],
-        metadata: %{
-          "openid_relying_party" => %{
-            "contacts" => ["leaf@example"],
-            "redirect_uris" => ["https://leaf.example/cb"],
-            "token_endpoint_auth_method" => "private_key_jwt"
-          },
-          "oauth_client" => %{"client_name" => "removed by allowed_entity_types"}
-        }
-      )
+    leaf_options = [
+      now: @now,
+      exp: @now + 300,
+      metadata: %{
+        "openid_relying_party" => %{
+          "contacts" => ["leaf@example"],
+          "redirect_uris" => ["https://leaf.example/cb"],
+          "token_endpoint_auth_method" => "private_key_jwt"
+        },
+        "oauth_client" => %{"client_name" => "removed by allowed_entity_types"}
+      }
+    ]
+
+    leaf_options =
+      case Keyword.get(overrides, :authority_hints, [@intermediate]) do
+        :absent -> leaf_options
+        hints -> Keyword.put(leaf_options, :authority_hints, hints)
+      end
+
+    leaf = EntityStatement.entity_configuration(leaf_pem, @leaf, leaf_options)
 
     intermediate =
       subordinate_statement(
@@ -127,7 +221,8 @@ defmodule Attesto.Federation.TrustChainTest do
         @leaf,
         leaf_jwks,
         @now + 400,
-        lower_policy()
+        lower_policy(),
+        Keyword.get(overrides, :intermediate_constraints)
       )
 
     anchor_policy = Keyword.get(overrides, :anchor_policy, higher_policy())
@@ -160,19 +255,26 @@ defmodule Attesto.Federation.TrustChainTest do
     }
   end
 
-  defp subordinate_statement(pem, issuer, subject, subject_jwks, exp, policy) do
-    EntityStatement.build(
-      pem,
+  defp subordinate_statement(pem, issuer, subject, subject_jwks, exp, policy, constraints \\ nil) do
+    claims =
       %{
         "iss" => issuer,
         "sub" => subject,
         "jwks" => subject_jwks,
         "metadata_policy" => policy
-      },
+      }
+      |> maybe_put("constraints", constraints)
+
+    EntityStatement.build(
+      pem,
+      claims,
       now: @now,
       exp: exp
     )
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp higher_policy do
     %{

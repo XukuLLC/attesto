@@ -49,6 +49,23 @@ defmodule Attesto.KeyAttestationTest do
     assert result.claims["iss"] == "https://key-storage.example"
   end
 
+  test "issuer pinning requires the claim instead of accepting an absent issuer" do
+    signer = ec_key()
+    attested = ec_key()
+
+    claims = %{"iat" => @now, "exp" => @now + 60, "attested_keys" => [public_map(attested)]}
+    jwt = sign(signer, %{"alg" => "ES256", "typ" => "key-attestation+jwt", "kid" => "ks-1"}, claims)
+
+    assert {:ok, _result} = KeyAttestation.verify(jwt, trusted_jwks: trusted(signer), now: @now)
+
+    assert {:error, :invalid_issuer} =
+             KeyAttestation.verify(jwt,
+               trusted_jwks: trusted(signer),
+               now: @now,
+               issuer: "https://key-storage.example"
+             )
+  end
+
   test "rejects an attestation signed by an untrusted key" do
     signer = ec_key()
     impostor = ec_key()

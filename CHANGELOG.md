@@ -4,6 +4,62 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-10-15
+
+### Security
+
+- Evaluate the complete OID4VP DCQL response policy, including credential-set
+  and claim-set alternatives, requested disclosures, cardinality, permitted
+  query IDs, and the explicit optional-response case. Empty or incomplete
+  presentations can no longer complete a request that requires a credential.
+- Preserve refresh-token family replay evidence for as long as a live
+  descendant can remain valid. Authorization-code redemption now passes the
+  refresh-family deadline to `CodeStore.mark_consumed/2` as
+  `:replay_retain_until` so persistent stores can apply the same rule.
+- Fail closed for required key attestation, issuer pinning, malformed or weak
+  embedded JWKs, invalid SD-JWT digest graphs, unsupported COSE critical
+  headers, and malformed Federation policy or trust data before expensive key
+  conversion.
+- Tighten assertion time ordering, `nbf`, Trust Mark header/time requirements,
+  Request Object resource arrays, redirect handling, concrete-scope checks,
+  DPoP thumbprints, resource indicators, and holder-key algorithm policy.
+- Apply FAPI algorithm and key compatibility to the Wallet Attestation `cnf`
+  client-instance key by default as well as to the attestation signer. Only an
+  explicit `enforce_fapi_alg_policy: false` accepts a non-FAPI instance key.
+
+### Added
+
+- Expose validated effective `authorization_details` on
+  `Attesto.AuthorizationRequest`, including values supplied by a signed Request
+  Object, so an authorization server can persist OID4VCI entitlements from the
+  request it actually verified.
+- Carry validated RFC 8707 `resource` values through CIBA requests and grants
+  so the authorization and token layers can enforce the requested audiences.
+- Add authorization-code replay-retention metadata for stores that keep a
+  consumed marker after the code row itself expires.
+
+### Changed
+
+- Reject an explicitly empty `dpop_jkt` authorization-request parameter as
+  `invalid_request` instead of treating it as absent.
+- Enforce the final OID4VP DCQL identifier grammar for credential and claim IDs:
+  letters, digits, underscores, and hyphens only. Request construction now
+  raises for IDs containing spaces, dots, slashes, or other characters.
+- Apply DCQL's `multiple: false` default to hand-built VP query constraints.
+  Empty hand-built `claims`, `vct_values`, `doctype_values`, or claim `values`
+  constraints now fail closed instead of silently becoming unconstrained.
+
+### Fixed
+
+- Normalize malformed PEM, mTLS distinguished-name, mdoc resolver, end-session,
+  pre-authorized-code, and JWS decoding failures to documented error results
+  instead of crashes or silently weakened constraints.
+- Keep revocation responses indistinguishable for unknown and foreign tokens,
+  without allowing a foreign client to mutate the token family.
+- Correct IPv6 DPoP target URI construction, hostless HTTP resource rejection,
+  `prompt=none` combinations, future step-up authentication times, and wildcard
+  required-scope handling.
+
 ## [2.3.1] - 2026-10-08
 
 ### Security

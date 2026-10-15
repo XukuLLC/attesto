@@ -6,7 +6,7 @@ defmodule Attesto.Federation.TrustMark do
   that each entry is *shaped* correctly (non-empty `trust_mark_type` and
   `trust_mark` JWT string) - it never verifies the `trust_mark` JWT itself.
   This module does that verification: signature, `typ`, `crit`, and the
-  trust mark's own claims (`iss`, `sub`, `trust_mark_type`, `exp`).
+  trust mark's own claims (`iss`, `sub`, `trust_mark_type`, `iat`, `exp`).
 
   A Trust Mark JWT is signed by a Trust Mark Issuer over claims that at
   minimum name the entity it was issued to (`sub`), the Trust Mark Issuer
@@ -29,6 +29,7 @@ defmodule Attesto.Federation.TrustMark do
           | :invalid_alg
           | :unsupported_critical_header
           | :invalid_signature
+          | :not_yet_valid
           | :expired
 
   @doc """
@@ -46,10 +47,9 @@ defmodule Attesto.Federation.TrustMark do
       the mark was expected to be issued to).
     * `:trust_mark_type` - if given, the verified `trust_mark_type` must
       equal it (the mark the caller asked about).
-    * `:now` / `:leeway` - clock reference and skew for the `exp` check.
-      `exp` is OPTIONAL on a Trust Mark (revocation may instead be checked
-      via the Trust Mark Issuer's status endpoint, out of scope here); when
-      present it MUST hold.
+    * `:now` / `:leeway` - clock reference and skew for the required `iat`
+      and optional `exp` checks. Revocation may instead be checked via the
+      Trust Mark Issuer's status endpoint, which is out of scope here.
 
   Returns `{:ok, claims}` with the trust mark's full claim set on success, or
   `{:error, reason}` - a tampered signature, wrong key, expired mark, or a
@@ -65,6 +65,7 @@ defmodule Attesto.Federation.TrustMark do
          :ok <- check_typ(header),
          :ok <- check_crit(header),
          :ok <- check_alg(header, opts),
+         :ok <- check_kid(header),
          {:ok, claims} <- verify_signature(trust_mark_jwt, header, trusted_jwks, opts),
          :ok <- validate_claims(claims, opts) do
       {:ok, claims}
@@ -100,10 +101,13 @@ defmodule Attesto.Federation.TrustMark do
 
   defp check_alg(_header, _opts), do: {:error, :invalid_alg}
 
+  defp check_kid(%{"kid" => kid}) when is_binary(kid) and kid != "", do: :ok
+  defp check_kid(_header), do: {:error, :invalid_trust_mark}
+
   defp verify_signature(jwt, header, jwks, opts) do
     candidates =
       JWS.verification_candidates(jwks,
-        kid: Map.get(header, "kid"),
+        kid: Map.fetch!(header, "kid"),
         accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
         malformed_key: :reject_set
       )
@@ -126,7 +130,8 @@ defmodule Attesto.Federation.TrustMark do
   defp validate_required_claims(claims) do
     if non_empty_string?(Map.get(claims, "iss")) and
          non_empty_string?(Map.get(claims, "sub")) and
-         non_empty_string?(Map.get(claims, "trust_mark_type")) do
+         non_empty_string?(Map.get(claims, "trust_mark_type")) and
+         NumericDate.valid?(Map.get(claims, "iat"), non_negative: true) do
       :ok
     else
       {:error, :invalid_trust_mark}
@@ -148,15 +153,23 @@ defmodule Attesto.Federation.TrustMark do
   defp expected_claim?(_claims, _claim, nil), do: true
   defp expected_claim?(claims, claim, expected), do: Map.get(claims, claim) == expected
 
-  defp validate_temporal_claims(%{"exp" => exp}, opts) when is_integer(exp) do
+  defp validate_temporal_claims(claims, opts) do
     now = NumericDate.now(opts, default: :system, invalid_override: :fallback)
     leeway = Keyword.get(opts, :leeway, 0)
 
-    if is_integer(leeway) and leeway >= 0 and NumericDate.not_expired?(exp, now, leeway: leeway),
-      do: :ok,
-      else: {:error, :expired}
-  end
+    cond do
+      not (is_integer(leeway) and leeway >= 0) ->
+        {:error, :invalid_trust_mark}
 
-  defp validate_temporal_claims(%{"exp" => _exp}, _opts), do: {:error, :expired}
-  defp validate_temporal_claims(_claims, _opts), do: :ok
+      not NumericDate.not_before_reached?(claims["iat"], now, skew: leeway) ->
+        {:error, :not_yet_valid}
+
+      Map.has_key?(claims, "exp") and
+          not NumericDate.not_expired?(claims["exp"], now, leeway: leeway) ->
+        {:error, :expired}
+
+      true ->
+        :ok
+    end
+  end
 end

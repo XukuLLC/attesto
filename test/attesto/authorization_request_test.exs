@@ -7,6 +7,8 @@ defmodule Attesto.AuthorizationRequestTest do
   @redirect_uri "https://client.example.com/cb"
   @registered [@redirect_uri]
   @issuer "https://issuer.example"
+  @dpop_jkt Attesto.Thumbprint.of("authorization-request-key")
+  @outer_dpop_jkt Attesto.Thumbprint.of("outer-authorization-request-key")
 
   # A syntactically valid S256 code_challenge: BASE64URL(SHA256(verifier)),
   # 43 chars, no padding (RFC 7636 §4.2). This is the RFC 7636 Appendix B
@@ -113,8 +115,8 @@ defmodule Attesto.AuthorizationRequestTest do
     end
 
     test "reads dpop_jkt from the query on a plain (non-JAR) request (RFC 9449 §10)" do
-      assert {:ok, req} = validate(base_params(%{"dpop_jkt" => "thumb-abc"}))
-      assert req.dpop_jkt == "thumb-abc"
+      assert {:ok, req} = validate(base_params(%{"dpop_jkt" => @dpop_jkt}))
+      assert req.dpop_jkt == @dpop_jkt
     end
 
     test "reads dpop_jkt from the signed request object, ignoring the outer query" do
@@ -122,7 +124,7 @@ defmodule Attesto.AuthorizationRequestTest do
       # authoritative. An attacker-supplied outer dpop_jkt MUST NOT override the
       # value the client signed (nor bind the code when the client signed none).
       {request, client_jwk} =
-        signed_request_object(fapi_request_claims(%{"dpop_jkt" => "signed-thumbprint"}))
+        signed_request_object(fapi_request_claims(%{"dpop_jkt" => @dpop_jkt}))
 
       assert {:ok, req} =
                AuthorizationRequest.validate(
@@ -130,14 +132,14 @@ defmodule Attesto.AuthorizationRequestTest do
                    "request" => request,
                    "client_id" => "client-123",
                    "redirect_uri" => @redirect_uri,
-                   "dpop_jkt" => "attacker-thumbprint"
+                   "dpop_jkt" => @outer_dpop_jkt
                  },
                  registered_redirect_uris: @registered,
                  request_object_jwks: %{"keys" => [client_jwk]},
                  request_object_audience: @issuer
                )
 
-      assert req.dpop_jkt == "signed-thumbprint"
+      assert req.dpop_jkt == @dpop_jkt
     end
 
     test "flags a plain OAuth (non-OIDC) request when the openid scope is absent" do
@@ -162,6 +164,14 @@ defmodule Attesto.AuthorizationRequestTest do
                validate(base_params(%{"resource" => ["https://a.example/api", "https://b.example/api"]}))
 
       assert req.resource == ["https://a.example/api", "https://b.example/api"]
+    end
+
+    test "RFC 8707: preserves multiple resource indicators from a signed request object" do
+      resources = ["https://a.example/api", "https://b.example/api"]
+      {request, client_jwk} = signed_request_object(fapi_request_claims(%{"resource" => resources}))
+
+      assert {:ok, %AuthorizationRequest{resource: ^resources}} =
+               validate_request_object(request, client_jwk, [])
     end
 
     test "RFC 8707: a missing resource is the empty set" do
@@ -206,12 +216,61 @@ defmodule Attesto.AuthorizationRequestTest do
       assert req.claims == claims
     end
 
+    test "normalizes direct RFC 9396 authorization_details" do
+      details = [
+        %{
+          "type" => "openid_credential",
+          "credential_configuration_id" => "UniversityDegreeCredential"
+        }
+      ]
+
+      assert {:ok, req} =
+               validate(base_params(%{"authorization_details" => JSON.encode!(details)}))
+
+      assert req.authorization_details == details
+    end
+
+    test "preserves signed authorization_details and ignores the unsigned outer value" do
+      signed_details = [
+        %{
+          "type" => "openid_credential",
+          "credential_configuration_id" => "SignedCredential"
+        }
+      ]
+
+      outer_details = [
+        %{
+          "type" => "openid_credential",
+          "credential_configuration_id" => "OuterCredential"
+        }
+      ]
+
+      {request, client_jwk} =
+        signed_request_object(fapi_request_claims(%{"authorization_details" => signed_details}))
+
+      assert {:ok, req} =
+               AuthorizationRequest.validate(
+                 %{
+                   "request" => request,
+                   "client_id" => "client-123",
+                   "redirect_uri" => @redirect_uri,
+                   "authorization_details" => JSON.encode!(outer_details)
+                 },
+                 registered_redirect_uris: @registered,
+                 request_object_jwks: %{"keys" => [client_jwk]},
+                 request_object_audience: @issuer
+               )
+
+      assert req.authorization_details == signed_details
+    end
+
     test "defaults optional params to empty / nil when absent" do
       assert {:ok, req} = validate(base_params())
       assert req.prompt == []
       assert req.acr_values == []
       assert is_nil(req.max_age)
       assert req.claims == %{}
+      assert req.authorization_details == []
     end
 
     test "response_mode is nil when absent (transport applies the default)" do
@@ -546,10 +605,44 @@ defmodule Attesto.AuthorizationRequestTest do
       assert err.error_description =~ "prompt"
     end
 
+    test "a malformed dpop_jkt redirects with invalid_request" do
+      for invalid <- ["", "thumb-abc", String.duplicate("A", 42), 123] do
+        assert {:error, {:redirect, err}} = validate(base_params(%{"dpop_jkt" => invalid}))
+        assert err.error == "invalid_request"
+        assert err.error_description =~ "dpop_jkt"
+      end
+    end
+
     test "malformed claims redirects with invalid_request" do
       assert {:error, {:redirect, err}} = validate(base_params(%{"claims" => "{not json"}))
       assert err.error == "invalid_request"
       assert err.error_description =~ "claims"
+    end
+
+    test "malformed direct authorization_details redirects with its RFC 9396 error" do
+      for invalid <- [
+            "{not json",
+            JSON.encode!(%{"type" => "openid_credential"}),
+            JSON.encode!([]),
+            JSON.encode!(["openid_credential"]),
+            JSON.encode!([%{"credential_configuration_id" => "Degree"}]),
+            JSON.encode!([%{"type" => ""}]),
+            42
+          ] do
+        assert {:error, {:redirect, err}} =
+                 validate(base_params(%{"authorization_details" => invalid}))
+
+        assert err.error == "invalid_authorization_details"
+        assert err.error_description =~ "authorization_details"
+      end
+    end
+
+    test "malformed signed authorization_details is an invalid request object" do
+      {request, client_jwk} =
+        signed_request_object(fapi_request_claims(%{"authorization_details" => [%{"type" => ""}]}))
+
+      assert {:error, {:redirect, err}} = validate_request_object(request, client_jwk, [])
+      assert err.error == "invalid_request_object"
     end
 
     test "non-object claims redirects with invalid_request" do
@@ -566,6 +659,17 @@ defmodule Attesto.AuthorizationRequestTest do
 
       assert {:ok, req} = validate(base_params(%{"prompt" => "login consent select_account"}))
       assert req.prompt == ["login", "consent", "select_account"]
+    end
+
+    test "rejects none combined with any other prompt value" do
+      assert {:error, {:redirect, err}} = validate(base_params(%{"prompt" => "none login"}))
+      assert err.error == "invalid_request"
+      assert err.error_description =~ "prompt"
+    end
+
+    test "accepts a repeated none value because it is not a different prompt value" do
+      assert {:ok, req} = validate(base_params(%{"prompt" => "none none"}))
+      assert req.prompt == ["none", "none"]
     end
 
     test "absent prompt parses to an empty list" do

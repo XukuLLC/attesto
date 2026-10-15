@@ -40,6 +40,13 @@ defmodule Attesto.RequestObject.PolicyTest do
       assert Keyword.get(Policy.to_verify_opts(non_fapi_policy), :enforce_fapi_alg_policy) == false
     end
 
+    test "an explicit nil algorithm policy survives flattening so verification fails closed" do
+      opts = Policy.to_verify_opts(%{Policy.generic() | accepted_algs: nil})
+
+      assert Keyword.has_key?(opts, :accepted_algs)
+      assert Keyword.get(opts, :accepted_algs) == nil
+    end
+
     test "the presence flag is never leaked into the per-object verify opts" do
       # require_request_object governs whether an object must be present, not how
       # a present object is verified, so RequestObject.verify/3 must never see it.

@@ -15,10 +15,10 @@ defmodule Attesto.RefreshStore.ETS do
   revocation, or reuse detection only holds per node.
 
   Start options: `:sweep_interval_ms` (default `60_000`). The sweeper
-  deletes tokens past their expiry; consumed parents may be retained until
-  their persisted retry deadline so replay is still detected, but that
-  retention never permits a retry after the parent's expiry. Plaintext
-  successor retry data is redacted after its `:retry_until` deadline.
+  retains expired consumed generations while a later generation in the same
+  family can still be used, so replay of any ancestor can revoke the live
+  family. Plaintext successor retry data is redacted after its `:retry_until`
+  deadline, and all token rows are removed after the last generation expires.
   Revoked-family markers are retained for the lifetime of the store, as
   required by the sticky-revocation contract, including after all token rows
   have expired.
@@ -215,39 +215,74 @@ defmodule Attesto.RefreshStore.ETS do
   end
 
   defp sweep_refresh_records(now) do
+    live_generations = live_family_generations(now)
+
     :ets.foldl(
-      fn
-        {token_hash, family, expires_at, %{generation: generation, successor: %{retry_until: retry_until}}}, :ok
-        when expires_at < now and is_integer(retry_until) and retry_until < now ->
-          delete_record(token_hash, family, generation)
-          :ok
-
-        {_token_hash, _family, expires_at, %{successor: %{retry_until: retry_until}}}, :ok
-        when expires_at < now and is_integer(retry_until) and retry_until >= now ->
-          # The parent credential is expired, but its lost-response recovery
-          # window is not. Retain it until the absolute retry deadline.
-          :ok
-
-        {token_hash, family, expires_at, %{generation: generation}}, :ok when expires_at < now ->
-          delete_record(token_hash, family, generation)
-          :ok
-
-        {token_hash, family, expires_at, %{successor: %{retry_until: retry_until} = successor} = record}, :ok
-        when is_integer(retry_until) and retry_until < now and not is_map_key(successor, :recoverable) ->
-          # Retain only the non-secret fixed deadline. A later request can then
-          # distinguish an expired retry window from malformed/missing state
-          # without keeping the credential or its context in memory.
-          tombstone = %{retry_until: retry_until, recoverable: false}
-          true = :ets.insert(@table, {token_hash, family, expires_at, Map.put(record, :successor, tombstone)})
-          :ok
-
-        _row, :ok ->
-          :ok
+      fn row, :ok ->
+        sweep_refresh_record(row, now, live_generations)
       end,
       :ok,
       @table
     )
   end
+
+  # Capture the highest generation that remains live in each family before
+  # deleting anything. The sweep runs inside the store GenServer, so rotations
+  # and revocations cannot interleave between this snapshot and the cleanup.
+  defp live_family_generations(now) do
+    :ets.foldl(
+      fn
+        {_token_hash, family, expires_at, %{generation: generation, consumed: false}}, generations
+        when expires_at > now and is_integer(generation) ->
+          Map.update(generations, family, generation, &max(&1, generation))
+
+        _row, generations ->
+          generations
+      end,
+      %{},
+      @table
+    )
+  end
+
+  defp sweep_refresh_record(
+         {token_hash, family, expires_at, %{generation: generation, consumed: true}} = row,
+         now,
+         live_generations
+       )
+       when expires_at < now do
+    if live_descendant?(live_generations, family, generation) do
+      redact_successor_after_retry(row, now)
+    else
+      delete_record(token_hash, family, generation)
+    end
+  end
+
+  defp sweep_refresh_record({token_hash, family, expires_at, %{generation: generation}}, now, _live_generations)
+       when expires_at < now, do: delete_record(token_hash, family, generation)
+
+  defp sweep_refresh_record(row, now, _live_generations), do: redact_successor_after_retry(row, now)
+
+  defp live_descendant?(live_generations, family, generation) do
+    case Map.fetch(live_generations, family) do
+      {:ok, live_generation} -> live_generation > generation
+      :error -> false
+    end
+  end
+
+  defp redact_successor_after_retry(
+         {token_hash, family, expires_at, %{successor: %{retry_until: retry_until} = successor} = record},
+         now
+       )
+       when is_integer(retry_until) and retry_until < now and not is_map_key(successor, :recoverable) do
+    # Retain only the non-secret fixed deadline. An expired consumed record is
+    # still replay evidence while a descendant is live, but it no longer needs
+    # the plaintext successor credential or its context after this deadline.
+    tombstone = %{retry_until: retry_until, recoverable: false}
+    true = :ets.insert(@table, {token_hash, family, expires_at, Map.put(record, :successor, tombstone)})
+    :ok
+  end
+
+  defp redact_successor_after_retry(_row, _now), do: :ok
 
   defp delete_record(token_hash, family_id, generation) do
     true = :ets.delete(@table, token_hash)

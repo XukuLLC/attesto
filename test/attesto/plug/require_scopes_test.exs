@@ -23,6 +23,18 @@ defmodule Attesto.Plug.RequireScopesTest do
       assert_raise ArgumentError, fn -> RequireScopes.init(scopes: []) end
     end
 
+    test "raises ArgumentError for wildcard requirements" do
+      for scopes <- [["*"], ["documents.*"], ["documents.read.*"], ["documents.read", "documents.*"]] do
+        assert_raise ArgumentError, ~r/wildcard requirements are forbidden/, fn ->
+          RequireScopes.init(scopes)
+        end
+      end
+
+      assert_raise ArgumentError, ~r/wildcard requirements are forbidden/, fn ->
+        RequireScopes.init(scopes: ["documents.*"])
+      end
+    end
+
     test "builds the required set + catalog from a bare scope list" do
       opts = RequireScopes.init(["documents.read"])
       assert opts.required == ["documents.read"]

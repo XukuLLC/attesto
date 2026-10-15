@@ -20,6 +20,18 @@ defmodule Attesto.CoseTest do
 
   defp unwrap_bytes(%CBOR.Tag{tag: :bytes, value: value}), do: value
 
+  defp sign_with_protected(pem, payload, protected_header, unprotected \\ %{}) do
+    protected = CBOR.encode(protected_header)
+    signing_input = CBOR.encode(["Signature1", bytes(protected), bytes(""), bytes(payload)])
+    jwk = JOSE.JWK.from_pem(pem)
+    private_key = jwk |> JOSE.JWK.to_key() |> elem(1)
+    der_signature = :public_key.sign(signing_input, :sha256, private_key)
+    {:"ECDSA-Sig-Value", r, s} = :public_key.der_decode(:"ECDSA-Sig-Value", der_signature)
+    signature = <<r::unsigned-big-size(256), s::unsigned-big-size(256)>>
+
+    CBOR.encode([bytes(protected), unprotected, bytes(payload), bytes(signature)])
+  end
+
   test "sign1/3 and verify1/3 round-trip an ES256 payload" do
     {pem, public} = keypair()
     payload = <<0, 1, 2, 3, 255>>
@@ -62,6 +74,44 @@ defmodule Attesto.CoseTest do
     signed = Cose.sign1(pem, "payload", [])
 
     assert {:error, :invalid_signature} = Cose.verify1(signed, wrong_public, [])
+  end
+
+  test "processes protected crit and rejects unknown critical headers" do
+    {pem, public} = keypair()
+    payload = "payload"
+
+    understood = sign_with_protected(pem, payload, %{1 => -7, 2 => [1]})
+    unknown_noncritical = sign_with_protected(pem, payload, %{1 => -7, 99 => "extension"})
+    unknown_critical = sign_with_protected(pem, payload, %{1 => -7, 2 => [99], 99 => "extension"})
+
+    assert {:ok, ^payload} = Cose.verify1(understood, public, [])
+    assert {:ok, ^payload} = Cose.verify1(unknown_noncritical, public, [])
+
+    assert {:error, :unsupported_critical_header} =
+             Cose.verify1(unknown_critical, public, [])
+  end
+
+  test "rejects malformed or unprotected crit headers" do
+    {pem, public} = keypair()
+    payload = "payload"
+
+    empty_crit = sign_with_protected(pem, payload, %{1 => -7, 2 => []})
+    missing_critical_parameter = sign_with_protected(pem, payload, %{1 => -7, 2 => [99]})
+    unprotected_crit = sign_with_protected(pem, payload, %{1 => -7}, %{2 => [1]})
+
+    assert {:error, :invalid_cose} = Cose.verify1(empty_crit, public, [])
+    assert {:error, :invalid_cose} = Cose.verify1(missing_critical_parameter, public, [])
+    assert {:error, :invalid_cose} = Cose.verify1(unprotected_crit, public, [])
+  end
+
+  test "rejects a tagged value where COSE requires a plain unprotected-header map" do
+    {pem, public} = keypair()
+    payload = "payload"
+    [protected, _unprotected, encoded_payload, signature] = Cose.sign1(pem, payload, []) |> decode!()
+    tagged_map = %CBOR.Tag{tag: 24, value: bytes(CBOR.encode(%{}))}
+    malformed = CBOR.encode([protected, tagged_map, encoded_payload, signature])
+
+    assert {:error, :invalid_cose} = Cose.verify1(malformed, public, [])
   end
 
   test "sign1_detached/3 and verify1_detached/4 round-trip an ES256 payload with a null payload on the wire" do

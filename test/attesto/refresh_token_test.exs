@@ -736,6 +736,33 @@ defmodule Attesto.RefreshTokenTest do
   end
 
   describe "rotate/3 reuse detection and family revocation" do
+    test "replaying a swept expired ancestor revokes its live descendant" do
+      now = System.system_time(:second)
+
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RefreshStore.ETS, context(), now: now - 20, ttl: 15)
+
+      {:ok, %{token: t1}} =
+        RefreshToken.rotate(RefreshStore.ETS, t0,
+          now: now - 10,
+          ttl: 60,
+          rotation_grace_seconds: 1
+        )
+
+      send(RefreshStore.ETS, :sweep)
+      :sys.get_state(RefreshStore.ETS)
+
+      assert {:ok, parent} = RefreshStore.ETS.get(Secret.hash(t0))
+      assert parent.expires_at < now
+      assert parent.successor == %{retry_until: now - 9, recoverable: false}
+
+      assert {:error, :reuse_detected} =
+               RefreshToken.rotate(RefreshStore.ETS, t0, now: now)
+
+      assert {:error, :invalid_grant} =
+               RefreshToken.rotate(RefreshStore.ETS, t1, now: now)
+    end
+
     test "strict mode keeps immediate replay as reuse detection" do
       {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, context())
       {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0)

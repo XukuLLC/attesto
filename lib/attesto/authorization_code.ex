@@ -390,10 +390,24 @@ defmodule Attesto.AuthorizationCode do
              is_list(opts) do
     validate_refresh_context!(grant, refresh_context)
 
+    # Freeze the issuance clock once so the refresh family's persisted deadline
+    # and the authorization-code reuse marker use the same instant. Without an
+    # explicit clock, separate calls around a one-second boundary could make the
+    # marker expire before the family it protects.
+    opts = Keyword.put_new_lazy(opts, :now, fn -> NumericDate.now([]) end)
+
     case Attesto.RefreshToken.issue(refresh_store, refresh_context, opts) do
       {:ok, issued} ->
         issued = validate_issued_refresh!(issued)
-        :ok = record_consumption(code_store, Secret.hash(code), %{grant | family_id: issued.family_id})
+
+        :ok =
+          record_consumption(
+            code_store,
+            Secret.hash(code),
+            %{grant | family_id: issued.family_id},
+            refresh_family_deadline(opts)
+          )
+
         {:ok, issued}
 
       {:error, _reason} = error ->
@@ -468,15 +482,31 @@ defmodule Attesto.AuthorizationCode do
   # absence of the callback leaves single-use behaviour unchanged and is
   # fail-safe (see `Attesto.CodeStore`). `meta` links the spent code to the
   # family it spawned so the caller can revoke descendants on a later replay.
-  defp record_consumption(store, code_hash, %Grant{} = grant) do
+  defp record_consumption(store, code_hash, %Grant{} = grant, replay_retain_until \\ nil) do
     if function_exported?(store, :mark_consumed, 2) do
-      case store.mark_consumed(code_hash, %{family_id: grant.family_id, subject: grant.subject}) do
+      meta = %{
+        family_id: grant.family_id,
+        subject: grant.subject,
+        replay_retain_until: replay_retain_until
+      }
+
+      case store.mark_consumed(code_hash, meta) do
         :ok -> :ok
         _unexpected -> code_store_contract_error(:mark_consumed)
       end
     end
 
     :ok
+  end
+
+  defp refresh_family_deadline(opts) do
+    case Keyword.get(opts, :family_ttl) do
+      nil -> nil
+      ttl when is_integer(ttl) and ttl > 0 -> NumericDate.now(opts) + ttl
+      # RefreshToken.issue/3 validates this option before a success can reach
+      # here. Keep a fail-closed guard in case that contract ever changes.
+      _invalid -> raise RuntimeError, "refresh token issue/3 accepted an invalid family lifetime"
+    end
   end
 
   # RFC 6749 §4.1.3: the code must be redeemed by the client it was issued

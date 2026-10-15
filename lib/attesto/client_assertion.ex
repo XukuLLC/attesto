@@ -10,6 +10,8 @@ defmodule Attesto.ClientAssertion do
     * `aud` contains the expected token endpoint/audience
     * `exp` is in the future
     * `iat`, when present, is not meaningfully in the future
+    * `nbf`, when present, has been reached within the permitted clock skew
+    * `exp` is not earlier than a present `iat` or `nbf`
     * `jti` is present, non-empty, and at most 256 bytes for replay tracking
       by the caller
 
@@ -91,6 +93,8 @@ defmodule Attesto.ClientAssertion do
          :ok <- check_audience(claims, expected_audience),
          :ok <- check_expiry(claims, opts),
          :ok <- check_iat(claims, opts),
+         :ok <- check_nbf(claims, opts),
+         :ok <- check_temporal_order(claims),
          :ok <- check_jti(claims) do
       {:ok, claims}
     end
@@ -136,7 +140,7 @@ defmodule Attesto.ClientAssertion do
     Keyword.put(opts, :enforce_fapi_alg_policy, enforce_fapi_policy)
   end
 
-  defp check_client_id(%{"iss" => id, "sub" => id}, id), do: :ok
+  defp check_client_id(%{"iss" => id, "sub" => id}, id) when is_binary(id) and id != "", do: :ok
   defp check_client_id(_claims, _client_id), do: {:error, :invalid_client_id}
 
   # FAPI 2 requires a single-valued string `aud`. An array audience is
@@ -182,6 +186,27 @@ defmodule Attesto.ClientAssertion do
 
   defp check_iat(%{"iat" => _}, _opts), do: {:error, :not_yet_valid}
   defp check_iat(_claims, _opts), do: :ok
+
+  defp check_nbf(%{"nbf" => nbf}, opts) when is_integer(nbf) and nbf >= 0 do
+    if NumericDate.not_before_reached?(
+         nbf,
+         NumericDate.now(opts, default: :system, invalid_override: :fallback),
+         skew: @clock_skew_seconds
+       ),
+       do: :ok,
+       else: {:error, :not_yet_valid}
+  end
+
+  defp check_nbf(%{"nbf" => _}, _opts), do: {:error, :not_yet_valid}
+  defp check_nbf(_claims, _opts), do: :ok
+
+  defp check_temporal_order(%{"exp" => exp, "iat" => iat}) when is_integer(exp) and is_integer(iat) and exp < iat,
+    do: {:error, :invalid_assertion}
+
+  defp check_temporal_order(%{"exp" => exp, "nbf" => nbf}) when is_integer(exp) and is_integer(nbf) and exp < nbf,
+    do: {:error, :invalid_assertion}
+
+  defp check_temporal_order(_claims), do: :ok
 
   defp check_jti(%{"jti" => jti}) when is_binary(jti) and jti != "" do
     if byte_size(jti) <= @max_jti_bytes, do: :ok, else: {:error, :invalid_assertion}

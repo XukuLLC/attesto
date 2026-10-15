@@ -10,7 +10,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
   alias Attesto.RefreshStore.ETS
   alias Attesto.Secret
 
-  defp rotate_fixture(record, now, retry_until) do
+  defp rotate_fixture(record, now, retry_until, opts \\ []) do
     token = "sweeper-successor-#{:erlang.unique_integer([:positive])}"
 
     child =
@@ -19,7 +19,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
         family_id: record.family_id,
         generation: record.generation + 1,
         data: record.data,
-        expires_at: now + 3_600
+        expires_at: Keyword.get(opts, :expires_at, now + 3_600)
       })
 
     successor = %{
@@ -50,7 +50,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
     refute inspect(stored.successor) =~ successor.token
   end
 
-  test "the sweeper retains an expired parent until its live retry deadline" do
+  test "the sweeper preserves successor state through a live retry deadline" do
     now = System.system_time(:second)
     rotation_now = now - 100
     record = contract_refresh_record(%{expires_at: now - 1})
@@ -65,7 +65,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
     assert token == successor.token
   end
 
-  test "the sweeper removes an expired parent after its retry deadline" do
+  test "the sweeper retains replay evidence after retry deadline while a descendant is live" do
     now = System.system_time(:second)
     rotation_now = now - 100
     record = contract_refresh_record(%{expires_at: now - 2})
@@ -76,7 +76,27 @@ defmodule Attesto.RefreshStoreETSContractTest do
     send(ETS, :sweep)
     :sys.get_state(ETS)
 
+    assert {:ok, stored} = ETS.get(record.token_hash)
+    assert stored.successor == %{retry_until: now - 1, recoverable: false}
+    assert {:ok, ^child} = ETS.get(child.token_hash)
+  end
+
+  test "the sweeper removes replay evidence after the whole family expires" do
+    now = System.system_time(:second)
+    rotation_now = now - 100
+    record = contract_refresh_record(%{expires_at: now - 2})
+    :ok = ETS.insert(record)
+
+    {child, successor} =
+      rotate_fixture(record, rotation_now, now - 50, expires_at: now - 1)
+
+    assert {:ok, _parent, ^child} = ETS.rotate(record.token_hash, child, successor, now: rotation_now)
+
+    send(ETS, :sweep)
+    :sys.get_state(ETS)
+
     assert :error = ETS.get(record.token_hash)
+    assert :error = ETS.get(child.token_hash)
   end
 
   test "revocation remains sticky past the legacy 30-day horizon for a long-lived imported family" do

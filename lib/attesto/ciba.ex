@@ -121,6 +121,7 @@ defmodule Attesto.CIBA do
   @type error ::
           :invalid_request
           | :invalid_scope
+          | :invalid_target
           | :expired_login_hint_token
           | :unknown_user_id
           | :unauthorized_client
@@ -484,6 +485,7 @@ defmodule Attesto.CIBA do
       when error in [
              :invalid_request,
              :invalid_scope,
+             :invalid_target,
              :expired_login_hint_token,
              :unknown_user_id,
              :unauthorized_client,

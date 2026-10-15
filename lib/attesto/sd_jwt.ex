@@ -17,8 +17,9 @@ defmodule Attesto.SdJwt do
   A **Disclosure** is `base64url(UTF-8(JSON(array)))` with no padding, where the
   array is `[salt, claim_name, claim_value]` for an object property or
   `[salt, value]` for an array element. Its **digest** is
-  `base64url(SHA-256(ASCII(disclosure)))` — computed over the exact disclosure
-  string, so interop does not depend on how any party serialises JSON.
+  `base64url(HASH(ASCII(disclosure)))`, using the signed top-level `_sd_alg`
+  (SHA-256 by default) — computed over the exact disclosure string, so interop
+  does not depend on how any party serialises JSON.
 
   This module is the base SD-JWT mechanism. `Attesto.SdJwtVc` layers the
   IETF SD-JWT VC profile (`vct`, `cnf`, `vc+sd-jwt` typing) on top.
@@ -39,7 +40,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, MapParams, NumericDate, Secret, SecureCompare, SigningAlg}
+  alias Attesto.{JWS, Key, MapParams, NumericDate, Secret, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -47,7 +48,7 @@ defmodule Attesto.SdJwt do
   @salt_bytes 16
   # Reserved keys that MUST NOT appear as a Disclosure claim name (spec §5.2.2),
   # nor be produced by resolving one.
-  @reserved_claim_names ~w(_sd ...)
+  @reserved_claim_names ~w(_sd _sd_alg ...)
 
   # DoS ceiling on a presentation, enforced in `split/1` before any base64/JSON
   # decode work: an authenticated holder could otherwise pad the `~`-joined
@@ -112,7 +113,7 @@ defmodule Attesto.SdJwt do
 
   @doc """
   The digest of a Disclosure under `sd_alg` (default `#{@default_sd_alg}`):
-  `base64url(SHA-256(ASCII(disclosure)))`.
+  `base64url(HASH(ASCII(disclosure)))`.
   """
   @spec digest(String.t(), String.t()) :: String.t()
   def digest(disclosure, sd_alg \\ @default_sd_alg) when is_binary(disclosure) do
@@ -144,9 +145,10 @@ defmodule Attesto.SdJwt do
   def issue(claims, opts) when is_map(claims) and is_list(opts) do
     sd_alg = Keyword.get(opts, :sd_alg, @default_sd_alg)
     disclosable = Keyword.get(opts, :disclosable, [])
+    reject_nested_sd_alg!(claims)
 
     Enum.each(disclosable, fn name ->
-      if name in @reserved_claim_names,
+      if to_string(name) in @reserved_claim_names,
         do: raise(ArgumentError, "cannot make the reserved claim #{inspect(name)} selectively disclosable")
     end)
 
@@ -158,7 +160,10 @@ defmodule Attesto.SdJwt do
         {disclosure, [digest(disclosure, sd_alg) | acc]}
       end)
 
-    visible = Map.drop(claims, disclosable)
+    # JSON encoders stringify atom map keys. Drop atom aliases for the reserved
+    # machinery before inserting the canonical string keys, otherwise a caller
+    # can produce duplicate `_sd` or `_sd_alg` JSON members.
+    visible = Map.drop(claims, disclosable ++ [:_sd, :_sd_alg])
 
     payload =
       visible
@@ -171,6 +176,21 @@ defmodule Attesto.SdJwt do
 
     Enum.join([jwt | disclosures] ++ [""], @separator)
   end
+
+  defp reject_nested_sd_alg!(claims) do
+    Enum.each(Map.values(claims), &reject_sd_alg_member!/1)
+  end
+
+  defp reject_sd_alg_member!(%{} = value) do
+    if Map.has_key?(value, "_sd_alg") or Map.has_key?(value, :_sd_alg) do
+      raise ArgumentError, "_sd_alg is only valid at the top level of an SD-JWT payload"
+    end
+
+    Enum.each(Map.values(value), &reject_sd_alg_member!/1)
+  end
+
+  defp reject_sd_alg_member!(value) when is_list(value), do: Enum.each(value, &reject_sd_alg_member!/1)
+  defp reject_sd_alg_member!(_value), do: :ok
 
   # ── Verification ───────────────────────────────────────────────────────────
 
@@ -228,10 +248,10 @@ defmodule Attesto.SdJwt do
     * `:now` / `:max_age_seconds` - freshness bounds on `iat` (default 300s).
 
   Verifies the KB-JWT signature under `holder_jwk`, its `typ` (`kb+jwt`), the
-  `nonce`/`aud`, and that `sd_hash` equals `base64url(SHA-256(<Issuer JWT and
-  presented Disclosures, `~`-joined, trailing `~`>))` (spec §4.3) - so the
-  holder signed over exactly the presentation the verifier reconstructed claims
-  from.
+  `nonce`/`aud`, and that `sd_hash` equals `base64url(HASH(<Issuer JWT and
+  presented Disclosures, `~`-joined, trailing `~`>))`, using the signed
+  top-level `_sd_alg` (spec §4.3) - so the holder signed over exactly the
+  presentation the verifier reconstructed claims from.
   """
   @spec verify_key_binding(key_binding_input(), map(), keyword()) :: :ok | {:error, atom()}
   def verify_key_binding(%{key_binding_jwt: nil}, _holder_jwk, _opts), do: {:error, :missing_key_binding}
@@ -312,6 +332,7 @@ defmodule Attesto.SdJwt do
          :ok <- valid_disclosure_shape(decoded) do
       {:ok, %{used?: false, value: decoded}}
     else
+      {:error, :reserved_claim_name} = error -> error
       _ -> {:error, :invalid_disclosure}
     end
   end
@@ -331,69 +352,74 @@ defmodule Attesto.SdJwt do
   # cleartext claims and the set of digests actually consumed, so the caller can
   # reject a presentation carrying an unused Disclosure.
   defp resolve(payload, by_digest) do
-    {value, used} = resolve_value(payload, by_digest, MapSet.new())
+    {value, used, _referenced} =
+      resolve_value(payload, by_digest, MapSet.new(), MapSet.new(), :top_level)
+
     {:ok, value, used}
   catch
     {:sd_error, reason} -> {:error, reason}
   end
 
-  defp resolve_value(%{} = object, by_digest, used) do
+  defp resolve_value(%{} = object, by_digest, used, referenced, level) do
     {sd_digests, rest} = Map.pop(object, "_sd", [])
-    rest = Map.delete(rest, "_sd_alg")
+    rest = if level == :top_level, do: Map.delete(rest, "_sd_alg"), else: rest
 
     if !is_list(sd_digests), do: throw({:sd_error, :invalid_disclosure})
 
     # Resolve the hidden object properties named by `_sd`.
-    {disclosed, used} =
-      Enum.reduce(sd_digests, {%{}, used}, fn d, {acc, used} ->
-        resolve_object_digest(d, by_digest, acc, used)
+    {disclosed, used, referenced} =
+      Enum.reduce(sd_digests, {%{}, used, referenced}, fn d, {acc, used, referenced} ->
+        resolve_object_digest(d, by_digest, acc, used, referenced)
       end)
 
     # Recurse into every still-present (cleartext) member.
-    {resolved_rest, used} =
-      Enum.reduce(rest, {%{}, used}, fn {k, v}, {acc, used} ->
+    {resolved_rest, used, referenced} =
+      Enum.reduce(rest, {%{}, used, referenced}, fn {k, v}, {acc, used, referenced} ->
         if k in @reserved_claim_names, do: throw({:sd_error, :reserved_claim_name})
-        {rv, used} = resolve_value(v, by_digest, used)
-        {Map.put(acc, k, rv), used}
+        {rv, used, referenced} = resolve_value(v, by_digest, used, referenced, :nested)
+        {Map.put(acc, k, rv), used, referenced}
       end)
 
     merged = merge_disclosed(resolved_rest, disclosed)
-    {merged, used}
+    {merged, used, referenced}
   end
 
-  defp resolve_value(list, by_digest, used) when is_list(list) do
-    {resolved, used} =
-      Enum.reduce(list, {[], used}, fn element, {acc, used} ->
+  defp resolve_value(list, by_digest, used, referenced, _level) when is_list(list) do
+    {resolved, used, referenced} =
+      Enum.reduce(list, {[], used, referenced}, fn element, {acc, used, referenced} ->
         case element do
           %{"..." => d} when map_size(element) == 1 ->
-            resolve_array_digest(d, by_digest, acc, used)
+            resolve_array_digest(d, by_digest, acc, used, referenced)
 
           other ->
-            {rv, used} = resolve_value(other, by_digest, used)
-            {[rv | acc], used}
+            {rv, used, referenced} = resolve_value(other, by_digest, used, referenced, :nested)
+            {[rv | acc], used, referenced}
         end
       end)
 
-    {Enum.reverse(resolved), used}
+    {Enum.reverse(resolved), used, referenced}
   end
 
-  defp resolve_value(scalar, _by_digest, used), do: {scalar, used}
+  defp resolve_value(scalar, _by_digest, used, referenced, _level), do: {scalar, used, referenced}
 
   # A digest listed in `_sd` that we hold a Disclosure for: it MUST be an
   # object-property disclosure `[salt, name, value]`. Digests we do not hold are
   # simply not disclosed (omitted). A single digest MUST NOT be used twice.
-  defp resolve_object_digest(d, by_digest, acc, used) do
-    if not is_binary(d), do: throw({:sd_error, :invalid_disclosure})
+  defp resolve_object_digest(d, by_digest, acc, used, referenced) do
+    referenced = record_digest_reference(d, referenced)
 
     case Map.get(by_digest, d) do
       nil ->
-        {acc, used}
+        {acc, used, referenced}
 
       %{value: [_salt, name, value]} ->
         if MapSet.member?(used, d), do: throw({:sd_error, :duplicate_digest})
         if Map.has_key?(acc, name), do: throw({:sd_error, :duplicate_digest})
-        {rv, used} = resolve_value(value, by_digest, MapSet.put(used, d))
-        {Map.put(acc, name, rv), used}
+
+        {rv, used, referenced} =
+          resolve_value(value, by_digest, MapSet.put(used, d), referenced, :nested)
+
+        {Map.put(acc, name, rv), used, referenced}
 
       %{value: [_salt, _value]} ->
         # An array-element Disclosure referenced from `_sd` is malformed.
@@ -401,24 +427,34 @@ defmodule Attesto.SdJwt do
     end
   end
 
-  defp resolve_array_digest(d, by_digest, acc, used) do
-    if not is_binary(d), do: throw({:sd_error, :invalid_disclosure})
+  defp resolve_array_digest(d, by_digest, acc, used, referenced) do
+    referenced = record_digest_reference(d, referenced)
 
     case Map.get(by_digest, d) do
       nil ->
         # An undisclosed array element is dropped entirely (spec §7.3).
-        {acc, used}
+        {acc, used, referenced}
 
       %{value: [_salt, value]} ->
         if MapSet.member?(used, d), do: throw({:sd_error, :duplicate_digest})
-        {rv, used} = resolve_value(value, by_digest, MapSet.put(used, d))
-        {[rv | acc], used}
+
+        {rv, used, referenced} =
+          resolve_value(value, by_digest, MapSet.put(used, d), referenced, :nested)
+
+        {[rv | acc], used, referenced}
 
       %{value: [_salt, _name, _value]} ->
         # An object-property Disclosure referenced from an array is malformed.
         throw({:sd_error, :invalid_disclosure})
     end
   end
+
+  defp record_digest_reference(d, referenced) when is_binary(d) do
+    if MapSet.member?(referenced, d), do: throw({:sd_error, :duplicate_digest})
+    MapSet.put(referenced, d)
+  end
+
+  defp record_digest_reference(_d, _referenced), do: throw({:sd_error, :invalid_disclosure})
 
   defp merge_disclosed(rest, disclosed) do
     Enum.reduce(disclosed, rest, fn {name, value}, acc ->
@@ -517,21 +553,17 @@ defmodule Attesto.SdJwt do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
     alg = Map.get(header, "alg")
 
-    if SigningAlg.valid_verification_algorithms?(accepted) and is_binary(alg) and alg in accepted and
-         alg != "none" and SigningAlg.rsa_params_ok?(holder_jwk) do
-      # `rsa_params_ok?` guards the holder key here because the KB-JWT candidate
-      # is built directly (not through `JWS.map_candidate!`), so an oversized-
-      # exponent holder `cnf.jwk` would otherwise reach a scheduler-pinning
-      # modexp during KB-JWT verification (RSA DoS).
-      jwk = JOSE.JWK.from_map(holder_jwk)
-
+    with true <-
+           SigningAlg.valid_verification_algorithms?(accepted) and is_binary(alg) and
+             alg in accepted and alg != "none",
+         {:ok, jwk} <- Key.verification_jwk(holder_jwk, alg: alg) do
       JWS.verify_strict(kb_jwt, [{nil, alg, jwk}],
         terminal_error: :invalid_key_binding,
         malformed_result: :halt,
         malformed_error: :invalid_key_binding
       )
     else
-      {:error, :invalid_key_binding}
+      _invalid -> {:error, :invalid_key_binding}
     end
   rescue
     _ -> {:error, :invalid_key_binding}
@@ -564,17 +596,23 @@ defmodule Attesto.SdJwt do
 
   # `sd_hash` binds the KB-JWT to the exact Issuer-JWT + presented Disclosures.
   defp check_kb_sd_hash(%{"sd_hash" => presented}, verified) when is_binary(presented) do
-    expected = presentation_hash(verified)
-    if SecureCompare.equal?(presented, expected), do: :ok, else: {:error, :invalid_key_binding}
+    with {:ok, payload} <- JWS.peek_json(verified.issuer_jwt, :payload),
+         {:ok, sd_alg} <- sd_alg(payload) do
+      expected = presentation_hash(verified, sd_alg)
+      if SecureCompare.equal?(presented, expected), do: :ok, else: {:error, :invalid_key_binding}
+    else
+      _invalid -> {:error, :invalid_key_binding}
+    end
   end
 
   defp check_kb_sd_hash(_claims, _verified), do: {:error, :invalid_key_binding}
 
-  # base64url(SHA-256(<Issuer JWT>~<D1>~...~<Dn>~)) - the presentation as it
-  # stood immediately before the KB-JWT, trailing separator included.
-  defp presentation_hash(%{issuer_jwt: jwt, disclosures: disclosures}) do
+  # base64url(HASH(<Issuer JWT>~<D1>~...~<Dn>~)) - the presentation as it stood
+  # immediately before the KB-JWT, trailing separator included. HASH is the
+  # algorithm selected by the verified Issuer-signed JWT's top-level `_sd_alg`.
+  defp presentation_hash(%{issuer_jwt: jwt, disclosures: disclosures}, sd_alg) do
     to_hash = Enum.join([jwt | disclosures] ++ [""], @separator)
-    :crypto.hash(:sha256, to_hash) |> JWS.encode64()
+    :crypto.hash(hash_algorithm(sd_alg), to_hash) |> JWS.encode64()
   end
 
   # ── Shared helpers ─────────────────────────────────────────────────────────

@@ -43,22 +43,23 @@ defmodule Attesto.RevocationTest do
       assert :ok = Revocation.revoke(RefreshStore.ETS, r0, client_id: "oc_a")
     end
 
-    test "a different client is :unauthorized_client and does not revoke" do
+    test "a different client gets an indistinguishable :ok without revoking" do
       {:ok, %{token: r0}} =
         RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", client_id: "oc_a"})
 
-      assert {:error, :unauthorized_client} =
-               Revocation.revoke(RefreshStore.ETS, r0, client_id: "oc_b")
+      assert :ok = Revocation.revoke(RefreshStore.ETS, r0, client_id: "oc_b")
+      assert :ok = Revocation.revoke(RefreshStore.ETS, "never-issued", client_id: "oc_b")
 
       # Not revoked: the legitimate client can still rotate it.
       assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, r0, client_id: "oc_a")
     end
 
-    test "omitting the client on a client-bound token is fail-closed" do
+    test "omitting the client on a client-bound token is an indistinguishable no-op" do
       {:ok, %{token: r0}} =
         RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_42", client_id: "oc_a"})
 
-      assert {:error, :unauthorized_client} = Revocation.revoke(RefreshStore.ETS, r0)
+      assert :ok = Revocation.revoke(RefreshStore.ETS, r0)
+      assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, r0, client_id: "oc_a")
     end
 
     test "allow_missing_client_id? opts out of the client check" do
@@ -183,7 +184,10 @@ defmodule Attesto.RevocationTest do
       token: token,
       live_child: live_child
     } do
-      assert :ok = Revocation.revoke(RefreshStore.ETS, token, client_id: "oc_b")
+      result = Revocation.revoke(RefreshStore.ETS, token, client_id: "oc_b")
+
+      assert result == Revocation.revoke(RefreshStore.ETS, "never-issued", client_id: "oc_b")
+      assert result == :ok
       assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, live_child, client_id: "oc_a")
     end
 

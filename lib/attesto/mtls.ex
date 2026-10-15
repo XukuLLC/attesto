@@ -454,7 +454,16 @@ defmodule Attesto.MTLS do
   end
 
   defp unescape_dn_value("#" <> _hex_der), do: {:error, :unsupported_hex_dn_value}
-  defp unescape_dn_value(value), do: do_unescape_dn_value(value, <<>>)
+
+  defp unescape_dn_value(value) do
+    with {:ok, decoded} <- do_unescape_dn_value(value, <<>>),
+         true <- String.valid?(decoded) do
+      {:ok, decoded}
+    else
+      false -> {:error, :invalid_dn}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp do_unescape_dn_value(<<>>, acc), do: {:ok, acc}
 

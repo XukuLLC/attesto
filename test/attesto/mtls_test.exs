@@ -92,6 +92,15 @@ defmodule Attesto.MTLSTest do
                })
     end
 
+    test "invalid UTF-8 produced by an RFC 4514 hex escape fails normally" do
+      der = gen_san_cert_der()
+
+      assert {:error, :certificate_mismatch} =
+               MTLS.authenticate_client(der, :tls_client_auth, %{
+                 "tls_client_auth_subject_dn" => "CN=\\FF"
+               })
+    end
+
     test "self_signed_tls_client_auth matches the exact registered x5c leaf" do
       der = gen_san_cert_der()
       other = gen_cert_der("other-client")

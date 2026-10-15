@@ -133,7 +133,7 @@ defmodule Attesto.IdentityAssertion do
   def verify(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
     with {:ok, header} <- peek_header(jwt),
          :ok <- check_crit(header),
-         :ok <- check_supported_alg(header),
+         :ok <- check_supported_alg(header, opts),
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
          :ok <- check_required_claims(claims),
@@ -197,9 +197,15 @@ defmodule Attesto.IdentityAssertion do
     end
   end
 
-  defp check_supported_alg(%{"alg" => "none"}), do: {:error, :unsupported_alg}
-  defp check_supported_alg(%{"alg" => alg}) when is_binary(alg), do: :ok
-  defp check_supported_alg(_header), do: {:error, :unsupported_alg}
+  defp check_supported_alg(%{"alg" => alg}, opts) when is_binary(alg) do
+    accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
+
+    if alg in SigningAlg.allowed() and SigningAlg.valid_verification_algorithms?(accepted) and alg in accepted,
+      do: :ok,
+      else: {:error, :unsupported_alg}
+  end
+
+  defp check_supported_alg(_header, _opts), do: {:error, :unsupported_alg}
 
   # draft §5: the JOSE header `typ` MUST be `oauth-id-jag+jwt`. `typ` is a media
   # type (RFC 7515 §4.1.9), and media types are case-insensitive (RFC 2045
@@ -357,11 +363,16 @@ defmodule Attesto.IdentityAssertion do
   # `exp`/`iat` are REQUIRED NumericDates (already validated), so the bound is
   # always computable; reject a lifetime that exceeds the configured maximum.
   defp check_lifetime(%{"exp" => exp, "iat" => iat}, opts) when is_integer(exp) and is_integer(iat) do
-    case Keyword.get(opts, :max_lifetime_seconds) do
-      max when is_integer(max) and max > 0 ->
+    max = Keyword.get(opts, :max_lifetime_seconds)
+
+    cond do
+      exp < iat ->
+        {:error, :expired}
+
+      is_integer(max) and max > 0 ->
         if NumericDate.within_lifetime?(exp, iat, max), do: :ok, else: {:error, :expired}
 
-      _ ->
+      true ->
         :ok
     end
   end

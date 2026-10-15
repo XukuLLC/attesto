@@ -140,6 +140,19 @@ defmodule Attesto.RequestObjectTest do
                )
     end
 
+    test "a policy carrying accepted_algs nil fails closed" do
+      key = ec_key()
+      jwt = request_object(key)
+      policy = %{Policy.generic() | accepted_algs: nil}
+
+      assert {:error, :invalid_signature} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ Policy.to_verify_opts(policy)
+               )
+    end
+
     test "the FAPI default accepts legacy EdDSA and RFC 9864 Ed25519 only over Ed25519" do
       key = JOSE.JWK.generate_key({:okp, :Ed25519})
 
@@ -351,6 +364,19 @@ defmodule Attesto.RequestObjectTest do
       jwt = request_object(key, %{"nbf" => now, "exp" => now + 30})
 
       assert {:ok, _params} =
+               RequestObject.verify(
+                 jwt,
+                 %{"keys" => [public_jwk(key)]},
+                 base_opts() ++ [max_lifetime_seconds: 60, now: now]
+               )
+    end
+
+    test "max_lifetime_seconds rejects exp before nbf inside clock skew" do
+      key = ec_key()
+      now = 1_700_000_000
+      jwt = request_object(key, %{"iat" => now, "nbf" => now + 60, "exp" => now + 30})
+
+      assert {:error, :expired} =
                RequestObject.verify(
                  jwt,
                  %{"keys" => [public_jwk(key)]},
@@ -693,6 +719,61 @@ defmodule Attesto.RequestObjectTest do
   end
 
   describe "parameter coercion is total (never raises)" do
+    test "preserves a validated authorization_details array of objects" do
+      key = ec_key()
+
+      details = [
+        %{
+          "type" => "openid_credential",
+          "credential_configuration_id" => "UniversityDegreeCredential",
+          "locations" => ["https://issuer.example"]
+        }
+      ]
+
+      jwt = request_object(key, %{"authorization_details" => details})
+
+      assert {:ok, %{"authorization_details" => ^details}} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+
+    test "rejects malformed signed authorization_details instead of dropping it" do
+      key = ec_key()
+
+      for details <- [
+            [],
+            %{"type" => "openid_credential"},
+            ["openid_credential"],
+            [%{"credential_configuration_id" => "UniversityDegreeCredential"}],
+            [%{"type" => ""}],
+            [%{"type" => 42}]
+          ] do
+        jwt = request_object(key, %{"authorization_details" => details})
+
+        assert {:error, :invalid_request_object} =
+                 RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+      end
+    end
+
+    test "preserves a multi-valued RFC 8707 resource parameter as an array" do
+      key = ec_key()
+      resources = ["https://api.example/a", "https://api.example/b"]
+      jwt = request_object(key, %{"resource" => resources})
+
+      assert {:ok, %{"resource" => ^resources}} =
+               RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    end
+
+    test "rejects malformed resource claim types rather than dropping them" do
+      key = ec_key()
+
+      for resource <- [[], ["https://api.example", 42], %{}, 42] do
+        jwt = request_object(key, %{"resource" => resource})
+
+        assert {:error, :invalid_request_object} =
+                 RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+      end
+    end
+
     test "an extension claim that is an array with a non-string member is dropped, not raised on" do
       # Under the default JAR path (no `:string_valued_claims` constraint) an
       # arbitrary passthrough claim reaches `claims_to_params/1`. A list member

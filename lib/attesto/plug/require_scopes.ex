@@ -53,9 +53,16 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "must declare what it requires."
       end
 
+      catalog = Scope.new_catalog(required)
+
+      if !Enum.all?(required, &Scope.known?(catalog, &1)) do
+        raise ArgumentError,
+              "Attesto.Plug.RequireScopes requires concrete scopes; wildcard requirements are forbidden."
+      end
+
       %{
         required: required,
-        catalog: Scope.new_catalog(required),
+        catalog: catalog,
         claims_key: claims_key,
         resource_metadata: resource_metadata,
         transport: transport

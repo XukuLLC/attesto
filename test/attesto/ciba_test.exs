@@ -752,6 +752,7 @@ defmodule Attesto.CIBATest do
       for error <- [
             :invalid_request,
             :invalid_scope,
+            :invalid_target,
             :expired_login_hint_token,
             :unknown_user_id,
             :unauthorized_client,

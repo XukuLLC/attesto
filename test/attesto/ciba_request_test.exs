@@ -25,6 +25,7 @@ defmodule Attesto.CIBA.RequestTest do
       assert request.client_id == @client_id
       assert request.delivery_mode == :poll
       assert request.scope == ["openid", "accounts.read"]
+      assert request.resource == []
       assert request.hint == {:login_hint, "user@example.com"}
       refute request.signed?
       assert request.client_notification_token == nil
@@ -103,6 +104,25 @@ defmodule Attesto.CIBA.RequestTest do
     test "malformed client user-code policy is rejected" do
       assert {:error, :unauthorized_client} =
                Request.validate(client(%{user_code_parameter: "true"}), params())
+    end
+
+    test "validates and normalizes RFC 8707 resource indicators" do
+      first = "https://api.example.com/accounts"
+      second = "https://api.example.com/payments"
+
+      assert {:ok, %Request{resource: [^first]}} =
+               Request.validate(client(), params(%{"resource" => first}))
+
+      assert {:ok, %Request{resource: [^first, ^second]}} =
+               Request.validate(client(), params(%{"resource" => [first, second, first]}))
+    end
+
+    test "rejects malformed RFC 8707 resource indicators as invalid_target" do
+      for resource <- ["", [], ["https://api.example.com", 42], "https:///missing-host", "relative/path"] do
+        assert {:error, :invalid_target} =
+                 Request.validate(client(), params(%{"resource" => resource})),
+               "expected invalid_target for #{inspect(resource)}"
+      end
     end
   end
 
@@ -295,6 +315,27 @@ defmodule Attesto.CIBA.RequestTest do
       jwt = signed_request(key, %{"requested_expiry" => 240})
 
       assert {:ok, %Request{requested_expiry: 240}} =
+               Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+    end
+
+    test "preserves scalar and array RFC 8707 resource claims" do
+      key = ec_key()
+      first = "https://api.example.com/accounts"
+      second = "https://api.example.com/payments"
+
+      for {claim, expected} <- [{first, [first]}, {[first, second], [first, second]}] do
+        jwt = signed_request(key, %{"resource" => claim})
+
+        assert {:ok, %Request{resource: ^expected}} =
+                 Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
+      end
+    end
+
+    test "rejects a signed malformed resource URI as invalid_target" do
+      key = ec_key()
+      jwt = signed_request(key, %{"resource" => "https:///missing-host"})
+
+      assert {:error, :invalid_target} =
                Request.validate(signing_client(key), %{"request" => jwt}, signed_opts())
     end
 

@@ -190,12 +190,19 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
                grant,
                RefreshETS,
                exchange_context,
-               now: 1_000
+               now: 1_000,
+               family_ttl: 3_600
              )
 
     refute issued_family_id == grant.family_id
 
-    assert {:error, {:reuse, %{family_id: ^issued_family_id, subject: "usr_42"}}} =
+    assert {:error,
+            {:reuse,
+             %{
+               family_id: ^issued_family_id,
+               subject: "usr_42",
+               replay_retain_until: 4_600
+             }}} =
              AuthorizationCode.redeem(TrackingStore, code, %{
                client_id: @client_id,
                redirect_uri: @redirect_uri,

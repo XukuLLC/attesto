@@ -144,6 +144,38 @@ defmodule Attesto.PresentationRequestTest do
     assert atom_keyed == string_keyed
   end
 
+  test "normalizes credential-set and claim-set response requirements" do
+    query =
+      PresentationRequest.dcql_query(
+        credentials: [
+          %{
+            id: "pid",
+            format: "dc+sd-jwt",
+            multiple: true,
+            meta: %{vct_values: ["IdentityCredential"]},
+            claims: [
+              %{id: "name", path: ["given_name"]},
+              %{id: "age", path: ["age_over_18"], values: [true]}
+            ],
+            claim_sets: [["name"], ["age"]]
+          },
+          %{id: "mdl", format: "mso_mdoc", meta: %{doctype_value: "org.iso.18013.5.1.mDL"}}
+        ],
+        credential_sets: [
+          %{options: [["pid"], ["mdl"]]},
+          %{required: false, options: [["pid", "mdl"]]}
+        ]
+      )
+
+    assert get_in(query, ["credentials", Access.at(0), "multiple"]) == true
+    assert get_in(query, ["credentials", Access.at(0), "claim_sets"]) == [["name"], ["age"]]
+
+    assert query["credential_sets"] == [
+             %{"options" => [["pid"], ["mdl"]]},
+             %{"options" => [["pid", "mdl"]], "required" => false}
+           ]
+  end
+
   test "rejects invalid DCQL credentials, IDs, formats, paths, and vct_values" do
     invalid_queries = [
       %{credentials: []},
@@ -151,9 +183,37 @@ defmodule Attesto.PresentationRequestTest do
       %{credentials: [%{id: "identity"}]},
       %{credentials: [%{id: "identity", format: "dc+sd-jwt"}, %{id: "identity", format: "dc+sd-jwt"}]},
       %{credentials: [%{id: "identity", format: "dc+sd-jwt", claims: [%{path: []}]}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", claims: []}]},
       %{credentials: [%{id: "identity", format: "dc+sd-jwt", claims: [%{}]}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", claims: [%{path: ["age"], values: []}]}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", claims: [%{path: [-1]}]}]},
       %{credentials: [%{id: "identity", format: "dc+sd-jwt", meta: %{vct_values: []}}]},
-      %{credentials: [%{id: "identity", format: "dc+sd-jwt", meta: %{vct_values: ["ok", 1]}}]}
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", meta: %{vct_values: [""]}}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", meta: %{vct_values: ["ok", 1]}}]},
+      %{credentials: [%{id: "identity", format: "mso_mdoc", meta: %{doctype_value: ""}}]},
+      %{credentials: [%{id: "identity", format: "mso_mdoc", meta: %{doctype_values: []}}]},
+      %{credentials: [%{id: "invalid id", format: "dc+sd-jwt"}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt", multiple: "true"}]},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt"}], credential_sets: []},
+      %{credentials: [%{id: "identity", format: "dc+sd-jwt"}], credential_sets: [%{options: []}]},
+      %{
+        credentials: [%{id: "identity", format: "dc+sd-jwt"}],
+        credential_sets: [%{options: [["identity", "identity"]]}]
+      },
+      %{
+        credentials: [%{id: "identity", format: "dc+sd-jwt"}],
+        credential_sets: [%{options: [["missing"]]}]
+      },
+      %{
+        credentials: [
+          %{
+            id: "identity",
+            format: "dc+sd-jwt",
+            claims: [%{path: ["given_name"]}],
+            claim_sets: [["name"]]
+          }
+        ]
+      }
     ]
 
     for query <- invalid_queries do

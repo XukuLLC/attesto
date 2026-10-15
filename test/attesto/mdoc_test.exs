@@ -318,6 +318,14 @@ defmodule Attesto.MdocTest do
       assert verified.device_namespaces == %{@mdl_namespace => %{"age_over_21" => true}}
     end
 
+    test "rejects a CBOR tag where DeviceNameSpaces requires a plain map", ctx do
+      tagged_map = %CBOR.Tag{tag: 24, value: bytes(CBOR.encode(%{}))}
+      device_response = build_device_response(ctx, device_namespaces: tagged_map)
+
+      assert {:error, :invalid_mdoc} =
+               Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now)
+    end
+
     test "a mismatched nonce fails device-auth signature verification", ctx do
       device_response = build_device_response(ctx)
 

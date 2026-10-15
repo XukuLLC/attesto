@@ -41,7 +41,8 @@ defmodule Attesto.CIBA.Request do
   (`scope`, the hints, `binding_message`, `user_code`, `acr_values`,
   `client_notification_token`) MUST be a JSON string per §7.1.1; a non-string
   value is rejected as `invalid_request` rather than coerced. `requested_expiry`
-  may be a string or a number.
+  may be a string or a number. RFC 8707's `resource` extension may be either a
+  single string or a non-empty JSON array of strings.
 
   ## Replay defense (FAPI-CIBA §5.2.2)
 
@@ -55,6 +56,7 @@ defmodule Attesto.CIBA.Request do
   """
 
   alias Attesto.RequestObject
+  alias Attesto.ResourceIndicator
   alias Attesto.Scope
   alias Attesto.SigningAlg
 
@@ -101,6 +103,7 @@ defmodule Attesto.CIBA.Request do
     :requested_expiry,
     :user_code,
     acr_values: [],
+    resource: [],
     scope: [],
     signed?: false
   ]
@@ -120,6 +123,7 @@ defmodule Attesto.CIBA.Request do
           request_exp: non_neg_integer() | nil,
           request_jti: String.t() | nil,
           requested_expiry: pos_integer() | nil,
+          resource: [String.t()],
           scope: [String.t()],
           signed?: boolean(),
           user_code: String.t() | nil
@@ -149,7 +153,12 @@ defmodule Attesto.CIBA.Request do
           optional(:user_code_parameter) => boolean()
         }
 
-  @type error :: :invalid_request | :invalid_scope | :invalid_binding_message | :unauthorized_client
+  @type error ::
+          :invalid_request
+          | :invalid_scope
+          | :invalid_target
+          | :invalid_binding_message
+          | :unauthorized_client
 
   @doc """
   Validate the wire parameters of a backchannel authentication request for an
@@ -192,10 +201,11 @@ defmodule Attesto.CIBA.Request do
     * `:now` - unix seconds or `DateTime`, for signed-request time checks.
 
   Returns `{:ok, %#{inspect(__MODULE__)}{}}` or `{:error, reason}` where
-  `reason` is the CIBA §13 error code the endpoint renders: `:invalid_request`
-  (malformed/missing parameters, or a signed request that fails verification),
-  `:invalid_scope`, `:invalid_binding_message`, or `:unauthorized_client` (the
-  client is not registered for CIBA).
+  `reason` is the CIBA §13 / RFC 8707 error code the endpoint renders:
+  `:invalid_request` (malformed/missing parameters, or a signed request that
+  fails verification), `:invalid_scope`, `:invalid_target`,
+  `:invalid_binding_message`, or `:unauthorized_client` (the client is not
+  registered for CIBA).
   """
   @spec validate(client(), map(), keyword()) :: {:ok, t()} | {:error, error()}
   def validate(client, params, opts \\ []) when is_map(client) and is_map(params) and is_list(opts) do
@@ -205,6 +215,7 @@ defmodule Attesto.CIBA.Request do
          {:ok, params, signed} <- unwrap_signed_request(client, params, opts),
          :ok <- reject_request_uri(params),
          {:ok, scope} <- validate_scope(params),
+         {:ok, resource} <- validate_resource(params),
          {:ok, hint} <- validate_hint(params),
          {:ok, notification_token} <- validate_notification_token(mode, params, opts),
          {:ok, binding_message} <- validate_binding_message(params, opts),
@@ -222,6 +233,7 @@ defmodule Attesto.CIBA.Request do
          request_exp: signed.exp,
          request_jti: signed.jti,
          requested_expiry: requested_expiry,
+         resource: resource,
          scope: scope,
          signed?: signed.signed?,
          user_code: user_code
@@ -410,6 +422,10 @@ defmodule Attesto.CIBA.Request do
 
   # Missing required parameter → invalid_request; a non-string is malformed.
   defp validate_scope(_params), do: {:error, :invalid_request}
+
+  # ----- resource (RFC 8707 §2.1: OPTIONAL, scalar or repeated/array) -----
+
+  defp validate_resource(params), do: ResourceIndicator.validate(Map.get(params, "resource"))
 
   # ----- hints (§7.1: one and only one) -----
 

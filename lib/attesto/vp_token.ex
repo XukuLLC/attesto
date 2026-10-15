@@ -35,7 +35,7 @@ defmodule Attesto.VpToken do
 
   # `Attesto.Mdoc` is referenced fully-qualified inside a `Code.ensure_loaded?/1`
   # guard (mdoc needs the optional `:cbor` dep), so it is deliberately not aliased.
-  alias Attesto.{JWS, MapParams, SdJwt, SdJwtVc}
+  alias Attesto.{JWS, MapParams, PresentationRequest, SdJwt, SdJwtVc}
 
   @separator "~"
   @base64url ~r/\A[A-Za-z0-9_-]+\z/
@@ -67,12 +67,23 @@ defmodule Attesto.VpToken do
   verifiers. See the moduledoc for `:formats` and `:response_uri`.
   `:accepted_algs` and `:enforce_fapi_alg_policy` are forwarded to SD-JWT
   issuer verification only, independently of the holder Key Binding JWT.
-  `:expected_query_ids` identifies required entries; `:permitted_query_ids`
-  can include optional requested entries. When omitted, the permitted set is
-  derived from expected IDs and `:query_constraints` keys. Entries outside that
-  set are rejected before format detection or issuer lookup. Only low-level
-  calls omitting all three query-policy options accept arbitrary query IDs.
+  `:expected_query_ids` identifies individually required entries;
+  `:permitted_query_ids` can include optional requested entries.
+  `:required_credential_sets` carries DCQL's AND-of-ORs response rule as a list
+  of required sets, each containing one or more complete credential-ID options.
+  For example, `[[["pid"], ["mdl"]], [["address"]]]` requires either `pid` or
+  `mdl`, and also requires `address`. An explicit empty list represents a DCQL
+  query whose credential sets are all optional and is the only policy that
+  permits an empty VP Token. `constraints_from_dcql/1` embeds this policy in its
+  result, so callers already storing that result as `:query_constraints` do not
+  need to pass a second option. When omitted, the permitted set is derived from
+  expected IDs, constraint keys, and required-set IDs. Entries outside that set
+  are rejected before format detection or issuer lookup. Only low-level calls
+  omitting all query-policy options accept arbitrary non-empty query IDs.
   Constraints remain enforced on optional entries when they are present.
+  A query constraint permits multiple presentations only when its `:multiple`
+  or `"multiple"` member is explicitly `true`; omission applies DCQL's default
+  of one presentation.
   Malformed response maps and values return `{:error, :invalid_vp_token}`;
   malformed trusted options still raise `ArgumentError`.
 
@@ -104,13 +115,17 @@ defmodule Attesto.VpToken do
     expected_query_ids = expected_query_ids!(opts)
     formats = formats!(opts)
     constraints = query_constraints!(opts)
-    permitted_ids = permitted_query_ids!(opts, expected_query_ids, constraints)
-    required_ids = required_query_ids(opts, expected_query_ids, constraints)
+    required_credential_sets = required_credential_sets!(opts, constraints)
+    permitted_ids = permitted_query_ids!(opts, expected_query_ids, constraints, required_credential_sets)
+    required_ids = required_query_ids(opts, expected_query_ids, constraints, required_credential_sets)
     legacy? = legacy_scalar_values!(opts)
 
     with :ok <- validate_presentations(vp_token, legacy?),
          :ok <- check_permitted_query_ids(vp_token, permitted_ids),
-         :ok <- check_required_query_ids(vp_token, required_ids) do
+         :ok <- check_required_query_ids(vp_token, required_ids),
+         :ok <- check_required_credential_sets(vp_token, required_credential_sets),
+         :ok <- check_empty_response(vp_token, required_credential_sets),
+         :ok <- check_presentation_counts(vp_token, constraints, legacy?) do
       verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts)
     end
   end
@@ -119,12 +134,15 @@ defmodule Attesto.VpToken do
   Derive per-query-id verification constraints from a DCQL query, for the
   `:query_constraints` option of `verify/2`.
 
-  For each credential query it extracts the requested `format`, the accepted
-  credential type (`vct_values` for `dc+sd-jwt`, `doctype_value`/`doctype_values`
-  for `mso_mdoc`), and the claim `path`/`values` entries. `verify/2` enforces
-  these after signature and holder binding so a validly-signed credential of the
-  wrong type — or one disclosing a value outside the requested set — cannot
-  satisfy the query. Query IDs absent from the returned map are unconstrained.
+  The query is first normalized with `Attesto.PresentationRequest.dcql_query/1`,
+  so malformed empty constraints raise `ArgumentError` instead of being weakened.
+  For each credential query this function extracts the requested `format`,
+  cardinality, accepted credential type (`vct_values` for `dc+sd-jwt`,
+  `doctype_value`/`doctype_values` for `mso_mdoc`), claims, and `claim_sets`.
+  It also embeds the query's required credential-set options in every entry so
+  the returned map is sufficient to enforce the complete DCQL response plan.
+  `verify/2` enforces these after signature and holder binding. Query IDs absent
+  from the returned map are unconstrained.
   """
   @spec constraints_from_dcql(map()) :: %{optional(String.t()) => map()}
   def constraints_from_dcql(dcql_query) when is_map(dcql_query) do
@@ -133,10 +151,15 @@ defmodule Attesto.VpToken do
     # request object normalizes atom keys, so the stored constraints MUST too -
     # otherwise an atom-keyed query would sign a constraint but store none,
     # leaving the response type-blind. Deep-stringify keys once, up front.
-    case stringify_keys(dcql_query) do
-      %{"credentials" => credentials} when is_list(credentials) -> reduce_constraints(credentials)
-      _other -> %{}
-    end
+    dcql_query = dcql_query |> stringify_keys() |> PresentationRequest.dcql_query()
+    credentials = Map.fetch!(dcql_query, "credentials")
+    required_credential_sets = required_credential_sets_from_dcql(dcql_query, credentials)
+
+    credentials
+    |> reduce_constraints()
+    |> Map.new(fn {id, constraint} ->
+      {id, Map.put(constraint, :required_credential_sets, required_credential_sets)}
+    end)
   end
 
   def constraints_from_dcql(_dcql_query), do: %{}
@@ -169,9 +192,11 @@ defmodule Attesto.VpToken do
     {id,
      %{
        format: Map.get(credential, "format"),
+       multiple: Map.get(credential, "multiple", false),
        vct_values: string_list(Map.get(meta, "vct_values")),
        doctype_values: mdoc_doctypes(meta),
-       claims: parse_dcql_claims(Map.get(credential, "claims"))
+       claims: parse_dcql_claims(Map.get(credential, "claims")),
+       claim_sets: Map.get(credential, "claim_sets")
      }}
   end
 
@@ -186,23 +211,41 @@ defmodule Attesto.VpToken do
   defp mdoc_doctypes(%{"doctype_values" => values}), do: string_list(values)
   defp mdoc_doctypes(_meta), do: nil
 
-  defp string_list(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
+  defp string_list(values) when is_list(values), do: values
   defp string_list(_values), do: nil
 
   defp parse_dcql_claims(claims) when is_list(claims) do
-    Enum.flat_map(claims, fn
+    Enum.map(claims, fn
       %{"path" => path} = claim when is_list(path) ->
-        [%{path: path, values: claim_values(Map.get(claim, "values"))}]
+        %{path: path, values: claim_values(claim)}
+        |> MapParams.put_optional(:id, Map.get(claim, "id"))
 
       _claim ->
-        []
+        :invalid
     end)
   end
 
-  defp parse_dcql_claims(_claims), do: []
+  defp parse_dcql_claims(nil), do: nil
+  defp parse_dcql_claims(_claims), do: :invalid
 
-  defp claim_values(values) when is_list(values) and values != [], do: values
-  defp claim_values(_values), do: nil
+  defp claim_values(claim) do
+    case Map.fetch(claim, "values") do
+      {:ok, values} -> values
+      :error -> nil
+    end
+  end
+
+  defp required_credential_sets_from_dcql(dcql_query, credentials) do
+    case Map.fetch(dcql_query, "credential_sets") do
+      :error ->
+        Enum.map(credentials, fn credential -> [[Map.fetch!(credential, "id")]] end)
+
+      {:ok, credential_sets} ->
+        credential_sets
+        |> Enum.reject(&(Map.get(&1, "required", true) == false))
+        |> Enum.map(&Map.fetch!(&1, "options"))
+    end
+  end
 
   defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts) do
     verify_opts = Keyword.take(opts, [:now, :accepted_algs, :enforce_fapi_alg_policy])
@@ -284,13 +327,13 @@ defmodule Attesto.VpToken do
 
   defp check_result(%{vct: vct, claims: claims}, :sd_jwt_vc, constraint) do
     with :ok <- check_type(vct, Map.get(constraint, :vct_values), :vct_mismatch) do
-      check_claims(claims, Map.get(constraint, :claims))
+      check_claims(claims, Map.get(constraint, :claims), Map.get(constraint, :claim_sets), :sd_jwt_vc)
     end
   end
 
   defp check_result(%{doc_type: doc_type, namespaces: namespaces}, :mso_mdoc, constraint) do
     with :ok <- check_type(doc_type, Map.get(constraint, :doctype_values), :doctype_mismatch) do
-      check_claims(namespaces, Map.get(constraint, :claims))
+      check_claims(namespaces, Map.get(constraint, :claims), Map.get(constraint, :claim_sets), :mso_mdoc)
     end
   end
 
@@ -299,55 +342,135 @@ defmodule Attesto.VpToken do
   # but fail closed rather than silently accept an unenforceable presentation.
   defp check_result(_result, _format, _constraint), do: {:error, :unenforceable_constraint}
 
-  # nil / empty allowed-set means the query did not constrain the type.
+  # nil means the query did not constrain the type. An empty list is malformed
+  # DCQL and must fail closed rather than becoming an "accept any" policy.
   defp check_type(_actual, nil, _error), do: :ok
-  defp check_type(_actual, [], _error), do: :ok
 
-  defp check_type(actual, allowed, error) when is_list(allowed) do
+  defp check_type(actual, allowed, error) when is_list(allowed) and allowed != [] do
     if actual in allowed, do: :ok, else: {:error, error}
   end
 
-  defp check_claims(_disclosed, nil), do: :ok
-  defp check_claims(_disclosed, []), do: :ok
+  defp check_type(_actual, _malformed, error), do: {:error, error}
 
-  defp check_claims(disclosed, claims) when is_list(claims) do
+  defp check_claims(_disclosed, nil, nil, _format), do: :ok
+
+  defp check_claims(disclosed, claims, nil, format) when is_list(claims) and claims != [] do
     Enum.reduce_while(claims, :ok, fn claim, :ok ->
-      case check_claim(disclosed, claim) do
+      case check_claim(disclosed, claim, format) do
         :ok -> {:cont, :ok}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
   end
 
-  # A DCQL claim entry with a `values` set constrains the DISCLOSED value: the
-  # path MUST resolve and the disclosed value MUST be a member (so e.g. a query
-  # for `age_over_21 ∈ [true]` cannot be satisfied by a credential that discloses
-  # `false`). A claim with no `values` only requests disclosure — not a security
-  # constraint — so its absence is not enforced here.
-  defp check_claim(disclosed, %{path: path, values: values}) when is_list(values) and values != [] do
-    case resolve_path(disclosed, path) do
-      {:ok, value} -> if value in values, do: :ok, else: {:error, {:claim_value_mismatch, path}}
-      :error -> {:error, {:claim_value_mismatch, path}}
+  defp check_claims(disclosed, claims, claim_sets, format)
+       when is_list(claims) and claims != [] and is_list(claim_sets) and claim_sets != [] do
+    claims_by_id = Map.new(claims, &{Map.get(&1, :id), &1})
+
+    if Enum.any?(claim_sets, &claim_option_satisfied?(&1, claims_by_id, disclosed, format)) do
+      :ok
+    else
+      {:error, {:claim_set_unsatisfied, claim_sets}}
     end
   end
 
-  defp check_claim(_disclosed, _claim), do: :ok
+  defp check_claims(_disclosed, _claims, _claim_sets, _format), do: {:error, :invalid_claim_constraints}
 
-  # DCQL paths are arrays of string keys (object members / mdoc namespace+element).
-  # A non-string element (array index / wildcard) cannot be resolved against the
-  # disclosed map here; for a value-constrained claim that is fail-closed.
-  defp resolve_path(map, path) when is_list(path) do
-    Enum.reduce_while(path, {:ok, map}, fn
-      key, {:ok, m} when is_binary(key) and is_map(m) ->
-        case Map.fetch(m, key) do
-          {:ok, value} -> {:cont, {:ok, value}}
-          :error -> {:halt, :error}
-        end
-
-      _key, _acc ->
-        {:halt, :error}
+  defp claim_option_satisfied?(option, claims_by_id, disclosed, format) when is_list(option) and option != [] do
+    Enum.all?(option, fn id ->
+      case Map.fetch(claims_by_id, id) do
+        {:ok, claim} -> check_claim(disclosed, claim, format) == :ok
+        :error -> false
+      end
     end)
   end
+
+  defp claim_option_satisfied?(_option, _claims_by_id, _disclosed, _format), do: false
+
+  # Every requested claim must resolve in the disclosed credential. A `values`
+  # restriction additionally requires every selected value to be an exact member
+  # of the requested set; malformed or empty value sets fail closed.
+  defp check_claim(disclosed, %{path: path} = claim, format) when is_list(path) do
+    values = Map.get(claim, :values)
+
+    case resolve_path(disclosed, path, format) do
+      {:ok, _selected} when is_nil(values) ->
+        :ok
+
+      {:ok, selected} when is_list(values) and values != [] ->
+        if selected_values_allowed?(selected, values),
+          do: :ok,
+          else: {:error, {:claim_value_mismatch, path}}
+
+      {:ok, _selected} ->
+        {:error, {:claim_value_mismatch, path}}
+
+      :error when is_list(values) and values != [] ->
+        {:error, {:claim_value_mismatch, path}}
+
+      :error ->
+        {:error, {:claim_missing, path}}
+    end
+  end
+
+  defp check_claim(_disclosed, _claim, _format), do: {:error, :invalid_claim_constraints}
+
+  defp selected_values_allowed?(selected, allowed) do
+    Enum.all?(selected, fn selected_value -> Enum.any?(allowed, &(&1 === selected_value)) end)
+  end
+
+  defp resolve_path(map, [namespace, element], :mso_mdoc) when is_binary(namespace) and is_binary(element) do
+    resolve_json_path([map], [namespace, element])
+  end
+
+  defp resolve_path(_map, _path, :mso_mdoc), do: :error
+  defp resolve_path(map, path, :sd_jwt_vc) when is_list(path) and path != [], do: resolve_json_path([map], path)
+  defp resolve_path(_map, _path, _format), do: :error
+
+  defp resolve_json_path(selected, []), do: if(selected == [], do: :error, else: {:ok, selected})
+
+  defp resolve_json_path(selected, [component | rest]) do
+    with {:ok, next} <- select_path_component(selected, component),
+         false <- next == [] do
+      resolve_json_path(next, rest)
+    else
+      _error_or_empty -> :error
+    end
+  end
+
+  defp select_path_component(selected, key) when is_binary(key) do
+    if Enum.all?(selected, &(is_map(&1) and not is_struct(&1))) do
+      {:ok,
+       Enum.flat_map(selected, fn map ->
+         case Map.fetch(map, key) do
+           {:ok, value} -> [value]
+           :error -> []
+         end
+       end)}
+    else
+      :error
+    end
+  end
+
+  defp select_path_component(selected, nil) do
+    if Enum.all?(selected, &is_list/1), do: {:ok, Enum.flat_map(selected, & &1)}, else: :error
+  end
+
+  defp select_path_component(selected, index) when is_integer(index) and index >= 0 do
+    if Enum.all?(selected, &is_list/1) do
+      {:ok,
+       Enum.flat_map(selected, fn list ->
+         case Enum.fetch(list, index) do
+           {:ok, value} -> [value]
+           :error -> []
+         end
+       end)}
+    else
+      :error
+    end
+  end
+
+  defp select_path_component(_selected, _component), do: :error
 
   defp verify_mdoc_entry(_presentation, _issuer_source, _verify_opts, {:error, reason}), do: {:error, reason}
 
@@ -465,18 +588,37 @@ defmodule Attesto.VpToken do
     defp verify_mdoc_with_keys(presentation, mdoc_context, trusted, verify_opts) do
       trusted
       |> mdoc_key_candidates()
-      |> Enum.reduce_while({:error, :invalid_signature}, fn key, _acc ->
+      |> Enum.reduce_while(:no_candidate, fn key, candidate_error ->
         case Attesto.Mdoc.verify_device_response(presentation, mdoc_context, key, verify_opts) do
-          {:ok, [document]} -> {:halt, {:ok, safe_mdoc_result(document)}}
-          {:ok, _other} -> {:halt, {:error, :invalid_mdoc}}
-          {:error, reason} -> {:cont, {:error, reason}}
+          {:ok, [document]} ->
+            {:halt, {:ok, safe_mdoc_result(document)}}
+
+          {:ok, _other} ->
+            {:halt, {:error, :invalid_mdoc}}
+
+          {:error, reason} when reason in [:invalid_key, :invalid_signature] ->
+            {:cont, remember_mdoc_candidate_error(candidate_error, reason)}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
         end
       end)
+      |> finalize_mdoc_candidate_result()
     end
 
     defp mdoc_key_candidates(%{"keys" => keys}) when is_list(keys), do: keys
     defp mdoc_key_candidates(keys) when is_list(keys), do: keys
     defp mdoc_key_candidates(%{} = jwk), do: [jwk]
+    defp mdoc_key_candidates(pem) when is_binary(pem), do: [pem]
+    defp mdoc_key_candidates(nil), do: []
+    defp mdoc_key_candidates(_other), do: []
+
+    defp remember_mdoc_candidate_error(:no_candidate, reason), do: {:error, reason}
+    defp remember_mdoc_candidate_error({:error, :invalid_key}, :invalid_signature), do: {:error, :invalid_signature}
+    defp remember_mdoc_candidate_error(error, _reason), do: error
+
+    defp finalize_mdoc_candidate_result(:no_candidate), do: {:error, :invalid_signature}
+    defp finalize_mdoc_candidate_result(result), do: result
 
     defp resolve_mdoc_issuer_jwks(doc_type, resolver) do
       case resolver.(doc_type) do
@@ -608,6 +750,67 @@ defmodule Attesto.VpToken do
     end
   end
 
+  defp required_credential_sets!(opts, constraints) do
+    embedded = embedded_required_credential_sets!(constraints)
+
+    case Keyword.fetch(opts, :required_credential_sets) do
+      {:ok, required_sets} ->
+        required_sets = validate_required_credential_sets!(required_sets)
+
+        if embedded in [:absent, required_sets] do
+          required_sets
+        else
+          raise ArgumentError, "Attesto.VpToken :required_credential_sets conflicts with :query_constraints"
+        end
+
+      :error ->
+        embedded
+    end
+  end
+
+  defp embedded_required_credential_sets!(constraints) do
+    policies =
+      constraints
+      |> Map.values()
+      |> Enum.flat_map(fn
+        %{required_credential_sets: required_sets} -> [required_sets]
+        %{"required_credential_sets" => required_sets} -> [required_sets]
+        _constraint -> []
+      end)
+      |> Enum.uniq()
+
+    case policies do
+      [] -> :absent
+      [required_sets] -> validate_required_credential_sets!(required_sets)
+      _conflicting -> raise ArgumentError, "Attesto.VpToken constraints contain conflicting DCQL response policies"
+    end
+  end
+
+  defp validate_required_credential_sets!(required_sets) when is_list(required_sets) do
+    if Enum.all?(required_sets, &valid_required_credential_set?/1) do
+      required_sets
+    else
+      invalid_required_credential_sets!()
+    end
+  end
+
+  defp validate_required_credential_sets!(_required_sets), do: invalid_required_credential_sets!()
+
+  defp valid_required_credential_set?(options) when is_list(options) and options != [] do
+    Enum.all?(options, fn option ->
+      is_list(option) and option != [] and
+        Enum.all?(option, &(is_binary(&1) and &1 != "")) and Enum.uniq(option) == option
+    end)
+  end
+
+  defp valid_required_credential_set?(_options), do: false
+
+  defp invalid_required_credential_sets! do
+    raise ArgumentError,
+          "Attesto.VpToken :required_credential_sets must be a list of non-empty option lists " <>
+            "containing non-empty credential-ID lists"
+  end
+
   defp normalize_formats!(formats) do
     if Enum.all?(formats, &valid_format_entry?/1) do
       Map.new(formats, fn {id, format} -> {id, Map.fetch!(@known_formats, format)} end)
@@ -644,18 +847,27 @@ defmodule Attesto.VpToken do
     end
   end
 
-  defp permitted_query_ids!(opts, expected, constraints) do
-    requested = Enum.uniq(expected ++ Map.keys(constraints))
+  defp permitted_query_ids!(opts, expected, constraints, required_credential_sets) do
+    requested = Enum.uniq(expected ++ Map.keys(constraints) ++ credential_set_ids(required_credential_sets))
 
     case Keyword.fetch(opts, :permitted_query_ids) do
       {:ok, ids} ->
         validate_permitted_query_ids!(ids, requested)
 
       :error ->
-        if Keyword.has_key?(opts, :expected_query_ids) or Keyword.has_key?(opts, :query_constraints),
-          do: requested,
-          else: :unrestricted
+        if Keyword.has_key?(opts, :expected_query_ids) or Keyword.has_key?(opts, :query_constraints) or
+             Keyword.has_key?(opts, :required_credential_sets),
+           do: requested,
+           else: :unrestricted
     end
+  end
+
+  defp credential_set_ids(:absent), do: []
+
+  defp credential_set_ids(required_sets) do
+    required_sets
+    |> List.flatten()
+    |> Enum.uniq()
   end
 
   defp validate_permitted_query_ids!(ids, requested) do
@@ -667,10 +879,10 @@ defmodule Attesto.VpToken do
     end
   end
 
-  defp required_query_ids(opts, expected, constraints) do
+  defp required_query_ids(opts, expected, constraints, required_credential_sets) do
     if Keyword.has_key?(opts, :expected_query_ids) or Keyword.has_key?(opts, :permitted_query_ids),
       do: expected,
-      else: Map.keys(constraints)
+      else: if(required_credential_sets == :absent, do: Map.keys(constraints), else: [])
   end
 
   defp check_permitted_query_ids(_vp_token, :unrestricted), do: :ok
@@ -692,6 +904,51 @@ defmodule Attesto.VpToken do
       missing -> {:error, {:missing_credentials, missing}}
     end
   end
+
+  defp check_required_credential_sets(_vp_token, :absent), do: :ok
+
+  defp check_required_credential_sets(vp_token, required_sets) do
+    missing =
+      required_sets
+      |> Enum.with_index()
+      |> Enum.reject(fn {options, _index} ->
+        Enum.any?(options, fn option -> Enum.all?(option, &Map.has_key?(vp_token, &1)) end)
+      end)
+      |> Enum.map(&elem(&1, 1))
+
+    if missing == [], do: :ok, else: {:error, {:unsatisfied_credential_sets, missing}}
+  end
+
+  defp check_empty_response(vp_token, :absent) when map_size(vp_token) == 0, do: {:error, :invalid_vp_token}
+  defp check_empty_response(_vp_token, _required_credential_sets), do: :ok
+
+  defp check_presentation_counts(vp_token, constraints, legacy?) do
+    Enum.reduce_while(vp_token, :ok, fn {id, presentations}, :ok ->
+      case {presentation_count(presentations, legacy?), Map.get(constraints, id)} do
+        {count, constraint} when count > 1 and is_map(constraint) ->
+          presentation_count_reduction(id, multiple_presentations_allowed?(constraint))
+
+        _allowed ->
+          {:cont, :ok}
+      end
+    end)
+  end
+
+  defp presentation_count_reduction(_id, true), do: {:cont, :ok}
+
+  defp presentation_count_reduction(id, false), do: {:halt, {:error, {id, :multiple_presentations_not_allowed}}}
+
+  defp multiple_presentations_allowed?(constraint) do
+    case {Map.fetch(constraint, :multiple), Map.fetch(constraint, "multiple")} do
+      {{:ok, true}, :error} -> true
+      {:error, {:ok, true}} -> true
+      {{:ok, true}, {:ok, true}} -> true
+      _absent_or_invalid -> false
+    end
+  end
+
+  defp presentation_count(presentation, true) when is_binary(presentation), do: 1
+  defp presentation_count(presentations, _legacy?) when is_list(presentations), do: length(presentations)
 
   defp legacy_scalar_values!(opts) do
     case Keyword.get(opts, :legacy_scalar_values, false) do

@@ -253,7 +253,7 @@ if Code.ensure_loaded?(CBOR) do
     defp decode_device_namespaces(tagged) do
       with {:ok, bytes} <- embedded_bytes(tagged),
            {:ok, namespaces} <- decode_complete(bytes),
-           true <- is_map(namespaces) do
+           true <- plain_map?(namespaces) do
         {:ok, namespaces}
       else
         _other -> {:error, :invalid_mdoc}
@@ -643,6 +643,8 @@ if Code.ensure_loaded?(CBOR) do
 
     defp byte_string(%CBOR.Tag{tag: :bytes, value: value}) when is_binary(value), do: {:ok, value}
     defp byte_string(_other), do: {:error, :invalid_mdoc}
+
+    defp plain_map?(value), do: is_map(value) and not is_struct(value)
   end
 else
   defmodule Attesto.Mdoc do

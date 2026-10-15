@@ -121,14 +121,14 @@ defmodule Attesto.Federation.TrustChain do
   defp validate_authority_hint([_single]), do: :ok
 
   defp validate_authority_hint([leaf, immediate_superior | _rest]) do
-    case Map.fetch(leaf, "authority_hints") do
-      :error ->
-        :ok
-
-      {:ok, hints} ->
+    case Map.get(leaf, "authority_hints") do
+      [_ | _] = hints ->
         if Map.get(immediate_superior, "iss") in hints,
           do: :ok,
           else: {:error, :broken_trust_chain}
+
+      _missing_or_invalid ->
+        {:error, :broken_trust_chain}
     end
   end
 
@@ -167,27 +167,39 @@ defmodule Attesto.Federation.TrustChain do
 
   defp apply_superior_metadata(_metadata, _superior_metadata), do: {:error, :invalid_trust_chain}
 
-  defp enforce_constraints(claims, metadata) do
-    claims
+  defp enforce_constraints(all_claims, metadata) do
+    all_claims
     |> Enum.with_index()
     |> Enum.drop(1)
-    |> Enum.reduce_while({:ok, metadata}, fn {claims, index}, {:ok, current_metadata} ->
-      case apply_constraints(Map.get(claims, "constraints"), index - 1, current_metadata) do
+    |> Enum.reduce_while({:ok, metadata}, fn {statement_claims, index}, {:ok, current_metadata} ->
+      subordinate_entity_ids =
+        all_claims
+        |> Enum.slice(1, index)
+        |> Enum.map(&Map.fetch!(&1, "sub"))
+
+      case apply_constraints(
+             Map.get(statement_claims, "constraints"),
+             index - 1,
+             subordinate_entity_ids,
+             current_metadata
+           ) do
         {:ok, constrained} -> {:cont, {:ok, constrained}}
         {:error, :constraint_violation} = error -> {:halt, error}
       end
     end)
   end
 
-  defp apply_constraints(nil, _intermediates_below, metadata), do: {:ok, metadata}
+  defp apply_constraints(nil, _intermediates_below, _subordinate_entity_ids, metadata), do: {:ok, metadata}
 
-  defp apply_constraints(constraints, intermediates_below, metadata) when is_map(constraints) do
-    with :ok <- check_max_path_length(Map.get(constraints, "max_path_length"), intermediates_below) do
+  defp apply_constraints(constraints, intermediates_below, subordinate_entity_ids, metadata) when is_map(constraints) do
+    with :ok <- check_max_path_length(Map.get(constraints, "max_path_length"), intermediates_below),
+         :ok <- check_naming_constraints(Map.get(constraints, "naming_constraints"), subordinate_entity_ids) do
       filter_allowed_entity_types(Map.get(constraints, "allowed_entity_types"), metadata)
     end
   end
 
-  defp apply_constraints(_constraints, _intermediates_below, _metadata), do: {:error, :constraint_violation}
+  defp apply_constraints(_constraints, _intermediates_below, _subordinate_entity_ids, _metadata),
+    do: {:error, :constraint_violation}
 
   defp check_max_path_length(nil, _intermediates_below), do: :ok
 
@@ -195,6 +207,74 @@ defmodule Attesto.Federation.TrustChain do
        when is_integer(maximum) and maximum >= 0 and intermediates_below <= maximum, do: :ok
 
   defp check_max_path_length(_maximum, _intermediates_below), do: {:error, :constraint_violation}
+
+  defp check_naming_constraints(nil, _entity_ids), do: :ok
+
+  defp check_naming_constraints(constraints, entity_ids) when is_map(constraints) do
+    with true <- map_size(constraints) > 0,
+         true <- Enum.all?(Map.keys(constraints), &(&1 in ["permitted", "excluded"])),
+         {:ok, permitted} <- domain_constraints(constraints, "permitted"),
+         {:ok, excluded} <- domain_constraints(constraints, "excluded"),
+         true <- Enum.all?(entity_ids, &entity_identifier_permitted?(&1, permitted, excluded)) do
+      :ok
+    else
+      _other -> {:error, :constraint_violation}
+    end
+  end
+
+  defp check_naming_constraints(_constraints, _entity_ids), do: {:error, :constraint_violation}
+
+  defp domain_constraints(constraints, member) do
+    case Map.fetch(constraints, member) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, [_ | _] = values} ->
+        if Enum.all?(values, &valid_domain_constraint?/1),
+          do: {:ok, Enum.map(values, &String.downcase/1)},
+          else: {:error, :constraint_violation}
+
+      {:ok, _invalid} ->
+        {:error, :constraint_violation}
+    end
+  end
+
+  defp valid_domain_constraint?(constraint) when is_binary(constraint) and constraint != "" do
+    domain =
+      case constraint do
+        "." <> suffix -> suffix
+        exact -> exact
+      end
+
+    byte_size(domain) <= 253 and domain != "" and not String.ends_with?(domain, ".") and
+      domain
+      |> String.split(".")
+      |> Enum.all?(&valid_domain_label?/1)
+  end
+
+  defp valid_domain_constraint?(_constraint), do: false
+
+  defp valid_domain_label?(label) when byte_size(label) in 1..63 do
+    String.match?(label, ~r/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/)
+  end
+
+  defp valid_domain_label?(_label), do: false
+
+  defp entity_identifier_permitted?(entity_id, permitted, excluded) do
+    case URI.parse(entity_id) do
+      %URI{host: host} when is_binary(host) and host != "" ->
+        host = String.downcase(host)
+        permitted? = is_nil(permitted) or Enum.any?(permitted, &domain_constraint_matches?(host, &1))
+        excluded? = not is_nil(excluded) and Enum.any?(excluded, &domain_constraint_matches?(host, &1))
+        permitted? and not excluded?
+
+      _other ->
+        false
+    end
+  end
+
+  defp domain_constraint_matches?(host, "." <> domain), do: String.ends_with?(host, "." <> domain)
+  defp domain_constraint_matches?(host, domain), do: host == domain
 
   defp filter_allowed_entity_types(nil, metadata), do: {:ok, metadata}
 

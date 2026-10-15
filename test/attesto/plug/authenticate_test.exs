@@ -621,6 +621,22 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert JSON.decode!(conn.resp_body)["error"] == "invalid_dpop_proof"
     end
 
+    test "builds a bracketed htu for an IPv6 request host", %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: "https://[::1]/x", ath: ath)
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Map.put(:host, "::1")
+        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end))
+
+      refute conn.halted
+    end
+
     test "a nonce_check demanding a nonce is 401 with a DPoP-Nonce header", %{config: config} do
       jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       jkt = JOSE.JWK.thumbprint(jwk)

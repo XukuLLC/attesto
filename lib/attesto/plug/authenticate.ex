@@ -490,9 +490,12 @@ if Code.ensure_loaded?(Plug.Conn) do
 
         _ ->
           scheme = Atom.to_string(conn.scheme)
-          scheme <> "://" <> conn.host <> port_suffix(scheme, conn.port) <> conn.request_path
+          scheme <> "://" <> uri_host(conn.host) <> port_suffix(scheme, conn.port) <> conn.request_path
       end
     end
+
+    defp uri_host("[" <> _rest = host), do: host
+    defp uri_host(host) when is_binary(host), do: if(String.contains?(host, ":"), do: "[" <> host <> "]", else: host)
 
     defp port_suffix("https", 443), do: ""
     defp port_suffix("http", 80), do: ""

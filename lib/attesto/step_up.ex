@@ -28,9 +28,11 @@ defmodule Attesto.StepUp.Requirement do
   def parse(%__MODULE__{} = req), do: validate!(req)
 
   def parse(opts) when is_list(opts) do
+    opts = Keyword.validate!(opts, acr_values: [], max_age: nil)
+
     validate!(%__MODULE__{
-      acr_values: opts |> Keyword.get(:acr_values, []) |> List.wrap(),
-      max_age: Keyword.get(opts, :max_age)
+      acr_values: opts |> Keyword.fetch!(:acr_values) |> List.wrap(),
+      max_age: Keyword.fetch!(opts, :max_age)
     })
   end
 
@@ -146,7 +148,7 @@ defmodule Attesto.StepUp do
 
   defp auth_time_satisfied?(max_age, claims, now) do
     case Map.get(claims, "auth_time") do
-      auth_time when is_integer(auth_time) -> auth_time >= now - max_age
+      auth_time when is_integer(auth_time) -> auth_time <= now and auth_time >= now - max_age
       _ -> false
     end
   end

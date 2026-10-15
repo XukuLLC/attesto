@@ -29,15 +29,19 @@ defmodule Attesto.SdJwtTest do
     Enum.join([jwt | kept] ++ tail, "~")
   end
 
-  defp sd_hash(issuance, indexes) do
+  defp sd_hash(issuance, indexes, hash_alg \\ :sha256) do
     {jwt, disclosures} = parts(issuance)
     kept = indexes |> Enum.map(&Enum.at(disclosures, &1))
     to_hash = Enum.join([jwt | kept] ++ [""], "~")
-    b64(:crypto.hash(:sha256, to_hash))
+    b64(:crypto.hash(hash_alg, to_hash))
   end
 
-  defp kb_jwt(holder_pem, claims) do
-    Attesto.JWS.sign_compact(holder_pem, %{"alg" => "ES256", "typ" => "kb+jwt"}, claims)
+  defp kb_jwt(holder_pem, claims, alg \\ "ES256") do
+    Attesto.JWS.sign_compact(holder_pem, %{"alg" => alg, "typ" => "kb+jwt"}, claims)
+  end
+
+  defp signed_issuance(pem, payload) do
+    Attesto.JWS.sign_compact(pem, %{"alg" => "ES256"}, payload) <> "~"
   end
 
   describe "issue/2 + verify/3 round trip" do
@@ -131,6 +135,76 @@ defmodule Attesto.SdJwtTest do
       assert {:error, :duplicate_digest} = SdJwt.verify(doubled, jwk)
     end
 
+    test "duplicate digest references are rejected even when their disclosure is omitted" do
+      {pem, jwk} = keypair()
+      digest = b64(:crypto.strong_rand_bytes(32))
+
+      payloads = [
+        %{"_sd_alg" => "sha-256", "_sd" => [digest, digest]},
+        %{"_sd_alg" => "sha-256", "items" => [%{"..." => digest}, %{"..." => digest}]},
+        %{"_sd_alg" => "sha-256", "_sd" => [digest], "items" => [%{"..." => digest}]}
+      ]
+
+      for payload <- payloads do
+        assert {:error, :duplicate_digest} = SdJwt.verify(signed_issuance(pem, payload), jwk)
+      end
+    end
+
+    test "_sd_alg is reserved for the top-level issuer payload" do
+      {pem, jwk} = keypair()
+
+      for payload <- [
+            %{"_sd_alg" => "sha-256", "nested" => %{"_sd_alg" => "sha-512"}},
+            %{"_sd_alg" => "sha-256", "items" => [%{"_sd_alg" => "sha-384"}]}
+          ] do
+        assert {:error, :reserved_claim_name} = SdJwt.verify(signed_issuance(pem, payload), jwk)
+      end
+
+      disclosure = SdJwt.object_disclosure("salt", "_sd_alg", "sha-512")
+
+      presentation =
+        signed_issuance(pem, %{
+          "_sd_alg" => "sha-256",
+          "_sd" => [SdJwt.digest(disclosure)]
+        })
+        |> String.trim_trailing("~")
+        |> Kernel.<>("~" <> disclosure <> "~")
+
+      assert {:error, :reserved_claim_name} = SdJwt.verify(presentation, jwk)
+
+      for name <- ["_sd_alg", :_sd_alg] do
+        assert_raise ArgumentError, ~r/reserved claim/, fn ->
+          SdJwt.issue(%{name => "sha-512"}, pem: pem, disclosable: [name])
+        end
+      end
+
+      for claims <- [
+            %{"nested" => %{"_sd_alg" => "sha-512"}},
+            %{"items" => [%{_sd_alg: "sha-384"}]}
+          ] do
+        assert_raise ArgumentError, ~r/only valid at the top level/, fn ->
+          SdJwt.issue(claims, pem: pem)
+        end
+      end
+    end
+
+    test "issue canonicalizes atom aliases for top-level SD machinery" do
+      {pem, _jwk} = keypair()
+
+      issuance =
+        SdJwt.issue(%{"sub" => "alice", _sd: ["attacker"], _sd_alg: "sha-512"}, pem: pem)
+
+      [jwt | _] = String.split(issuance, "~")
+      [_header, encoded_payload, _signature] = String.split(jwt, ".")
+      {:ok, payload_json} = Base.url_decode64(encoded_payload, padding: false)
+
+      assert length(Regex.scan(~r/"_sd"/, payload_json)) == 1
+      assert length(Regex.scan(~r/"_sd_alg"/, payload_json)) == 1
+
+      assert {:ok, %{"_sd" => [], "_sd_alg" => "sha-256", "sub" => "alice"}} =
+               JSON.decode(payload_json)
+    end
+
     test "a malformed wire form is rejected" do
       {_pem, jwk} = keypair()
       assert {:error, :malformed} = SdJwt.verify("not-an-sd-jwt", jwk)
@@ -192,6 +266,46 @@ defmodule Attesto.SdJwtTest do
       assert :ok =
                SdJwt.verify_key_binding(verified, ctx.holder_jwk,
                  nonce: "n-123",
+                 audience: "https://verifier.example",
+                 now: now
+               )
+    end
+
+    test "uses the signed _sd_alg for a non-SHA-256 key-binding hash", ctx do
+      now = System.system_time(:second)
+      {issuer_pem, issuer_jwk} = keypair()
+
+      issuance =
+        SdJwt.issue(
+          %{"iss" => "iss", "given_name" => "Alice", "cnf" => %{"jwk" => ctx.holder_jwk}},
+          pem: issuer_pem,
+          disclosable: ["given_name"],
+          sd_alg: "sha-384"
+        )
+
+      claims = %{
+        "nonce" => "n-384",
+        "aud" => "https://verifier.example",
+        "iat" => now,
+        "sd_hash" => sd_hash(issuance, [0], :sha384)
+      }
+
+      kb = kb_jwt(ctx.holder_pem, claims)
+      {:ok, verified} = SdJwt.verify(present(issuance, [0], kb), issuer_jwk)
+
+      assert :ok =
+               SdJwt.verify_key_binding(verified, ctx.holder_jwk,
+                 nonce: "n-384",
+                 audience: "https://verifier.example",
+                 now: now
+               )
+
+      wrong_kb = kb_jwt(ctx.holder_pem, %{claims | "sd_hash" => sd_hash(issuance, [0], :sha256)})
+      {:ok, wrong_verified} = SdJwt.verify(present(issuance, [0], wrong_kb), issuer_jwk)
+
+      assert {:error, :invalid_key_binding} =
+               SdJwt.verify_key_binding(wrong_verified, ctx.holder_jwk,
+                 nonce: "n-384",
                  audience: "https://verifier.example",
                  now: now
                )
@@ -297,6 +411,66 @@ defmodule Attesto.SdJwtTest do
       assert {:error, :invalid_key_binding} =
                SdJwt.verify_key_binding(verified, ctx.holder_jwk,
                  nonce: "n-123",
+                 audience: "https://verifier.example",
+                 now: now
+               )
+    end
+
+    test "rejects holder JWKs with private material or contradictory signing metadata", ctx do
+      now = System.system_time(:second)
+
+      kb =
+        kb_jwt(ctx.holder_pem, %{
+          "nonce" => "n-123",
+          "aud" => "https://verifier.example",
+          "iat" => now,
+          "sd_hash" => sd_hash(ctx.issuance, [0])
+        })
+
+      {:ok, verified} = SdJwt.verify(present(ctx.issuance, [0], kb), ctx.issuer_jwk)
+      holder_key = JOSE.JWK.from_pem(ctx.holder_pem)
+      {_metadata, private_jwk} = JOSE.JWK.to_map(holder_key)
+
+      rejected_keys = [
+        private_jwk,
+        Map.put(ctx.holder_jwk, "d", String.duplicate("A", 100_000)),
+        Map.put(ctx.holder_jwk, "use", "enc"),
+        Map.put(ctx.holder_jwk, "key_ops", ["sign"]),
+        Map.put(ctx.holder_jwk, "alg", "ES384"),
+        %{"kty" => "oct", "k" => b64(:crypto.strong_rand_bytes(32))}
+      ]
+
+      for holder_jwk <- rejected_keys do
+        assert {:error, :invalid_key_binding} =
+                 SdJwt.verify_key_binding(verified, holder_jwk,
+                   nonce: "n-123",
+                   audience: "https://verifier.example",
+                   now: now
+                 )
+      end
+    end
+
+    test "rejects a key binding made with a sub-2048-bit RSA holder key", ctx do
+      {weak_pem, weak_jwk} = keypair({:rsa, 1024})
+      now = System.system_time(:second)
+
+      kb =
+        kb_jwt(
+          weak_pem,
+          %{
+            "nonce" => "n-rsa",
+            "aud" => "https://verifier.example",
+            "iat" => now,
+            "sd_hash" => sd_hash(ctx.issuance, [0])
+          },
+          "RS256"
+        )
+
+      {:ok, verified} = SdJwt.verify(present(ctx.issuance, [0], kb), ctx.issuer_jwk)
+
+      assert {:error, :invalid_key_binding} =
+               SdJwt.verify_key_binding(verified, weak_jwk,
+                 nonce: "n-rsa",
                  audience: "https://verifier.example",
                  now: now
                )

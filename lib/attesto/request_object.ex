@@ -133,6 +133,8 @@ defmodule Attesto.RequestObject do
          :ok <- check_claim_issuer(claims, opts),
          :ok <- check_profile_issuer(claims, opts),
          :ok <- check_audience(claims, Keyword.get(opts, :audience)),
+         :ok <- check_resource_claim(claims),
+         :ok <- check_authorization_details_claim(claims),
          :ok <- check_expiry(claims, opts),
          :ok <- check_iat(claims, opts),
          :ok <- check_nbf(claims, opts),
@@ -282,6 +284,46 @@ defmodule Attesto.RequestObject do
   end
 
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
+
+  defp check_resource_claim(%{"resource" => resource}) when is_binary(resource), do: :ok
+
+  defp check_resource_claim(%{"resource" => [_ | _] = resources}) do
+    if Enum.all?(resources, &is_binary/1), do: :ok, else: {:error, :invalid_request_object}
+  end
+
+  defp check_resource_claim(%{"resource" => _invalid}), do: {:error, :invalid_request_object}
+  defp check_resource_claim(_claims), do: :ok
+
+  # RFC 9396 section 2 registers `authorization_details` as a JSON array of
+  # objects, each carrying a required string `type`. Keep that native JSON form
+  # through claim-to-parameter conversion so callers can validate and act on the
+  # signed value. A malformed signed claim is an invalid request object; it must
+  # not be dropped and mistaken for an absent authorization request.
+  defp check_authorization_details_claim(%{"authorization_details" => details}) do
+    if valid_authorization_details?(details), do: :ok, else: {:error, :invalid_request_object}
+  end
+
+  defp check_authorization_details_claim(_claims), do: :ok
+
+  defp valid_authorization_details?([_ | _] = details), do: Enum.all?(details, &valid_authorization_detail?/1)
+
+  defp valid_authorization_details?(_details), do: false
+
+  defp valid_authorization_detail?(%{"type" => type} = detail)
+       when is_binary(type) and type != "" and not is_struct(detail) do
+    Enum.all?(detail, fn {key, value} -> is_binary(key) and json_value?(value) end)
+  end
+
+  defp valid_authorization_detail?(_detail), do: false
+
+  defp json_value?(nil), do: true
+  defp json_value?(value) when is_binary(value) or is_boolean(value) or is_number(value), do: true
+  defp json_value?(values) when is_list(values), do: Enum.all?(values, &json_value?/1)
+
+  defp json_value?(value) when is_map(value) and not is_struct(value),
+    do: Enum.all?(value, fn {key, nested} -> is_binary(key) and json_value?(nested) end)
+
+  defp json_value?(_value), do: false
 
   defp check_expiry(claims, opts) do
     case NumericDate.fetch(claims, "exp", required: false, non_negative: true) do
@@ -484,8 +526,18 @@ defmodule Attesto.RequestObject do
       {key, value}, acc when is_boolean(value) or is_integer(value) ->
         Map.put(acc, key, to_string(value))
 
-      # A list is space-joined ONLY when every element is a string (an array
-      # `resource`/`scope` in a signed request object). A list carrying a
+      {"resource", value}, acc when is_list(value) ->
+        Map.put(acc, "resource", value)
+
+      # RFC 9396 registers this JWT claim as an array of JSON objects. It was
+      # structurally validated above; preserve it instead of sending it through
+      # the generic array coercion, which joins string arrays and drops object
+      # arrays.
+      {"authorization_details", value}, acc when is_list(value) ->
+        Map.put(acc, "authorization_details", value)
+
+      # A list is space-joined ONLY when every element is a string (for example,
+      # an array `scope` in a signed request object). A list carrying a
       # non-string element (`"scope": [{"x": 1}]`) is dropped, not joined:
       # `Enum.join/2` raises `Protocol.UndefinedError` on a map/list element, and
       # this reduce runs on a signature-VALID request object, so an unguarded

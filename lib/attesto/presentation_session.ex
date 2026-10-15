@@ -21,6 +21,15 @@ defmodule Attesto.PresentationSession do
   define their own serializable trust-reference convention outside this core
   primitive).
 
+  DCQL alternatives can be stored in `:required_credential_sets` as an
+  AND-of-ORs list. Each outer element is a required Credential Set Query and
+  contains its complete credential-ID options. For example,
+  `[[["pid"], ["mdl"]], [["address"]]]` requires `pid` or `mdl`, plus
+  `address`. An explicit empty list records an all-optional DCQL query and permits
+  an empty VP Token. `Attesto.VpToken.constraints_from_dcql/1` also embeds this
+  policy in `:query_constraints`, so existing integrations using that helper gain
+  the same response validation without a second stored field.
+
   Store callbacks are checked against `Attesto.PresentationSessionStore`'s
   documented return contracts. An unexpected return or malformed stored entry
   raises a constant `RuntimeError`; callback values are never copied into the
@@ -42,7 +51,8 @@ defmodule Attesto.PresentationSession do
           required(:issuer_trust) => issuer_trust(),
           optional(:request_object) => String.t(),
           optional(:response_uri) => String.t(),
-          optional(:query_constraints) => map()
+          optional(:query_constraints) => map(),
+          optional(:required_credential_sets) => [[[String.t()]]]
         }
 
   @type correlation :: {:state, String.t()} | {:id, String.t()}
@@ -96,8 +106,9 @@ defmodule Attesto.PresentationSession do
   Invalid presentations return `{:invalid_presentation, reason}` and do not
   complete the session. When concurrent valid responses race, exactly one can
   complete it; all losing calls return `:already_completed`.
-  The session's stored expected IDs and optional `:permitted_query_ids` bind
-  responses to the request. Verification options cannot widen that stored set.
+  The session's stored expected IDs, optional `:permitted_query_ids`, and DCQL
+  `:required_credential_sets` bind responses to the request. Verification options
+  cannot widen that stored policy.
   Query values must be non-empty arrays. `:legacy_scalar_values` is forwarded
   to `Attesto.VpToken.verify/2` only when explicitly supplied by the caller.
   `:accepted_algs` and `:enforce_fapi_alg_policy` apply to SD-JWT issuer
@@ -242,11 +253,12 @@ defmodule Attesto.PresentationSession do
     request_object = Map.get(attrs, :request_object)
     response_uri = Map.get(attrs, :response_uri)
     query_constraints = Map.get(attrs, :query_constraints)
+    required_credential_sets = Map.get(attrs, :required_credential_sets)
 
     if non_empty_string?(audience) and valid_query_ids?(expected_query_ids) and
          valid_issuer_trust?(issuer_trust) and valid_request_object?(request_object) and
          valid_response_uri?(response_uri) and valid_query_constraints?(query_constraints) and
-         valid_permitted_query_ids?(attrs) do
+         valid_permitted_query_ids?(attrs) and valid_required_credential_sets?(required_credential_sets, attrs) do
       {:ok,
        %{
          audience: audience,
@@ -256,7 +268,8 @@ defmodule Attesto.PresentationSession do
        |> MapParams.put_optional(:request_object, request_object)
        |> MapParams.put_optional(:response_uri, response_uri)
        |> MapParams.put_optional(:permitted_query_ids, Map.get(attrs, :permitted_query_ids))
-       |> MapParams.put_optional(:query_constraints, query_constraints)}
+       |> MapParams.put_optional(:query_constraints, query_constraints)
+       |> MapParams.put_optional(:required_credential_sets, required_credential_sets)}
     else
       {:error, :invalid_attrs}
     end
@@ -267,6 +280,34 @@ defmodule Attesto.PresentationSession do
   # type/claim-value requirements.
   defp valid_query_constraints?(nil), do: true
   defp valid_query_constraints?(value), do: is_map(value)
+
+  defp valid_required_credential_sets?(nil, _data), do: true
+
+  defp valid_required_credential_sets?(required_sets, data) when is_list(required_sets) do
+    allowed_ids = required_credential_set_ids(data)
+    Enum.all?(required_sets, &valid_required_credential_set?(&1, allowed_ids))
+  end
+
+  defp valid_required_credential_sets?(_required_sets, _data), do: false
+
+  defp required_credential_set_ids(data) do
+    case Map.get(data, :permitted_query_ids) do
+      ids when is_list(ids) -> ids
+      _other -> Map.get(data, :expected_query_ids, []) ++ Map.keys(Map.get(data, :query_constraints) || %{})
+    end
+  end
+
+  defp valid_required_credential_set?(options, allowed_ids) when is_list(options) and options != [] do
+    Enum.all?(options, &valid_required_credential_option?(&1, allowed_ids))
+  end
+
+  defp valid_required_credential_set?(_options, _allowed_ids), do: false
+
+  defp valid_required_credential_option?(option, allowed_ids) when is_list(option) and option != [] do
+    Enum.uniq(option) == option and Enum.all?(option, &(non_empty_string?(&1) and &1 in allowed_ids))
+  end
+
+  defp valid_required_credential_option?(_option, _allowed_ids), do: false
 
   defp valid_request_object?(nil), do: true
   defp valid_request_object?(value), do: non_empty_string?(value)
@@ -370,6 +411,7 @@ defmodule Attesto.PresentationSession do
     valid_optional_field?(data, :request_object, &valid_request_object?/1) and
       valid_optional_field?(data, :response_uri, &valid_response_uri?/1) and
       valid_optional_field?(data, :query_constraints, &valid_query_constraints?/1) and
+      valid_optional_field?(data, :required_credential_sets, &valid_required_credential_sets?(&1, data)) and
       valid_permitted_query_ids?(data) and
       valid_optional_field?(data, :response_encryption_jwk, &is_map/1)
   end
@@ -393,6 +435,7 @@ defmodule Attesto.PresentationSession do
       |> Keyword.merge(response_encryption_jwk_opts(data))
       |> Keyword.merge(query_constraints_opts(data))
       |> Keyword.merge(permitted_query_ids_opts(data))
+      |> Keyword.merge(required_credential_sets_opts(data))
       |> Keyword.merge(
         Keyword.take(opts, [:now, :formats, :legacy_scalar_values, :accepted_algs, :enforce_fapi_alg_policy])
       )
@@ -416,6 +459,11 @@ defmodule Attesto.PresentationSession do
 
   defp permitted_query_ids_opts(%{permitted_query_ids: ids}), do: [permitted_query_ids: ids]
   defp permitted_query_ids_opts(_data), do: []
+
+  defp required_credential_sets_opts(%{required_credential_sets: required_sets}),
+    do: [required_credential_sets: required_sets]
+
+  defp required_credential_sets_opts(_data), do: []
 
   # For an mdoc presentation over `direct_post.jwt`, the OpenID4VPHandover binds
   # to the verifier's response-encryption public key thumbprint; pass the key so

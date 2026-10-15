@@ -403,6 +403,7 @@ defmodule Attesto.VpTokenTest do
 
       Map.merge(
         %{
+          issuer_pem: issuer_pem,
           issuer_jwk: issuer_jwk,
           device_response: device_response,
           audience: ctx.client_id,
@@ -412,6 +413,31 @@ defmodule Attesto.VpTokenTest do
         },
         Map.new(opts)
       )
+    end
+
+    defp tamper_mdoc_issuer_item(device_response) do
+      {:ok, decoded, ""} = device_response |> Base.url_decode64!(padding: false) |> CBOR.decode()
+      [document] = decoded["documents"]
+      issuer_signed = document["issuerSigned"]
+      [first_item | remaining_items] = issuer_signed["nameSpaces"][@mdl_namespace]
+      %CBOR.Tag{tag: 24, value: encoded_item_value} = first_item
+      %CBOR.Tag{tag: :bytes, value: encoded_item} = encoded_item_value
+      {:ok, item, ""} = CBOR.decode(encoded_item)
+
+      changed_item =
+        %CBOR.Tag{
+          tag: 24,
+          value:
+            mdoc_bytes(CBOR.encode(Map.update!(item, "elementValue", fn value -> "tampered:" <> to_string(value) end)))
+        }
+
+      tampered_issuer_signed =
+        put_in(issuer_signed, ["nameSpaces", @mdl_namespace], [changed_item | remaining_items])
+
+      decoded
+      |> put_in(["documents"], [Map.put(document, "issuerSigned", tampered_issuer_signed)])
+      |> CBOR.encode()
+      |> Base.url_encode64(padding: false)
     end
 
     test "verifies a DCQL entry declared as mso_mdoc via :formats" do
@@ -522,6 +548,63 @@ defmodule Attesto.VpTokenTest do
 
       assert result.doc_type == @doc_type
       assert_receive {:resolved_doc_type, @doc_type}
+    end
+
+    test "accepts a PEM returned by the mdoc issuer resolver" do
+      mctx = mdoc_valid_context()
+
+      assert {:ok, %{"mdl" => [result]}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 response_uri: mctx.response_uri,
+                 resolve_issuer: fn @doc_type -> {:ok, mctx.issuer_pem} end,
+                 now: mctx.now
+               )
+
+      assert result.doc_type == @doc_type
+    end
+
+    test "a nil mdoc resolver result fails without raising" do
+      mctx = mdoc_valid_context()
+
+      assert {:error, {"mdl", :invalid_signature}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 response_uri: mctx.response_uri,
+                 resolve_issuer: fn @doc_type -> {:ok, nil} end,
+                 now: mctx.now
+               )
+    end
+
+    test "preserves an expiry error after one issuer key verifies" do
+      mctx = mdoc_valid_context()
+      {_wrong_pem, wrong_jwk} = mdoc_keypair()
+
+      assert {:error, {"mdl", :expired}} =
+               VpToken.verify(%{"mdl" => [mctx.device_response]},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: [mctx.issuer_jwk, wrong_jwk],
+                 response_uri: mctx.response_uri,
+                 now: mctx.now + 7200
+               )
+    end
+
+    test "preserves a digest mismatch after one issuer key verifies" do
+      mctx = mdoc_valid_context()
+      {_wrong_pem, wrong_jwk} = mdoc_keypair()
+      tampered = tamper_mdoc_issuer_item(mctx.device_response)
+
+      assert {:error, {"mdl", :digest_mismatch}} =
+               VpToken.verify(%{"mdl" => [tampered]},
+                 nonce: mctx.nonce,
+                 audience: mctx.audience,
+                 issuer_jwks: [mctx.issuer_jwk, wrong_jwk],
+                 response_uri: mctx.response_uri,
+                 now: mctx.now
+               )
     end
 
     test "programmer errors: :formats rejects unknown format strings" do
@@ -637,6 +720,217 @@ defmodule Attesto.VpTokenTest do
       assert {:ok, %{"id" => _}} =
                verify_with_constraints(ctx, %{"id" => %{format: "dc+sd-jwt", vct_values: ["identity"]}})
     end
+
+    test "rejects an empty response when a required credential-set alternative exists" do
+      ctx = valid_context()
+
+      constraints =
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{id: "pid", format: "dc+sd-jwt"},
+            %{id: "mdl", format: "dc+sd-jwt"}
+          ],
+          credential_sets: [%{options: [["pid"], ["mdl"]]}]
+        })
+
+      assert {:error, {:unsatisfied_credential_sets, [0]}} =
+               VpToken.verify(%{},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 expected_query_ids: [],
+                 query_constraints: constraints,
+                 now: ctx.now
+               )
+    end
+
+    test "accepts an empty response only for an all-optional credential-set query" do
+      ctx = valid_context()
+
+      constraints =
+        VpToken.constraints_from_dcql(%{
+          credentials: [%{id: "nice_to_have", format: "dc+sd-jwt"}],
+          credential_sets: [%{required: false, options: [["nice_to_have"]]}]
+        })
+
+      assert {:ok, %{}} =
+               VpToken.verify(%{},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 expected_query_ids: [],
+                 query_constraints: constraints,
+                 now: ctx.now
+               )
+
+      assert {:error, :invalid_vp_token} =
+               VpToken.verify(%{},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 expected_query_ids: [],
+                 permitted_query_ids: ["nice_to_have"],
+                 now: ctx.now
+               )
+    end
+
+    test "requires every ID in a selected multi-credential option" do
+      ctx = valid_context()
+
+      constraints =
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{id: "part_a", format: "dc+sd-jwt"},
+            %{id: "part_b", format: "dc+sd-jwt"},
+            %{id: "fallback", format: "dc+sd-jwt"}
+          ],
+          credential_sets: [%{options: [["part_a", "part_b"], ["fallback"]]}]
+        })
+
+      assert {:error, {:unsatisfied_credential_sets, [0]}} =
+               VpToken.verify(%{"part_a" => [ctx.presentation]},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 expected_query_ids: [],
+                 query_constraints: constraints,
+                 now: ctx.now
+               )
+    end
+
+    test "requires every required credential set independently" do
+      ctx = valid_context()
+
+      constraints =
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{id: "identity", format: "dc+sd-jwt"},
+            %{id: "address", format: "dc+sd-jwt"}
+          ],
+          credential_sets: [
+            %{options: [["identity"]]},
+            %{options: [["address"]]}
+          ]
+        })
+
+      opts = [
+        nonce: ctx.nonce,
+        audience: ctx.audience,
+        issuer_jwks: ctx.issuer_jwk,
+        expected_query_ids: [],
+        query_constraints: constraints,
+        now: ctx.now
+      ]
+
+      assert {:error, {:unsatisfied_credential_sets, [1]}} =
+               VpToken.verify(%{"identity" => [ctx.presentation]}, opts)
+
+      assert {:ok, %{"identity" => [_], "address" => [_]}} =
+               VpToken.verify(
+                 %{"identity" => [ctx.presentation], "address" => [ctx.presentation]},
+                 opts
+               )
+    end
+
+    test "requires requested claims and accepts one complete claim-set option" do
+      ctx = valid_context()
+
+      all_claims =
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{
+              id: "id",
+              format: "dc+sd-jwt",
+              claims: [%{path: ["given_name"]}, %{path: ["age_over_18"]}]
+            }
+          ]
+        })
+
+      assert {:error, {"id", {:claim_missing, ["age_over_18"]}}} =
+               verify_with_constraints(ctx, all_claims)
+
+      alternatives =
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{
+              id: "id",
+              format: "dc+sd-jwt",
+              claims: [
+                %{id: "age", path: ["age_over_18"]},
+                %{id: "name", path: ["given_name"]}
+              ],
+              claim_sets: [["age"], ["name"]]
+            }
+          ]
+        })
+
+      assert {:ok, %{"id" => [_]}} = verify_with_constraints(ctx, alternatives)
+    end
+
+    test "empty type and claim-value constraints fail closed" do
+      ctx = valid_context()
+
+      assert {:error, {"id", :vct_mismatch}} =
+               verify_with_constraints(ctx, %{"id" => %{vct_values: []}})
+
+      assert {:error, {"id", {:claim_value_mismatch, ["given_name"]}}} =
+               verify_with_constraints(ctx, %{
+                 "id" => %{claims: [%{path: ["given_name"], values: []}]}
+               })
+
+      assert_raise ArgumentError, fn ->
+        VpToken.constraints_from_dcql(%{
+          credentials: [
+            %{id: "id", format: "dc+sd-jwt", meta: %{vct_values: []}}
+          ]
+        })
+      end
+    end
+
+    test "enforces the DCQL multiple response cardinality" do
+      ctx = valid_context()
+
+      single =
+        VpToken.constraints_from_dcql(%{
+          credentials: [%{id: "id", format: "dc+sd-jwt"}]
+        })
+
+      assert {:error, {"id", :multiple_presentations_not_allowed}} =
+               VpToken.verify(%{"id" => [ctx.presentation, ctx.presentation]},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now,
+                 query_constraints: single
+               )
+
+      multiple =
+        VpToken.constraints_from_dcql(%{
+          credentials: [%{id: "id", format: "dc+sd-jwt", multiple: true}]
+        })
+
+      assert {:ok, %{"id" => [_, _]}} =
+               VpToken.verify(%{"id" => [ctx.presentation, ctx.presentation]},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now,
+                 query_constraints: multiple
+               )
+    end
+
+    test "a hand-built constraint defaults omitted :multiple to false" do
+      ctx = valid_context()
+
+      assert {:error, {"id", :multiple_presentations_not_allowed}} =
+               VpToken.verify(%{"id" => [ctx.presentation, ctx.presentation]},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now,
+                 query_constraints: %{"id" => %{}}
+               )
+    end
   end
 
   describe "constraints_from_dcql/1" do
@@ -669,9 +963,9 @@ defmodule Attesto.VpTokenTest do
       assert constraints["mdl"].doctype_values == ["org.iso.18013.5.1.mDL"]
     end
 
-    test "returns an empty map for a malformed or empty query" do
-      assert VpToken.constraints_from_dcql(%{}) == %{}
-      assert VpToken.constraints_from_dcql(%{"credentials" => "nope"}) == %{}
+    test "rejects a malformed or empty query instead of deriving no constraints" do
+      assert_raise ArgumentError, fn -> VpToken.constraints_from_dcql(%{}) end
+      assert_raise ArgumentError, fn -> VpToken.constraints_from_dcql(%{"credentials" => "nope"}) end
     end
 
     test "derives constraints from an atom-keyed query identically to string keys" do

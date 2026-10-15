@@ -329,11 +329,12 @@ defmodule Attesto.JWS do
     # failure, matching the verifier contract. It can never verify against a
     # permitted candidate key and algorithm.
     opts = Keyword.put(opts, :allow_empty_signature, true)
+    decode_opts = [canonical: Keyword.get(opts, :canonical, true)]
 
     with {:ok, compact} <- decode_compact(jwt, opts),
-         {:ok, protected} <- decode64(compact.protected_segment),
+         {:ok, protected} <- decode64(compact.protected_segment, decode_opts),
          {:ok, _header} <- decode_json_map(protected),
-         {:ok, payload} <- decode64(compact.payload_segment),
+         {:ok, payload} <- decode64(compact.payload_segment, decode_opts),
          {:ok, _claims} <- decode_json_map(payload) do
       :ok
     end
@@ -403,8 +404,10 @@ defmodule Attesto.JWS do
   # RFC 7518 §3.5 fixes both the salt length and MGF1 hash for each PS* name.
   # Recheck successful PSS signatures with those explicit OTP parameters.
   defp signature_parameters_valid?(jwt, {_kid, alg, jwk}, opts) when alg in ["PS256", "PS384", "PS512"] do
+    decode_opts = [canonical: Keyword.get(opts, :canonical, true)]
+
     with {:ok, compact} <- decode_compact(jwt, opts),
-         {:ok, signature} <- decode64(compact.signature_segment) do
+         {:ok, signature} <- decode64(compact.signature_segment, decode_opts) do
       signing_input = compact.protected_segment <> "." <> compact.payload_segment
       public_key = jwk |> JOSE.JWK.to_public() |> JOSE.JWK.to_key() |> elem(1)
       :public_key.verify(signing_input, hash_alg(alg), signature, public_key, pss_opts(alg))

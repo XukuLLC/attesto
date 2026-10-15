@@ -25,7 +25,8 @@ defmodule Attesto.WalletAttestation do
     * `exp` - REQUIRED. Expiration time; rejected once passed.
     * `cnf` - REQUIRED. A `{"jwk" => <public JWK>}` (RFC 7800) confirmation
       key - the Client Instance Key used to sign the PoP JWT.
-    * `iat` - OPTIONAL. When present, an integer NumericDate.
+    * `iat` - OPTIONAL. When present, a non-negative NumericDate no more than
+      60 seconds in the future.
 
   The draft version implemented here carries **no `aud`** on the Client
   Attestation JWT itself (earlier drafts did; it was removed) - the
@@ -143,10 +144,11 @@ defmodule Attesto.WalletAttestation do
       Default #{@default_pop_max_age_seconds}.
     * `:accepted_algs` - JWS algorithms accepted for both JWTs' signatures.
       Defaults to `Attesto.SigningAlg.fapi_algs/0`.
-    * `:enforce_fapi_alg_policy` - additionally enforce the FAPI RSA
-      modulus / Edwards curve restrictions on the Client Attestation
-      signer's key. Defaults to `true` for every algorithm allowlist.
-      Explicit `false` relaxes these gates; an empty list always denies all.
+    * `:enforce_fapi_alg_policy` - additionally enforce the FAPI algorithm,
+      RSA modulus, and Edwards curve restrictions on both the Client
+      Attestation signer's key and the Client Instance key in `cnf`. Defaults
+      to `true` for every algorithm allowlist. Explicit `false` relaxes these
+      gates; an empty list always denies all.
     * `:replay_check` - a 2-arity function `(replay_key, ttl_seconds) -> :ok
       | {:error, :replay}`, called after every other PoP check passes.
       `replay_key` is a fixed-length digest namespacing the `jti` by the
@@ -194,9 +196,12 @@ defmodule Attesto.WalletAttestation do
         _invalid -> raise ArgumentError, ":max_age_seconds must be a positive integer"
       end
 
+    now = NumericDate.non_negative_now!(opts)
+
     opts
     |> Keyword.put(:enforce_fapi_alg_policy, enforce_fapi_policy)
     |> Keyword.put(:max_age_seconds, max_age)
+    |> Keyword.put(:now, now)
   end
 
   # ── Client Attestation JWT ───────────────────────────────────────────────
@@ -207,9 +212,10 @@ defmodule Attesto.WalletAttestation do
          :ok <- check_typ(header, @attestation_typ, :invalid_typ),
          {:ok, claims} <- verify_attestation_signature(attestation, header, opts),
          :ok <- check_client_id(claims, opts),
-         :ok <- check_attestation_issued_at(claims),
+         :ok <- check_attestation_issued_at(claims, opts),
          :ok <- check_attestation_expiry(claims, opts),
          :ok <- check_attestation_not_before(claims, opts),
+         :ok <- check_attestation_temporal_order(claims),
          {:ok, jwk_map} <- extract_cnf_jwk_map(claims),
          {:ok, jkt} <- jwk_thumbprint(jwk_map, :invalid_cnf) do
       {:ok, claims, jwk_map, jkt}
@@ -254,9 +260,14 @@ defmodule Attesto.WalletAttestation do
 
   defp check_attestation_expiry(_claims, _opts), do: {:error, :invalid_attestation}
 
-  defp check_attestation_issued_at(%{"iat" => iat}) when is_integer(iat), do: :ok
-  defp check_attestation_issued_at(%{"iat" => _invalid}), do: {:error, :invalid_attestation}
-  defp check_attestation_issued_at(_claims), do: :ok
+  defp check_attestation_issued_at(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
+    if NumericDate.not_before_reached?(iat, Keyword.fetch!(opts, :now), skew: @future_skew_seconds),
+      do: :ok,
+      else: {:error, :invalid_attestation}
+  end
+
+  defp check_attestation_issued_at(%{"iat" => _invalid}, _opts), do: {:error, :invalid_attestation}
+  defp check_attestation_issued_at(_claims, _opts), do: :ok
 
   defp check_attestation_not_before(%{"nbf" => nbf}, opts) when is_integer(nbf) do
     if nbf <= NumericDate.now(opts, invalid_override: :fallback),
@@ -266,6 +277,14 @@ defmodule Attesto.WalletAttestation do
 
   defp check_attestation_not_before(%{"nbf" => _invalid}, _opts), do: {:error, :invalid_attestation}
   defp check_attestation_not_before(_claims, _opts), do: :ok
+
+  defp check_attestation_temporal_order(%{"exp" => exp, "iat" => iat})
+       when is_integer(exp) and is_integer(iat) and exp < iat, do: {:error, :invalid_attestation}
+
+  defp check_attestation_temporal_order(%{"exp" => exp, "nbf" => nbf})
+       when is_integer(exp) and is_integer(nbf) and exp < nbf, do: {:error, :invalid_attestation}
+
+  defp check_attestation_temporal_order(_claims), do: :ok
 
   # Structural extraction only - `map()` with entries, nothing more. Whether
   # it is usable key material (not private, alg-compatible) is validated at
@@ -284,7 +303,7 @@ defmodule Attesto.WalletAttestation do
          :ok <- check_crit(header, :unsupported_pop_critical_header),
          :ok <- check_typ(header, @pop_typ, :invalid_pop_typ),
          {:ok, alg} <- check_pop_alg(header, opts),
-         {:ok, cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg),
+         {:ok, cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg, opts),
          {:ok, claims} <- verify_pop_signature(pop, alg, cnf_jwk),
          :ok <- check_pop_audience(claims, opts),
          :ok <- check_pop_time_claims(claims, opts),
@@ -301,15 +320,22 @@ defmodule Attesto.WalletAttestation do
 
   defp check_pop_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
-    if alg != "none" and alg in accepted, do: {:ok, alg}, else: {:error, :invalid_pop_alg}
+
+    if SigningAlg.valid_verification_algorithms?(accepted) and alg != "none" and alg in accepted,
+      do: {:ok, alg},
+      else: {:error, :invalid_pop_alg}
   end
 
   defp check_pop_alg(_header, _opts), do: {:error, :invalid_pop_alg}
 
-  defp verification_jwk_from_cnf(jwk_map, alg) do
-    case Key.verification_jwk(jwk_map, alg: alg) do
-      {:ok, jwk} -> {:ok, jwk}
-      {:error, _reason} -> {:error, :invalid_cnf}
+  defp verification_jwk_from_cnf(jwk_map, alg, opts) do
+    with {:ok, jwk} <- Key.verification_jwk(jwk_map, alg: alg),
+         true <-
+           Keyword.get(opts, :enforce_fapi_alg_policy, true) == false or
+             SigningAlg.fapi_compatible?(alg, jwk) do
+      {:ok, jwk}
+    else
+      _invalid -> {:error, :invalid_cnf}
     end
   end
 

@@ -9,6 +9,14 @@ defmodule Attesto.KeyTest do
     jwk_map
   end
 
+  describe "public_pem/1" do
+    test "normalizes malformed DER decoder failures to ArgumentError" do
+      malformed = "-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n"
+
+      assert_raise ArgumentError, fn -> Key.public_pem(malformed) end
+    end
+  end
+
   describe "verification_jwk/2" do
     test "accepts a public verification key with consistent signing metadata" do
       jwk_map =
