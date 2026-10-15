@@ -235,7 +235,7 @@ defmodule Attesto.Federation.MetadataPolicy do
   defp apply_essential(_policy, state), do: {:ok, state}
 
   defp normalize_federation_policy(policy) do
-    if is_map(policy) and string_keyed_map?(policy) and
+    if string_keyed_map?(policy) and
          (map_size(policy) == 0 or Enum.all?(policy, &entity_type_policy_entry?/1)) do
       normalize_entries(policy, &normalize_federation_entity_type_policy/1)
     else
