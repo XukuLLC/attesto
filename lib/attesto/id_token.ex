@@ -359,20 +359,16 @@ defmodule Attesto.IDToken do
   # reject any `crit` member (RFC 7515 §4.1.11), select keystore keys by
   # `kid`, and verify strictly against each trusted key's bound algorithm.
   defp verify_signature(config, jwt) do
-    with {:ok, header} <- peek_protected_header(jwt),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_token,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_header_typ(header) do
       case candidate_jwks(config, Map.get(header, "kid")) do
         [] -> {:error, :invalid_signature}
         jwks -> verify_against_any(jwks, jwt)
       end
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
     end
   end
 
@@ -396,13 +392,6 @@ defmodule Attesto.IDToken do
       malformed_result: :halt,
       malformed_error: :invalid_token
     )
-  end
-
-  defp peek_protected_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_token}
-    end
   end
 
   # ----- internal: claim checks -----

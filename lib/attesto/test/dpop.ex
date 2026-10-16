@@ -9,7 +9,9 @@ defmodule Attesto.Test.DPoP do
   deliberately-broken proofs that must be rejected. Hand-rolling those in
   every consumer re-implements JWS signing and the `cnf.jkt` / `ath`
   derivations the library already owns, and drifts from the verifier the
-  moment a rule changes.
+  moment a rule changes. Valid proofs delegate to the production
+  `Attesto.DPoP.Proof` builder; this module adds token fixtures and deliberately
+  invalid proofs for negative tests.
 
   This module ships under `lib/` (like `AttestoMCP.Test.DPoPReplay`) so a
   consumer can call it from its `test/` tree without depending on
@@ -56,6 +58,7 @@ defmodule Attesto.Test.DPoP do
 
   alias Attesto.Config
   alias Attesto.DPoP
+  alias Attesto.DPoP.Proof
   alias Attesto.Secret
   alias Attesto.SigningAlg
   alias Attesto.Token
@@ -145,7 +148,14 @@ defmodule Attesto.Test.DPoP do
   """
   @spec proof(JOSE.JWK.t(), String.t(), String.t(), keyword()) :: String.t()
   def proof(%JOSE.JWK{} = jwk, htm, htu, opts \\ []) when is_binary(htm) and is_binary(htu) and is_list(opts) do
-    sign(jwk, payload(htm, htu, opts), opts)
+    case Proof.build(jwk, htm, htu, opts) do
+      {:ok, proof} ->
+        proof
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "Attesto.Test.DPoP.proof/4 could not build a fixture proof: #{inspect(reason)}"
+    end
   end
 
   @doc """

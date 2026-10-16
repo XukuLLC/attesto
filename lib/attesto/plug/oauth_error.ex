@@ -15,6 +15,8 @@ if Code.ensure_loaded?(Plug.Conn) do
         nonce.
       * `insufficient_scope` (RFC 6750 §3.1) - 403 naming the required
         scope.
+      * `temporarily_unavailable` - 503 without an authentication challenge,
+        for a verifier dependency outage that the client cannot correct.
 
     Each helper sets the status, the `WWW-Authenticate` header (and
     `DPoP-Nonce` when relevant), writes a small JSON body, and halts the
@@ -34,12 +36,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     `error` (an OAuth error code string). Options: `:description`
     (`error_description`), `:dpop_nonce` (sets the `DPoP-Nonce` header, for
     `use_dpop_nonce`), and `:resource_metadata` (RFC 9728 §5.1: the URL of this
-    resource's protected-resource metadata, advertised as a `resource_metadata`
-    auth-param so the client can discover the authorization server). Halts.
+    resource's protected-resource metadata, or a `(conn -> url)` / MFA callback,
+    advertised as a `resource_metadata` auth-param so the client can discover
+    the authorization server). `allow_http: true` permits an HTTP metadata URL
+    for deliberate development use. Halts.
     """
     @spec unauthorized(Plug.Conn.t(), scheme(), String.t(), keyword()) :: Plug.Conn.t()
     def unauthorized(conn, scheme, error, opts \\ []) do
-      params = [{"error", error} | description_param(opts)] ++ resource_metadata_param(opts)
+      params = [{"error", error} | description_param(opts)] ++ resource_metadata_param(conn, opts)
 
       conn
       |> maybe_put_dpop_nonce(Keyword.get(opts, :dpop_nonce))
@@ -66,7 +70,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
       params =
         [{"error", "insufficient_user_authentication"}, {"error_description", description}] ++
-          step_up_params(challenge) ++ resource_metadata_param(opts)
+          step_up_params(challenge) ++ resource_metadata_param(conn, opts)
 
       conn
       |> put_no_store(opts)
@@ -117,7 +121,7 @@ if Code.ensure_loaded?(Plug.Conn) do
           {"error", "insufficient_scope"},
           {"error_description", description},
           {"scope", scope}
-        ] ++ resource_metadata_param(opts)
+        ] ++ resource_metadata_param(conn, opts)
 
       # Thread the host transport hooks exactly as `unauthorized/4` does. The
       # `error_description` is owned here, so it is forced into `opts` before
@@ -128,6 +132,19 @@ if Code.ensure_loaded?(Plug.Conn) do
       |> put_no_store(opts)
       |> put_www_authenticate(challenge(scheme, params), opts)
       |> send_error(403, "insufficient_scope", Keyword.put(opts, :description, description))
+    end
+
+    @doc """
+    Respond 503 `temporarily_unavailable` without a `WWW-Authenticate`
+    challenge. The same `:send_error` and `:no_store` transport hooks accepted
+    by the authentication helpers are honored. Internal failure details are
+    deliberately omitted from the response. Halts.
+    """
+    @spec temporarily_unavailable(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+    def temporarily_unavailable(conn, opts \\ []) do
+      conn
+      |> put_no_store(opts)
+      |> send_error(503, "temporarily_unavailable", Keyword.delete(opts, :description))
     end
 
     # ----- internal -----
@@ -155,32 +172,28 @@ if Code.ensure_loaded?(Plug.Conn) do
     # resource's protected-resource metadata, letting a client that received a
     # 401/403 discover which authorization server issues tokens for it. Quoted
     # like every other auth-param via `escape/1`. Omitted when no
-    # `:resource_metadata` opt is present.
-    defp resource_metadata_param(opts) do
-      case Keyword.get(opts, :resource_metadata) do
-        url when is_binary(url) ->
-          # RFC 9728 §1.2 / §3: the pointer is an https metadata URL. Drop a
-          # blank / non-https / malformed value rather than render an unusable
-          # param or crash quoting a non-string. (The Phoenix layer validates
-          # this at config build; this guards a core-only caller passing it
-          # directly.) A loopback `http://` dev resource cannot use this static
-          # value - by RFC 9728 the pointer is https - so a host that needs an
-          # http loopback pointer in dev supplies the whole challenge via the
-          # `:www_authenticate` hook, which bypasses this builder.
-          if metadata_url?(url), do: [{"resource_metadata", url}], else: []
+    # `:resource_metadata` opt is present. A callback is evaluated against the
+    # live connection so a resource mounted below more than one trusted origin
+    # can advertise the matching document without replacing this module's
+    # challenge builder. HTTP remains an explicit development-only opt-in.
+    defp resource_metadata_param(conn, opts) do
+      url = resolve_resource_metadata(Keyword.get(opts, :resource_metadata), conn)
 
-        _ ->
-          []
-      end
+      if Attesto.URI.https_identifier?(url, allow_http: Keyword.get(opts, :allow_http, false)),
+        do: [{"resource_metadata", url}],
+        else: []
     end
 
-    defp metadata_url?(url) do
-      not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, url) and
-        match?(
-          {:ok, %URI{scheme: "https", host: h, fragment: nil}} when is_binary(h) and h != "",
-          URI.new(url)
-        )
-    end
+    defp resolve_resource_metadata(url, _conn) when is_binary(url), do: url
+    defp resolve_resource_metadata(fun, conn) when is_function(fun, 1), do: fun.(conn)
+
+    defp resolve_resource_metadata({module, fun}, conn) when is_atom(module) and is_atom(fun),
+      do: apply(module, fun, [conn])
+
+    defp resolve_resource_metadata({module, fun, extra}, conn) when is_atom(module) and is_atom(fun) and is_list(extra),
+      do: apply(module, fun, [conn | extra])
+
+    defp resolve_resource_metadata(_value, _conn), do: nil
 
     defp maybe_put_dpop_nonce(conn, nil), do: conn
     defp maybe_put_dpop_nonce(conn, nonce), do: put_resp_header(conn, "dpop-nonce", nonce)
@@ -265,5 +278,6 @@ else
     def insufficient_user_authentication(_conn, _scheme, _challenge, _opts \\ []), do: raise(@dep_error)
 
     def insufficient_scope(_conn, _required, _scheme \\ :bearer, _opts \\ []), do: raise(@dep_error)
+    def temporarily_unavailable(_conn, _opts \\ []), do: raise(@dep_error)
   end
 end

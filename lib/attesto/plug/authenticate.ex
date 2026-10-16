@@ -13,8 +13,21 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     ## Options
 
-      * `:config` (required) - an `Attesto.Config` or a zero-arity function
-        returning one.
+      * `:config` (required) - an `Attesto.Config`, a zero-arity function, or an
+        MFA tuple (`{module, function}` / `{module, function, args}`) returning
+        one.
+      * `:verify` - optional token-verification callback. It receives
+        `(config, token, verify_opts)` and must return `{:ok, claims}` with a
+        plain claims map, `{:error, reason}` for `invalid_token`,
+        `{:error, :insufficient_scope}` for a 403 response, or
+        `{:error, {:temporarily_unavailable, reason}}` /
+        `{:error, {:jwks_refresh_failed, reason}}` for a generic 503 response.
+        Function and MFA forms are accepted. Omit it to use
+        `Attesto.Token.verify/3`. These tagged failures let a client-side
+        resource server reuse this HTTP/DPoP/mTLS pipeline with a remote-issuer
+        verifier without turning an issuer-key outage into a client error.
+      * `:required_scopes` - scope strings named in the 403 challenge when a
+        custom `:verify` callback returns `{:error, :insufficient_scope}`.
       * `:replay_check` - the DPoP `:replay_check` callback
         (`(jti, ttl) -> :ok | {:error, :replay}`), e.g.
         `&Attesto.DPoP.ReplayCache.check_and_record/2`. **Required for DPoP**:
@@ -72,9 +85,12 @@ if Code.ensure_loaded?(Plug.Conn) do
         own JSON error envelope while Attesto owns the RFC status/challenge
         semantics.
       * `:resource_metadata` - the URL of this resource's protected-resource
-        metadata (RFC 9728), advertised as a `resource_metadata` auth-param on
-        every 401 `WWW-Authenticate` challenge (RFC 9728 §5.1) so a client that
-        is refused can discover the authorization server.
+        metadata (RFC 9728), or a `(conn -> url)` / MFA callback resolving it.
+        The URL is advertised as a `resource_metadata` auth-param on every 401
+        `WWW-Authenticate` challenge (RFC 9728 §5.1) so a refused client can
+        discover the authorization server.
+      * `:allow_http` - permits an HTTP `:resource_metadata` URL for deliberate
+        development use. Defaults to `false`.
 
         plug Attesto.Plug.Authenticate,
           config: &MyApp.Attesto.config/0,
@@ -178,6 +194,17 @@ if Code.ensure_loaded?(Plug.Conn) do
             "invalid_token",
             error_opts(opts, description: to_string(reason))
           )
+
+        {:scope_error, required} ->
+          OAuthError.insufficient_scope(
+            conn,
+            required,
+            scheme_for(conn),
+            error_opts(opts, [])
+          )
+
+        {:token_service_error, _reason} ->
+          OAuthError.temporarily_unavailable(conn, error_opts(opts, []))
       end
     end
 
@@ -442,10 +469,61 @@ if Code.ensure_loaded?(Plug.Conn) do
         [dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb] ++
           Keyword.take(opts, [:trusted_audiences])
 
-      case Token.verify(config, token, verify_opts) do
-        {:ok, claims} -> {:ok, claims}
-        {:error, reason} -> {:token_error, reason}
+      case invoke_verifier(Keyword.get(opts, :verify), config, token, verify_opts) do
+        {:ok, claims} when is_map(claims) and not is_struct(claims) ->
+          {:ok, claims}
+
+        {:ok, claims} ->
+          raise ArgumentError,
+                "Attesto.Plug.Authenticate :verify must return {:ok, claims} with a plain map; " <>
+                  "got #{inspect({:ok, claims})}"
+
+        {:error, :insufficient_scope} ->
+          {:scope_error, required_scopes(opts)}
+
+        {:error, {:temporarily_unavailable, reason}} ->
+          {:token_service_error, reason}
+
+        {:error, {:jwks_refresh_failed, reason}} ->
+          {:token_service_error, reason}
+
+        {:error, reason} ->
+          {:token_error, reason}
+
+        other ->
+          raise ArgumentError,
+                "Attesto.Plug.Authenticate :verify must return {:ok, claims} or " <>
+                  "{:error, reason}; got #{inspect(other)}"
       end
+    end
+
+    defp required_scopes(opts) do
+      case Keyword.get(opts, :required_scopes, []) do
+        scopes when is_list(scopes) ->
+          if Enum.all?(scopes, &is_binary/1),
+            do: scopes,
+            else: raise(ArgumentError, ":required_scopes must be a list of strings; got #{inspect(scopes)}")
+
+        other ->
+          raise ArgumentError, ":required_scopes must be a list of strings; got #{inspect(other)}"
+      end
+    end
+
+    defp invoke_verifier(nil, config, token, verify_opts), do: Token.verify(config, token, verify_opts)
+
+    defp invoke_verifier(fun, config, token, verify_opts) when is_function(fun, 3), do: fun.(config, token, verify_opts)
+
+    defp invoke_verifier({module, fun}, config, token, verify_opts) when is_atom(module) and is_atom(fun),
+      do: apply(module, fun, [config, token, verify_opts])
+
+    defp invoke_verifier({module, fun, extra}, config, token, verify_opts)
+         when is_atom(module) and is_atom(fun) and is_list(extra),
+         do: apply(module, fun, [config, token, verify_opts | extra])
+
+    defp invoke_verifier(other, _config, _token, _verify_opts) do
+      raise ArgumentError,
+            "Attesto.Plug.Authenticate :verify must be a 3-arity function or MFA tuple; " <>
+              "got #{inspect(other)}"
     end
 
     # ----- mTLS thumbprint -----
@@ -471,6 +549,8 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp resolve_config(opts) do
       case Keyword.fetch!(opts, :config) do
         fun when is_function(fun, 0) -> fun.()
+        {module, fun} when is_atom(module) and is_atom(fun) -> apply(module, fun, [])
+        {module, fun, args} when is_atom(module) and is_atom(fun) and is_list(args) -> apply(module, fun, args)
         config -> config
       end
     end
@@ -530,15 +610,14 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp error_opts(opts, extra) do
       opts
-      |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata])
+      |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata, :allow_http])
       |> Keyword.merge(extra)
     end
 
     # RFC 9470: evaluate the (init-parsed) route step-up requirement against the
     # verified token's authentication-context claims. No requirement => :ok.
     # The spec is normalized via `Requirement.parse/1` here as well as at
-    # `init/1`, so a caller that wires this plug WITHOUT going through `init/1`
-    # (e.g. the MCP `Authenticate` wrapper, which rebuilds core opts per request)
+    # `init/1`, so a caller that invokes the plug without going through `init/1`
     # still gets a parsed, validated requirement rather than a raw keyword list.
     # `parse/1` is idempotent on an already-parsed `%Requirement{}`.
     defp step_up_check(claims, opts) do

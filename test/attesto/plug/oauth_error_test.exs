@@ -89,7 +89,14 @@ defmodule Attesto.Plug.OAuthErrorTest do
     test "a non-https / malformed :resource_metadata is dropped (RFC 9728 §1.2)" do
       # The pointer must be an https metadata URL; a bad value is omitted rather
       # than rendered into an unusable challenge.
-      for bad <- ["", "http://api.example/x", "https://api.example/%ZZ", "not-a-url", 123] do
+      for bad <- [
+            "",
+            "http://api.example/x",
+            "https://api.example/%ZZ",
+            "https://user:password@api.example/x",
+            "not-a-url",
+            123
+          ] do
         conn =
           conn(:get, "https://api.example.com/x")
           |> OAuthError.unauthorized(:bearer, "invalid_token", resource_metadata: bad)
@@ -258,6 +265,20 @@ defmodule Attesto.Plug.OAuthErrorTest do
         refute www_authenticate(conn) =~ "resource_metadata",
                "expected no resource_metadata for #{inspect(bad)}"
       end
+    end
+  end
+
+  describe "temporarily_unavailable/2" do
+    test "returns a generic no-store 503 without an authentication challenge" do
+      conn =
+        conn(:get, "https://api.example.com/x")
+        |> OAuthError.temporarily_unavailable(description: "must not leak")
+
+      assert conn.status == 503
+      assert conn.halted
+      assert JSON.decode!(conn.resp_body) == %{"error" => "temporarily_unavailable"}
+      assert [] == Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert ["no-store"] == Plug.Conn.get_resp_header(conn, "cache-control")
     end
   end
 end

@@ -4,6 +4,59 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-10-16
+
+### Security
+
+- Route core JWT verification through shared strict protected-header,
+  trusted-candidate, and signature-verification paths. Protocol verifiers now
+  apply consistent canonical parsing, critical-header handling, algorithm and
+  key compatibility checks, malformed-result policy, and exact RSA-PSS
+  parameter verification.
+- Validate untrusted verification candidates before expensive key conversion,
+  support protocol-selected RSA minimum sizes, and let callers reject an
+  ambiguous key selection whether the protected header includes `kid` or not.
+- Add one shared HTTPS identifier policy that rejects userinfo, fragments,
+  hostless values, whitespace, control characters, and malformed percent
+  escapes. HTTP remains available only through an explicit development opt-in.
+- Add an IANA-registry-based public destination policy for outbound fetches.
+  It rejects non-global, scoped, multicast, documentation, benchmarking, and
+  reserved IP addresses, checks embedded IPv4 in transition forms, and retains
+  applicable globally reachable exceptions. Non-locator ORCHIDv2 and Drone
+  Remote ID identifier prefixes remain blocked from network fetches.
+- Require HTTPS DPoP target URIs without userinfo when building proofs, while
+  continuing to omit query and fragment components from the signed `htu`.
+
+### Added
+
+- Add `Attesto.DPoP.Proof.build/4` and `resolve_alg/2` for production DPoP
+  proof construction with key-bound algorithms and identifiers, bounded input,
+  public embedded JWKs, access-token hashes, nonce support, and exact PSS
+  signing.
+- Add `Attesto.JWS.protected_header/2`, `verification_candidates/2`,
+  `verify_trusted/4`, and `verify_strict/3` as shared verification boundaries,
+  plus `Attesto.SigningAlg.compatible_algs/1` for trusted key inspection.
+- Add `Attesto.URI.https_identifier?/2` and
+  `Attesto.IPAddress.public_fetch_destination?/1` for consistent URI and
+  outbound-address policy across the Attesto family.
+- Add `Attesto.Token.check_confirmation/2` so already verified claims can be
+  bound to presented DPoP or mTLS evidence without repeating JWT verification.
+
+### Changed
+
+- Let `Attesto.Plug.Authenticate` resolve configuration through a function or
+  MFA and accept a function or MFA token verifier. Custom verifiers must return
+  a plain claims map and may preserve 403 insufficient-scope or 503 dependency
+  outage semantics through tagged failures. Protected-resource metadata can now
+  be resolved per request, with `allow_http: true` as an explicit
+  development-only exception; `RequireScopes` carries the same option.
+- Let `Attesto.ProtectedResourceMetadata.metadata/1` build metadata directly
+  from options as well as from `Attesto.Config`, using the shared URI policy in
+  either form. OAuth error challenges use the same per-request metadata and
+  URI validation rules.
+- Make `Attesto.Test.DPoP` use the production proof builder while preserving
+  its invalid-fixture helpers.
+
 ## [2.4.0] - 2026-10-15
 
 ### Security

@@ -34,7 +34,7 @@ defmodule Attesto.ProtectedResourceMetadata do
   it is the host's concern.
   """
 
-  alias Attesto.Config
+  alias Attesto.{Config, URI}
 
   # RFC 9728 §2: the metadata members a protected resource MAY publish. Every
   # one is host-supplied and nil-droppable; `resource` (REQUIRED) is in the base
@@ -59,6 +59,9 @@ defmodule Attesto.ProtectedResourceMetadata do
 
   @doc """
   Build the protected-resource metadata document for `config`.
+
+  The one-argument form also accepts this option list directly when no
+  `Attesto.Config` is available; in that form `:resource` is required.
 
   The only field Attesto fixes is `resource` (RFC 9728 §2, REQUIRED): the
   resource identifier this metadata describes.
@@ -89,13 +92,26 @@ defmodule Attesto.ProtectedResourceMetadata do
       flags and accepted DPoP algorithms; included only if given.
     * `:signed_metadata` - a JWT whose claims are the signed counterpart of
       this document (RFC 9728 §2); included only if given.
+    * `:allow_http` - permit an HTTP `:resource` for deliberate development
+      use. Defaults to `false`; production identifiers require HTTPS.
 
   The accepted host fields are the RFC 9728 §2 allowlist in `@host_fields`; the
   enumeration above is illustrative. Any other opt key is ignored.
   """
   @spec metadata(Config.t(), keyword()) :: %{required(String.t()) => term()}
-  def metadata(%Config{} = config, opts \\ []) do
-    base = %{"resource" => resource(config, opts)}
+  @spec metadata(keyword()) :: %{required(String.t()) => term()}
+  def metadata(config_or_opts, opts \\ [])
+
+  def metadata(%Config{} = config, opts) when is_list(opts) do
+    build_metadata(resource(config.audience, opts), opts)
+  end
+
+  def metadata(opts, []) when is_list(opts) do
+    build_metadata(resource(nil, opts), opts)
+  end
+
+  defp build_metadata(resource, opts) do
+    base = %{"resource" => resource}
 
     Enum.reduce(@host_fields, base, fn field, acc ->
       case Keyword.get(opts, field) do
@@ -111,13 +127,13 @@ defmodule Attesto.ProtectedResourceMetadata do
   # identifier); a present value overrides it. The selected identifier must be an
   # absolute URI with a host and no fragment (RFC 3986; RFC 9728 §2 - it is the
   # `https` URL a client dereferences), so a malformed value fails fast rather
-  # than publishing a non-conformant REQUIRED member. (RFC 9728 §2 specifies the
-  # `https` scheme; that is the host's deployment choice and is not enforced here
-  # so a loopback `http` development resource still renders.)
-  defp resource(config, opts) do
+  # than publishing a non-conformant REQUIRED member. RFC 9728's HTTPS rule is
+  # enforced unless the caller explicitly opts into `allow_http: true` for a
+  # development endpoint.
+  defp resource(default, opts) do
     case Keyword.get(opts, :resource) do
-      nil -> require_resource_identifier!(config.audience)
-      resource when is_binary(resource) and resource != "" -> require_resource_identifier!(resource)
+      nil -> require_resource_identifier!(default, opts)
+      resource when is_binary(resource) and resource != "" -> require_resource_identifier!(resource, opts)
       other -> raise ArgumentError, malformed_resource_message(other)
     end
   end
@@ -126,18 +142,11 @@ defmodule Attesto.ProtectedResourceMetadata do
   # no fragment. `URI.new/1` (unlike `URI.parse/1`) rejects whitespace/control
   # characters but still accepts an invalid percent-escape (a `%` not followed by
   # two hex digits, e.g. `%ZZ`), so that is rejected explicitly first.
-  defp require_resource_identifier!(url) do
-    with false <- invalid_percent_encoding?(url),
-         {:ok, %URI{scheme: "https", host: host, fragment: nil}} <- URI.new(url),
-         true <- is_binary(host) and host != "" do
-      url
-    else
-      _ -> raise ArgumentError, malformed_resource_message(url)
-    end
+  defp require_resource_identifier!(url, opts) do
+    if URI.https_identifier?(url, allow_http: Keyword.get(opts, :allow_http, false)),
+      do: url,
+      else: raise(ArgumentError, malformed_resource_message(url))
   end
-
-  # RFC 3986 §2.1: a `%` is valid only as the lead of a `%HH` triplet.
-  defp invalid_percent_encoding?(url), do: Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, url)
 
   defp malformed_resource_message(value) do
     "Attesto.ProtectedResourceMetadata: the `resource` identifier (RFC 9728 §2, REQUIRED) must " <>

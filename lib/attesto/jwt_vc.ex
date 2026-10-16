@@ -180,8 +180,11 @@ defmodule Attesto.JwtVc do
   def verify(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
     opts = MapParams.ensure_keyword!(opts)
 
-    with {:ok, header} <- parse_header(jwt),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_credential,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header),
          :ok <- check_alg(header, opts),
          {:ok, jwt_claims} <- verify_signature(jwt, header, trusted_jwks, opts),
@@ -350,20 +353,6 @@ defmodule Attesto.JwtVc do
     JWS.sign_compact(pem, %{"alg" => alg, "kid" => kid, "typ" => @header_typ}, claims)
   end
 
-  defp parse_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_credential}
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
-
   defp check_typ(%{"typ" => @header_typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
@@ -382,14 +371,9 @@ defmodule Attesto.JwtVc do
   end
 
   defp verify_signature(jwt, header, trusted_jwks, opts) do
-    candidates =
-      JWS.verification_candidates(trusted_jwks,
-        kid: Map.get(header, "kid"),
-        accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(jwt, candidates,
+    JWS.verify_trusted(jwt, header, trusted_jwks,
+      accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_credential,

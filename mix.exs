@@ -5,6 +5,7 @@ defmodule Attesto.MixProject do
   alias Attesto.AuthorizationCode.Grant
   alias Attesto.CodeStore.ETS
   alias Attesto.DPoP.NonceStore
+  alias Attesto.DPoP.Proof
   alias Attesto.DPoP.ReplayCache
   alias Attesto.Keystore.Static
   alias Attesto.Plug.Authenticate
@@ -13,7 +14,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "2.4.0"
+  @version "2.5.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -143,7 +144,7 @@ defmodule Attesto.MixProject do
           NonceStore,
           Attesto.DPoP.NonceStore.ETS
         ],
-        "Sender-constraint": [Attesto.DPoP, ReplayCache, Attesto.MTLS],
+        "Sender-constraint": [Attesto.DPoP, Proof, ReplayCache, Attesto.MTLS],
         Scopes: [Attesto.Scope],
         Metadata: [Attesto.JWKS, Attesto.Discovery],
         Keys: [Attesto.Keystore, Attesto.Signer, Static, Attesto.Key, Attesto.Did],

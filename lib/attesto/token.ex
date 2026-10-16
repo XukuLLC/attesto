@@ -422,6 +422,26 @@ defmodule Attesto.Token do
 
   def peek_signed_claims(%Config{}, _), do: {:error, :invalid_token}
 
+  @doc """
+  Validate the confirmation claim and bind already verified token claims to a
+  presented DPoP key or mTLS certificate.
+
+  This function does not verify a token signature or its registered claims.
+  Call it only with claims obtained from a trusted verification path. The
+  accepted options are `:dpop_jkt` and `:mtls_cert_thumbprint`, with the same
+  error results as `verify/3`.
+  """
+  @spec check_confirmation(claims(), keyword()) :: :ok | {:error, verify_error()}
+  def check_confirmation(claims, opts \\ [])
+
+  def check_confirmation(claims, opts) when is_map(claims) and is_list(opts) do
+    with :ok <- check_confirmation_shape(claims) do
+      check_confirmation_binding(claims, opts)
+    end
+  end
+
+  def check_confirmation(_claims, _opts), do: {:error, :unsupported_confirmation}
+
   @doc "The default JWS algorithm for RSA keys. Keystores may label individual keys with another supported alg."
   @spec signing_alg() :: String.t()
   def signing_alg, do: @signing_alg
@@ -604,27 +624,20 @@ defmodule Attesto.Token do
 
   # ----- internal: verification -----
 
+  # RFC 7515 §4.1.11: a recipient that does not understand a JWS extension
+  # named in the `crit` header MUST reject the JWS. Attesto understands no
+  # extension parameters, so any `crit` member is fatal. An empty `crit` is
+  # itself malformed. Tokens Attesto mints never carry `crit`.
   defp verify_signature(config, jwt) do
-    with {:ok, header} <- peek_protected_header(jwt),
-         :ok <- check_crit(header) do
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_token,
+             crit_error: :unsupported_critical_header
+           ) do
       case candidate_jwks(config, Map.get(header, "kid")) do
         [] -> {:error, :invalid_signature}
         jwks -> verify_against_any(jwks, jwt)
       end
-    end
-  end
-
-  # RFC 7515 §4.1.11: a recipient that does not understand a JWS extension
-  # named in the `crit` header MUST reject the JWS. Attesto understands no
-  # extension parameters, so any `crit` member is fatal - this prevents a
-  # malicious or buggy issuer from smuggling a critical extension the
-  # resource server believes it is honouring. (An empty `crit` is itself
-  # malformed per the RFC, so its presence is rejected too.) Tokens
-  # Attesto mints never carry `crit`.
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
     end
   end
 
@@ -649,13 +662,6 @@ defmodule Attesto.Token do
       malformed_result: :halt,
       malformed_error: :invalid_token
     )
-  end
-
-  defp peek_protected_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_token}
-    end
   end
 
   # ----- internal: confirmation -----

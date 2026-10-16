@@ -251,14 +251,9 @@ defmodule Attesto.StatusList do
   end
 
   defp verify_signature(token, header, alg, jwks) do
-    candidates =
-      JWS.verification_candidates(jwks,
-        accepted_algs: [alg],
-        kid: Map.get(header, "kid"),
-        malformed_key: :skip
-      )
-
-    JWS.verify_strict(token, candidates,
+    JWS.verify_trusted(token, header, jwks,
+      accepted_algs: [alg],
+      malformed_key: :skip,
       terminal_error: :invalid_signature,
       malformed_result: :continue,
       malformed_error: :invalid_signature,

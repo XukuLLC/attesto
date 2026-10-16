@@ -21,6 +21,8 @@ if Code.ensure_loaded?(Plug.Conn) do
         metadata (RFC 9728), advertised as a `resource_metadata` auth-param on
         the 403 `insufficient_scope` (and the 401 `invalid_token` for an
         unauthenticated request) `WWW-Authenticate` challenge (RFC 9728 §5.1).
+      * `:allow_http` - permits an HTTP `:resource_metadata` URL for deliberate
+        development use. Defaults to `false`.
       * `:send_error`, `:www_authenticate`, `:no_store` - the transport hooks
         `Attesto.Plug.OAuthError` honors, threaded onto BOTH the 403 and the 401
         this plug renders so a host can override the response envelope and inject
@@ -41,7 +43,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @default_claims_key :attesto_claims
 
-    @transport_keys [:send_error, :www_authenticate, :no_store]
+    @transport_keys [:send_error, :www_authenticate, :no_store, :allow_http]
 
     @impl Plug
     def init(scopes) when is_list(scopes) do

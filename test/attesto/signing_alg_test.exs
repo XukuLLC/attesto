@@ -94,6 +94,16 @@ defmodule Attesto.SigningAlgTest do
     assert SigningAlg.infer(ed448_jwk()) == "EdDSA"
   end
 
+  test "compatible_algs/1 returns every supported algorithm for the key" do
+    assert SigningAlg.compatible_algs(JOSE.JWK.generate_key({:rsa, 1024})) == ~w(RS256 PS256)
+    assert SigningAlg.compatible_algs(JOSE.JWK.generate_key({:ec, "P-256"})) == ["ES256"]
+    assert SigningAlg.compatible_algs(JOSE.JWK.generate_key({:ec, "P-384"})) == ["ES384"]
+    assert SigningAlg.compatible_algs(JOSE.JWK.generate_key({:ec, "P-521"})) == ["ES512"]
+    assert SigningAlg.compatible_algs(ed25519_jwk()) == ~w(EdDSA Ed25519)
+    assert SigningAlg.compatible_algs(ed448_jwk()) == ~w(EdDSA Ed448)
+    assert SigningAlg.compatible_algs(x25519_jwk()) == []
+  end
+
   # A correctly sized public member is sufficient to exercise trusted curve
   # inference without requiring a configured Curve448 signing backend.
   defp ed25519_jwk, do: okp_jwk("Ed25519", 32)

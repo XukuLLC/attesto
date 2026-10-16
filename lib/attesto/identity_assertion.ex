@@ -131,8 +131,11 @@ defmodule Attesto.IdentityAssertion do
   def verify(jwt, trusted_jwks, opts \\ [])
 
   def verify(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
-    with {:ok, header} <- peek_header(jwt),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :malformed,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_supported_alg(header, opts),
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
@@ -160,14 +163,9 @@ defmodule Attesto.IdentityAssertion do
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
-    candidates =
-      JWS.verification_candidates(trusted_jwks,
-        kid: Map.get(header, "kid"),
-        accepted_algs: accepted_algs,
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(jwt, candidates,
+    JWS.verify_trusted(jwt, header, trusted_jwks,
+      accepted_algs: accepted_algs,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :continue,
       malformed_error: :invalid_signature
@@ -175,20 +173,6 @@ defmodule Attesto.IdentityAssertion do
   end
 
   # ── Header checks ─────────────────────────────────────────────────────────
-
-  defp peek_header(jwt) do
-    case peek_json(jwt, :protected) do
-      {:ok, map} -> {:ok, map}
-      {:error, _reason} -> {:error, :malformed}
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
 
   defp peek_json(jwt, segment) do
     case JWS.peek_json(jwt, segment) do

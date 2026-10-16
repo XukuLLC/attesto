@@ -124,8 +124,11 @@ defmodule Attesto.RequestObject do
   def verify_with_claims(jwt, trusted_jwks, opts) when is_binary(jwt) and is_list(opts) do
     validate_options!(opts)
 
-    with {:ok, header} <- peek_header(jwt),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_request_object,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_supported_alg(header),
          :ok <- check_profile_typ(header, opts),
          {:ok, claims} <- verify_signature(jwt, header, trusted_jwks, opts),
@@ -553,13 +556,6 @@ defmodule Attesto.RequestObject do
     end)
   end
 
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
-
   defp check_supported_alg(%{"alg" => "none"}), do: {:error, :request_not_supported}
   defp check_supported_alg(_header), do: :ok
 
@@ -578,12 +574,5 @@ defmodule Attesto.RequestObject do
     if Claims.typ_matches?(Map.get(header, "typ"), accepted, normalization: :application_subtype),
       do: :ok,
       else: {:error, :invalid_typ}
-  end
-
-  defp peek_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, map} -> {:ok, map}
-      {:error, _reason} -> {:error, :invalid_request_object}
-    end
   end
 end

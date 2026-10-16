@@ -221,6 +221,87 @@ defmodule Attesto.JWSTest do
              )
   end
 
+  test "minimum RSA strength and ambiguous-kid policies fail closed" do
+    weak = JOSE.JWK.generate_key({:rsa, 1024})
+    weak_map = public_map(weak, %{"kid" => "weak", "alg" => "RS256"})
+
+    assert [{"weak", "RS256", %JOSE.JWK{}}] =
+             JWS.verification_candidates(weak_map, min_rsa_bits: 1024)
+
+    assert [] = JWS.verification_candidates(weak_map, min_rsa_bits: 2048)
+
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    duplicate = public_map(signer, %{"kid" => "same", "alg" => "ES256"})
+
+    assert length(JWS.verification_candidates([duplicate, duplicate], kid: "same")) == 2
+
+    assert [] =
+             JWS.verification_candidates([duplicate, duplicate],
+               kid: "same",
+               ambiguous_kid: :reject
+             )
+
+    strong = JOSE.JWK.generate_key({:rsa, 2048})
+
+    assert [{"same", "RS256", %JOSE.JWK{}}] =
+             JWS.verification_candidates(
+               [
+                 public_map(weak, %{"kid" => "same", "alg" => "RS256"}),
+                 public_map(strong, %{"kid" => "same", "alg" => "RS256"})
+               ],
+               kid: "same",
+               min_rsa_bits: 2048,
+               ambiguous_kid: :reject
+             )
+  end
+
+  test "candidate-selection options reject invalid configuration" do
+    for opts <- [[min_rsa_bits: 0], [min_rsa_bits: "2048"], [ambiguous_kid: :first]] do
+      assert_raise ArgumentError, fn -> JWS.verification_candidates([], opts) end
+      assert_raise ArgumentError, fn -> JWS.verify_trusted("e30.e30.cw", %{}, [], opts) end
+    end
+  end
+
+  test "verify_trusted composes candidate and strict-result policies" do
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    kid = JOSE.JWK.thumbprint(signer)
+    jwt = signed_jwt(signer, kid)
+    valid = public_map(signer, %{"kid" => kid, "alg" => "ES256"})
+    malformed = %{"not" => "a jwk"}
+
+    assert {:ok, %{"ok" => true}, {^kid, "ES256", %JOSE.JWK{}}} =
+             JWS.verify_trusted(jwt, %{"kid" => kid}, [malformed, valid],
+               accepted_algs: ["ES256"],
+               malformed_key: :skip,
+               malformed_result: :continue,
+               terminal_error: :invalid_signature,
+               return_key?: true
+             )
+
+    assert {:error, :invalid_signature} =
+             JWS.verify_trusted(jwt, %{"kid" => kid}, [malformed, valid],
+               accepted_algs: ["ES256"],
+               malformed_key: :reject_set,
+               malformed_result: :halt,
+               malformed_error: :malformed,
+               terminal_error: :invalid_signature
+             )
+
+    assert {:error, :invalid_signature} =
+             JWS.verify_trusted(jwt, %{"kid" => "another-key"}, valid,
+               accepted_algs: ["ES256"],
+               malformed_key: :reject_set,
+               terminal_error: :invalid_signature
+             )
+
+    assert {:error, :malformed} =
+             JWS.verify_trusted("not.a.jwt", %{"kid" => kid}, valid,
+               accepted_algs: ["ES256"],
+               malformed_error: :malformed,
+               terminal_error: :invalid_signature
+             )
+  end
+
   test "strict verification tries candidates in order and exposes the selected key when requested" do
     signer = JOSE.JWK.generate_key({:ec, "P-256"})
     wrong = JOSE.JWK.generate_key({:ec, "P-256"})
@@ -438,7 +519,10 @@ defmodule Attesto.JWSTest do
     end
 
     test "ok when every crit member is supported" do
-      assert :ok = JWS.reject_unsupported_crit(%{"crit" => ["b64"]}, supported: ["b64"])
+      assert :ok =
+               JWS.reject_unsupported_crit(%{"crit" => ["b64"], "b64" => false},
+                 supported: ["b64"]
+               )
     end
 
     test "rejects an unsupported crit member" do
@@ -448,6 +532,45 @@ defmodule Attesto.JWSTest do
     test "rejects an empty or non-array crit" do
       assert {:error, :unsupported_crit} = JWS.reject_unsupported_crit(%{"crit" => []})
       assert {:error, :unsupported_crit} = JWS.reject_unsupported_crit(%{"crit" => "b64"})
+    end
+
+    test "rejects duplicate critical names and names absent from the protected header" do
+      assert {:error, :unsupported_crit} =
+               JWS.reject_unsupported_crit(%{"crit" => ["b64", "b64"], "b64" => false},
+                 supported: ["b64"]
+               )
+
+      assert {:error, :unsupported_crit} =
+               JWS.reject_unsupported_crit(%{"crit" => ["b64"]}, supported: ["b64"])
+    end
+  end
+
+  describe "protected_header/2" do
+    test "strictly decodes a header and applies the caller's critical-header policy" do
+      header = %{"alg" => "ES256", "crit" => ["example"], "example" => true}
+      jwt = "#{b64(JSON.encode!(header))}.#{b64(JSON.encode!(%{}))}.#{b64("s")}"
+
+      assert {:error, :critical_extension} =
+               JWS.protected_header(jwt,
+                 error: :bad_token,
+                 crit_error: :critical_extension
+               )
+
+      assert {:ok, ^header} =
+               JWS.protected_header(jwt,
+                 error: :bad_token,
+                 crit_error: :critical_extension,
+                 supported_crit: ["example"]
+               )
+    end
+
+    test "maps every strict parse failure to the caller's error" do
+      assert {:error, :bad_token} =
+               JWS.protected_header("not.a.jwt", error: :bad_token, crit_error: :bad_crit)
+
+      duplicate = ~s({"alg":"ES256","alg":"RS256"})
+      jwt = "#{b64(duplicate)}.#{b64(JSON.encode!(%{}))}.#{b64("s")}"
+      assert {:error, :bad_token} = JWS.protected_header(jwt, error: :bad_token)
     end
   end
 

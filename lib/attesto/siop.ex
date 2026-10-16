@@ -105,8 +105,11 @@ defmodule Attesto.Siop do
   def verify(id_token, opts) when is_binary(id_token) and is_list(opts) do
     with {:ok, audience} <- required_option(opts, :audience, :invalid_audience),
          {:ok, nonce} <- required_option(opts, :nonce, :invalid_nonce),
-         {:ok, header} <- peek_json(id_token, :protected),
-         :ok <- check_crit(header),
+         {:ok, header} <-
+           JWS.protected_header(id_token,
+             error: :invalid_token,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header),
          {:ok, alg} <- check_alg(header, opts),
          {:ok, unverified_claims} <- peek_json(id_token, :payload),
@@ -138,13 +141,6 @@ defmodule Attesto.Siop do
     case JWS.peek_json(id_token, segment) do
       {:ok, map} -> {:ok, map}
       {:error, _reason} -> {:error, :invalid_token}
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
     end
   end
 

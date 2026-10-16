@@ -149,9 +149,7 @@ defmodule Attesto.JWS do
         :ok
 
       {:ok, crit} when is_list(crit) and crit != [] ->
-        if Enum.all?(crit, &(is_binary(&1) and &1 in supported)),
-          do: :ok,
-          else: {:error, :unsupported_crit}
+        if valid_crit?(crit, header, supported), do: :ok, else: {:error, :unsupported_crit}
 
       _ ->
         # An empty or non-array `crit` member is malformed, even when the
@@ -161,6 +159,51 @@ defmodule Attesto.JWS do
   end
 
   def reject_unsupported_crit(_header, _opts), do: {:error, :unsupported_crit}
+
+  defp valid_crit?(crit, header, supported) do
+    length(Enum.uniq(crit)) == length(crit) and
+      Enum.all?(crit, &(is_binary(&1) and &1 in supported and Map.has_key?(header, &1)))
+  end
+
+  @doc """
+  Decode a compact JWS protected header and reject unsupported critical
+  parameters in one strict boundary.
+
+  Parsing failures are mapped to `:error` (default `:malformed`), while a
+  rejected `crit` member is mapped to `:crit_error` (default
+  `:unsupported_critical_header`). `:supported_crit` lists the critical
+  parameters understood by the caller. The compact-parser options
+  `:canonical`, `:allow_empty_signature`, and `:max_compact_bytes` are passed
+  through to `peek_json/3`.
+  """
+  @spec protected_header(binary(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def protected_header(jwt, opts \\ [])
+
+  def protected_header(jwt, opts) when is_binary(jwt) and is_list(opts) do
+    error = Keyword.get(opts, :error, :malformed)
+    crit_error = Keyword.get(opts, :crit_error, :unsupported_critical_header)
+    supported_crit = Keyword.get(opts, :supported_crit, [])
+
+    validate_protected_header_options!(error, crit_error, supported_crit)
+
+    peek_opts = Keyword.take(opts, [:canonical, :allow_empty_signature, :max_compact_bytes])
+
+    with {:ok, header} <- peek_json(jwt, :protected, peek_opts),
+         :ok <- reject_unsupported_crit(header, supported: supported_crit) do
+      {:ok, header}
+    else
+      {:error, :unsupported_crit} -> {:error, crit_error}
+      {:error, _reason} -> {:error, error}
+    end
+  end
+
+  def protected_header(_jwt, opts) when is_list(opts) do
+    error = Keyword.get(opts, :error, :malformed)
+    crit_error = Keyword.get(opts, :crit_error, :unsupported_critical_header)
+    supported_crit = Keyword.get(opts, :supported_crit, [])
+    validate_protected_header_options!(error, crit_error, supported_crit)
+    {:error, error}
+  end
 
   @doc """
   Build the trusted candidates used by strict JWT verification.
@@ -178,6 +221,11 @@ defmodule Attesto.JWS do
       Omitting the option leaves algorithms unrestricted at this low-level API.
     * `:fapi?` applies `SigningAlg.fapi_compatible?/2` after algorithm
       filtering.
+    * `:min_rsa_bits` optionally rejects RSA candidates whose modulus is
+      shorter than the given positive number of bits.
+    * `:ambiguous_kid` is `:allow` (default) or `:reject`. Rejection produces
+      an empty candidate set when key selection leaves more than one eligible
+      key, whether the protected header supplied a `kid` or omitted it.
     * `:malformed_key` is `:reject_set` (default), `:skip`, or `:raise`.
       The first returns an empty set when any map is malformed, the second
       drops only that map, and the last lets a custom builder's exception
@@ -189,6 +237,7 @@ defmodule Attesto.JWS do
   def verification_candidates(keys, opts \\ []) when is_list(opts) do
     malformed_key = Keyword.get(opts, :malformed_key, :reject_set)
     validate_malformed_key!(malformed_key)
+    validate_candidate_selection_options!(opts)
 
     if valid_verification_policy?(opts) do
       keys
@@ -198,6 +247,30 @@ defmodule Attesto.JWS do
     else
       []
     end
+  end
+
+  @doc """
+  Build trusted verification candidates from `keys` and verify `jwt` strictly.
+
+  The protected header supplies the `kid` used for candidate selection. All
+  candidate-building and strict-result options accepted by
+  `verification_candidates/2` and `verify_strict/3` may be passed together,
+  including the protocol-specific `:malformed_key`, `:malformed_result`,
+  `:terminal_error`, and `:malformed_error` policies.
+  """
+  @spec verify_trusted(binary(), map(), term(), keyword()) ::
+          {:ok, map()} | {:ok, map(), verification_candidate()} | {:error, atom()}
+  def verify_trusted(jwt, header, keys, opts)
+
+  def verify_trusted(jwt, header, keys, opts) when is_binary(jwt) and is_map(header) and is_list(opts) do
+    candidates =
+      verification_candidates(keys, Keyword.put(opts, :kid, Map.get(header, "kid")))
+
+    verify_strict(jwt, candidates, opts)
+  end
+
+  def verify_trusted(_jwt, _header, _keys, opts) when is_list(opts) do
+    {:error, Keyword.get(opts, :malformed_error, Keyword.get(opts, :terminal_error, :invalid_signature))}
   end
 
   @doc """
@@ -481,7 +554,9 @@ defmodule Attesto.JWS do
       end
 
     fapi? = Keyword.get(opts, :fapi?, false)
-    accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk))
+
+    accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk)) and
+      minimum_rsa_strength?(jwk, Keyword.get(opts, :min_rsa_bits))
   end
 
   defp allow_verification_candidate(candidate, opts, :raise), do: candidate_allowed?(candidate, opts)
@@ -500,10 +575,26 @@ defmodule Attesto.JWS do
     candidates
     |> Enum.reverse()
     |> filter_verification_kid(Keyword.get(opts, :kid))
+    |> apply_ambiguous_kid_policy(opts)
   end
 
   defp filter_verification_kid(candidates, nil), do: candidates
   defp filter_verification_kid(candidates, kid), do: Enum.filter(candidates, &match?({^kid, _, _}, &1))
+
+  defp apply_ambiguous_kid_policy([_, _ | _] = candidates, opts) do
+    if Keyword.get(opts, :ambiguous_kid, :allow) == :reject, do: [], else: candidates
+  end
+
+  defp apply_ambiguous_kid_policy(candidates, _opts), do: candidates
+
+  defp minimum_rsa_strength?(_jwk, nil), do: true
+
+  defp minimum_rsa_strength?(jwk, minimum_bits) do
+    case JOSE.JWK.to_public_map(jwk) do
+      {_metadata, %{"kty" => "RSA"}} -> SigningAlg.rsa_modulus_at_least?(jwk, minimum_bits)
+      {_metadata, _fields} -> true
+    end
+  end
 
   defp malformed_candidate(:skip), do: :skip
   defp malformed_candidate(:reject_set), do: :reject_set
@@ -521,6 +612,26 @@ defmodule Attesto.JWS do
 
   defp validate_malformed_key!(mode),
     do: raise(ArgumentError, ":malformed_key must be :reject_set, :skip, or :raise; got #{inspect(mode)}")
+
+  defp validate_candidate_selection_options!(opts) do
+    min_rsa_bits = Keyword.get(opts, :min_rsa_bits)
+    ambiguous_kid = Keyword.get(opts, :ambiguous_kid, :allow)
+
+    if !(is_nil(min_rsa_bits) or (is_integer(min_rsa_bits) and min_rsa_bits > 0)) do
+      raise ArgumentError, ":min_rsa_bits must be nil or a positive integer"
+    end
+
+    if ambiguous_kid not in [:allow, :reject] do
+      raise ArgumentError, ":ambiguous_kid must be :allow or :reject"
+    end
+  end
+
+  defp validate_protected_header_options!(error, crit_error, supported_crit)
+       when is_atom(error) and is_atom(crit_error) and is_list(supported_crit), do: :ok
+
+  defp validate_protected_header_options!(_error, _crit_error, _supported_crit) do
+    raise ArgumentError, ":error/:crit_error must be atoms and :supported_crit must be a list"
+  end
 
   defp validate_verification_result_options!(malformed_result, claims_map?, return_key?)
        when malformed_result in [:halt, :continue] and is_boolean(claims_map?) and is_boolean(return_key?), do: :ok

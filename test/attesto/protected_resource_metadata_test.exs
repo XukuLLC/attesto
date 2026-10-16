@@ -46,6 +46,7 @@ defmodule Attesto.ProtectedResourceMetadataTest do
             "/path",
             "http://a.example",
             "ftp://a.example",
+            "https://user:password@a.example",
             "https://a.example#frag",
             "https://a.example/a b",
             "https://a.example/\x01",
@@ -60,6 +61,25 @@ defmodule Attesto.ProtectedResourceMetadataTest do
           PRM.metadata(config(), resource: bad)
         end
       end
+    end
+
+    test "opts-only metadata supports callers without an Attesto config" do
+      assert PRM.metadata(
+               resource: "https://resource.example.com/",
+               authorization_servers: ["https://auth.example.com/"]
+             ) == %{
+               "resource" => "https://resource.example.com/",
+               "authorization_servers" => ["https://auth.example.com/"]
+             }
+    end
+
+    test "HTTP resources require an explicit development opt-in" do
+      assert_raise ArgumentError, fn ->
+        PRM.metadata(resource: "http://127.0.0.1:4000/mcp")
+      end
+
+      assert PRM.metadata(resource: "http://127.0.0.1:4000/mcp", allow_http: true)["resource"] ==
+               "http://127.0.0.1:4000/mcp"
     end
 
     test "every key is a string (JSON-serialisable shape)" do

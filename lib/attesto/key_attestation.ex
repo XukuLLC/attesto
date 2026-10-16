@@ -124,8 +124,11 @@ defmodule Attesto.KeyAttestation do
   def verify(attestation, opts) when is_binary(attestation) and is_list(opts) do
     validate_options!(opts)
 
-    with {:ok, header} <- parse_header(attestation),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(attestation,
+             error: :invalid_attestation,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(attestation, header, opts),
          :ok <- check_issuer(claims, opts),
@@ -186,20 +189,6 @@ defmodule Attesto.KeyAttestation do
 
   # ── header ───────────────────────────────────────────────────────────────
 
-  defp parse_header(attestation) do
-    case JWS.peek_json(attestation, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_attestation}
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
-
   defp check_typ(%{"typ" => @typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
@@ -215,15 +204,10 @@ defmodule Attesto.KeyAttestation do
     enforce_fapi_policy =
       Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
-    candidates =
-      JWS.verification_candidates(trusted,
-        kid: Map.get(header, "kid"),
-        accepted_algs: accepted_algs,
-        fapi?: enforce_fapi_policy,
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(attestation, candidates,
+    JWS.verify_trusted(attestation, header, trusted,
+      accepted_algs: accepted_algs,
+      fapi?: enforce_fapi_policy,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_attestation

@@ -86,8 +86,11 @@ defmodule Attesto.ClientAssertion do
       when is_binary(assertion) and is_binary(client_id) and is_list(opts) do
     opts = validate_policy_options!(opts)
 
-    with {:ok, header} <- peek_header(assertion),
-         :ok <- check_crit(header),
+    with {:ok, header} <-
+           JWS.protected_header(assertion,
+             error: :invalid_assertion,
+             crit_error: :unsupported_critical_header
+           ),
          {:ok, claims} <- verify_signature(assertion, header, trusted_jwks, opts),
          :ok <- check_client_id(claims, client_id),
          :ok <- check_audience(claims, expected_audience),
@@ -108,15 +111,10 @@ defmodule Attesto.ClientAssertion do
     enforce_fapi_policy =
       Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
-    candidates =
-      JWS.verification_candidates(trusted_jwks,
-        kid: Map.get(header, "kid"),
-        accepted_algs: accepted_algs,
-        fapi?: enforce_fapi_policy,
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(assertion, candidates,
+    JWS.verify_trusted(assertion, header, trusted_jwks,
+      accepted_algs: accepted_algs,
+      fapi?: enforce_fapi_policy,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_assertion
@@ -214,14 +212,6 @@ defmodule Attesto.ClientAssertion do
 
   defp check_jti(_claims), do: {:error, :missing_jti}
 
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
-
-  defp peek_header(jwt), do: peek_json(jwt, :protected)
   defp peek_payload(jwt), do: peek_json(jwt, :payload)
 
   defp peek_json(jwt, segment) do

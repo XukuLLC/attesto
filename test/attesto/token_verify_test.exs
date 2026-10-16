@@ -673,6 +673,27 @@ defmodule Attesto.TokenVerifyTest do
     end
   end
 
+  describe "check_confirmation/2" do
+    test "binds trusted claims without repeating token verification" do
+      assert :ok = Token.check_confirmation(%{"cnf" => %{"jkt" => @valid_jkt}}, dpop_jkt: @valid_jkt)
+
+      assert {:error, :dpop_binding_mismatch} =
+               Token.check_confirmation(%{"cnf" => %{"jkt" => @valid_jkt}},
+                 dpop_jkt: Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+               )
+
+      assert :ok =
+               Token.check_confirmation(%{"cnf" => %{"x5t#S256" => @valid_x5t}},
+                 mtls_cert_thumbprint: @valid_x5t
+               )
+    end
+
+    test "rejects malformed confirmation claims and arguments" do
+      assert {:error, :unsupported_confirmation} = Token.check_confirmation(%{"cnf" => "bad"})
+      assert {:error, :unsupported_confirmation} = Token.check_confirmation(:untrusted)
+    end
+  end
+
   describe "verify/3 kid-based key selection" do
     test "a token whose header kid names a key we do not hold fails with :invalid_signature",
          %{config: config, pem: pem} do

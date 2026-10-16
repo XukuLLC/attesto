@@ -27,6 +27,17 @@ defmodule Attesto.Plug.AuthenticateTest do
     end
   end
 
+  def config_callback(config), do: config
+
+  def verify_callback(config, token, verify_opts, owner) do
+    send(owner, {:custom_verify, config, token, verify_opts})
+    {:ok, %{"sub" => "remote-subject", "scope" => "documents.read"}}
+  end
+
+  def verify_result_callback(_config, _token, _verify_opts, result), do: result
+
+  def metadata_callback(conn, suffix), do: "https://#{conn.host}/.well-known/oauth-protected-resource#{suffix}"
+
   setup do
     pem = Factory.rsa_pem()
     {:ok, config: Factory.config(pem), pem: pem}
@@ -82,6 +93,95 @@ defmodule Attesto.Plug.AuthenticateTest do
 
       refute conn.halted
       assert conn.assigns.who["sub"] == "oc_abc123"
+    end
+
+    test "honours an MFA config callback", %{config: config} do
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal())
+
+      conn =
+        [{"authorization", "Bearer " <> token}]
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: {__MODULE__, :config_callback, [config]}))
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
+    end
+
+    test "an alternate verifier reuses the HTTP pipeline and receives binding opts" do
+      owner = self()
+
+      conn =
+        [{"authorization", "Bearer remote-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            verify: {__MODULE__, :verify_callback, [owner]},
+            trusted_audiences: ["https://api.example.com"]
+          )
+        )
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "remote-subject"
+
+      assert_received {:custom_verify, :remote_issuer, "remote-token", verify_opts}
+      assert verify_opts[:dpop_jkt] == nil
+      assert verify_opts[:mtls_cert_thumbprint] == nil
+      assert verify_opts[:trusted_audiences] == ["https://api.example.com"]
+    end
+
+    test "an alternate verifier must return a plain claims map" do
+      for invalid_claims <- [nil, [], %URI{scheme: "https"}] do
+        assert_raise ArgumentError, ~r/plain map/, fn ->
+          [{"authorization", "Bearer remote-token"}]
+          |> request()
+          |> Authenticate.call(
+            Authenticate.init(
+              config: :remote_issuer,
+              verify: {__MODULE__, :verify_result_callback, [{:ok, invalid_claims}]}
+            )
+          )
+        end
+      end
+    end
+
+    test "an alternate verifier preserves insufficient-scope semantics" do
+      conn =
+        [{"authorization", "Bearer remote-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            required_scopes: ["documents.write"],
+            verify: {__MODULE__, :verify_result_callback, [{:error, :insufficient_scope}]}
+          )
+        )
+
+      assert conn.status == 403
+      assert JSON.decode!(conn.resp_body)["error"] == "insufficient_scope"
+      assert [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(scope="documents.write")
+    end
+
+    test "an alternate verifier preserves issuer-key outage semantics" do
+      for result <- [
+            {:error, {:temporarily_unavailable, :upstream_timeout}},
+            {:error, {:jwks_refresh_failed, :upstream_timeout}}
+          ] do
+        conn =
+          [{"authorization", "Bearer remote-token"}]
+          |> request()
+          |> Authenticate.call(
+            Authenticate.init(
+              config: :remote_issuer,
+              verify: {__MODULE__, :verify_result_callback, [result]}
+            )
+          )
+
+        assert conn.status == 503
+        assert JSON.decode!(conn.resp_body) == %{"error" => "temporarily_unavailable"}
+        assert [] == Plug.Conn.get_resp_header(conn, "www-authenticate")
+      end
     end
 
     test "rejects a resource-audienced token without an explicit trust policy", %{config: config} do
@@ -336,6 +436,41 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert conn.status == 401
       [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
       assert challenge =~ ~s(resource_metadata="#{url}")
+    end
+
+    test "resource_metadata accepts a connection callback and MFA", %{config: config} do
+      callback = {__MODULE__, :metadata_callback, ["/x"]}
+
+      conn =
+        []
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, resource_metadata: callback))
+
+      assert conn.status == 401
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+
+      assert challenge =~
+               ~s(resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/x")
+    end
+
+    test "an HTTP resource_metadata URL requires explicit development opt-in", %{config: config} do
+      url = "http://127.0.0.1:4000/.well-known/oauth-protected-resource"
+
+      denied =
+        []
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, resource_metadata: url))
+
+      [denied_challenge] = Plug.Conn.get_resp_header(denied, "www-authenticate")
+      refute denied_challenge =~ "resource_metadata"
+
+      allowed =
+        []
+        |> request()
+        |> Authenticate.call(Authenticate.init(config: config, resource_metadata: url, allow_http: true))
+
+      [allowed_challenge] = Plug.Conn.get_resp_header(allowed, "www-authenticate")
+      assert allowed_challenge =~ ~s(resource_metadata="#{url}")
     end
 
     test "a 401 omits the resource_metadata pointer when not configured", %{config: config} do

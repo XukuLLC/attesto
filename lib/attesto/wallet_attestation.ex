@@ -207,8 +207,11 @@ defmodule Attesto.WalletAttestation do
   # ── Client Attestation JWT ───────────────────────────────────────────────
 
   defp verify_attestation(attestation, opts) do
-    with {:ok, header} <- parse_header(attestation, :invalid_attestation),
-         :ok <- check_crit(header, :unsupported_critical_header),
+    with {:ok, header} <-
+           JWS.protected_header(attestation,
+             error: :invalid_attestation,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header, @attestation_typ, :invalid_typ),
          {:ok, claims} <- verify_attestation_signature(attestation, header, opts),
          :ok <- check_client_id(claims, opts),
@@ -229,15 +232,10 @@ defmodule Attesto.WalletAttestation do
     enforce_fapi_policy =
       Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
 
-    candidates =
-      JWS.verification_candidates(trusted,
-        kid: Map.get(header, "kid"),
-        accepted_algs: accepted_algs,
-        fapi?: enforce_fapi_policy,
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(attestation, candidates,
+    JWS.verify_trusted(attestation, header, trusted,
+      accepted_algs: accepted_algs,
+      fapi?: enforce_fapi_policy,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_attestation
@@ -299,8 +297,11 @@ defmodule Attesto.WalletAttestation do
   # ── Client Attestation PoP JWT ───────────────────────────────────────────
 
   defp verify_pop(pop, cnf_jwk_map, jkt, opts) do
-    with {:ok, header} <- parse_header(pop, :invalid_pop),
-         :ok <- check_crit(header, :unsupported_pop_critical_header),
+    with {:ok, header} <-
+           JWS.protected_header(pop,
+             error: :invalid_pop,
+             crit_error: :unsupported_pop_critical_header
+           ),
          :ok <- check_typ(header, @pop_typ, :invalid_pop_typ),
          {:ok, alg} <- check_pop_alg(header, opts),
          {:ok, cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg, opts),
@@ -463,20 +464,6 @@ defmodule Attesto.WalletAttestation do
   end
 
   # ── shared header/claim helpers ──────────────────────────────────────────
-
-  defp parse_header(jwt, error) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, error}
-    end
-  end
-
-  defp check_crit(header, error) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, error}
-    end
-  end
 
   defp check_typ(%{"typ" => typ}, typ, _error), do: :ok
   defp check_typ(_header, _typ, error), do: {:error, error}

@@ -105,14 +105,9 @@ defmodule Attesto.Federation.TrustMark do
   defp check_kid(_header), do: {:error, :invalid_trust_mark}
 
   defp verify_signature(jwt, header, jwks, opts) do
-    candidates =
-      JWS.verification_candidates(jwks,
-        kid: Map.fetch!(header, "kid"),
-        accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
-        malformed_key: :reject_set
-      )
-
-    JWS.verify_strict(jwt, candidates,
+    JWS.verify_trusted(jwt, header, jwks,
+      accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_trust_mark,

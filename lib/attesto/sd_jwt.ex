@@ -257,8 +257,11 @@ defmodule Attesto.SdJwt do
   def verify_key_binding(%{key_binding_jwt: nil}, _holder_jwk, _opts), do: {:error, :missing_key_binding}
 
   def verify_key_binding(%{} = verified, holder_jwk, opts) when is_map(holder_jwk) do
-    with {:ok, header} <- peek_header(verified.key_binding_jwt),
-         :ok <- check_crit(header, :invalid_key_binding),
+    with {:ok, header} <-
+           JWS.protected_header(verified.key_binding_jwt,
+             error: :malformed,
+             crit_error: :invalid_key_binding
+           ),
          :ok <- check_kb_typ(header),
          {:ok, claims} <- verify_kb_signature(verified.key_binding_jwt, header, holder_jwk, opts),
          :ok <- check_kb_nonce(claims, opts),
@@ -473,8 +476,11 @@ defmodule Attesto.SdJwt do
   defp verify_issuer_signature(jwt, jwks, opts) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
-    with {:ok, header} <- peek_header(jwt),
-         :ok <- check_crit(header, :malformed),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :malformed,
+             crit_error: :malformed
+           ),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
          true <- SigningAlg.valid_verification_algorithms?(accepted) and alg in accepted do
@@ -496,13 +502,6 @@ defmodule Attesto.SdJwt do
 
   defp check_typ(_header, _accepted), do: {:error, :invalid_typ}
 
-  defp check_crit(header, error) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, error}
-    end
-  end
-
   defp validate_fapi_policy!(opts) do
     case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
       :error -> :ok
@@ -512,14 +511,10 @@ defmodule Attesto.SdJwt do
   end
 
   defp verify_against_keys(jwt, alg, keys, opts) do
-    candidates =
-      JWS.verification_candidates(keys,
-        alg: alg,
-        fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts)),
-        malformed_key: :skip
-      )
-
-    JWS.verify_strict(jwt, candidates,
+    JWS.verify_trusted(jwt, %{}, keys,
+      alg: alg,
+      fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts)),
+      malformed_key: :skip,
       terminal_error: :invalid_signature,
       malformed_result: :continue,
       malformed_error: :invalid_signature
@@ -671,13 +666,6 @@ defmodule Attesto.SdJwt do
   # yields no candidates, so verification fails closed with {:error, _} rather
   # than a FunctionClauseError escaping the module's contract.
   defp keys(_other), do: []
-
-  defp peek_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :malformed}
-    end
-  end
 
   defp hash_algorithm("sha-256"), do: :sha256
   defp hash_algorithm("sha-384"), do: :sha384

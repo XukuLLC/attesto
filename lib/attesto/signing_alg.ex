@@ -130,6 +130,23 @@ defmodule Attesto.SigningAlg do
   end
 
   @doc """
+  Return every Attesto signing algorithm compatible with a parsed public key.
+
+  The result follows `allowed/0` order. RSA keys support RS256 and PS256;
+  Edwards keys include both the legacy EdDSA name and their explicit RFC 9864
+  algorithm name. Unsupported key types or curves return an empty list.
+  """
+  @spec compatible_algs(JOSE.JWK.t()) :: [alg()]
+  def compatible_algs(%JOSE.JWK{} = jwk) do
+    fields = public_fields(jwk)
+    Enum.filter(@allowed, &compatible?(&1, fields))
+  rescue
+    _error -> []
+  catch
+    _kind, _reason -> []
+  end
+
+  @doc """
   Whether `alg` and its trusted key satisfy Attesto's default FAPI policy.
 
   RSA keys require a modulus of at least 2048 bits. The legacy `EdDSA`

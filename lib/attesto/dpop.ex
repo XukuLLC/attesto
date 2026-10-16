@@ -31,6 +31,8 @@ defmodule Attesto.DPoP do
   an optional access token. A resource server composes
   `Attesto.Token.verify/3` with this module's `verify_proof/2`.
 
+  Clients can build matching proofs with `Attesto.DPoP.Proof.build/4`.
+
   ## Accepted algorithms
 
   Per RFC 9449 §4.2, DPoP proofs MUST be signed with an asymmetric

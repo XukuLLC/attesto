@@ -150,6 +150,19 @@ defmodule Attesto.Plug.RequireScopesTest do
       assert challenge =~ ~s(resource_metadata="#{url}")
     end
 
+    test "allow_http preserves a development resource_metadata pointer on 401 and 403" do
+      url = "http://127.0.0.1:4000/.well-known/oauth-protected-resource"
+      opts = RequireScopes.init(scopes: ["documents.write"], resource_metadata: url, allow_http: true)
+
+      unauthenticated = RequireScopes.call(conn(:get, "http://127.0.0.1:4000/x"), opts)
+      [unauthenticated_challenge] = Plug.Conn.get_resp_header(unauthenticated, "www-authenticate")
+      assert unauthenticated_challenge =~ ~s(resource_metadata="#{url}")
+
+      forbidden = RequireScopes.call(with_claims(%{"scope" => "documents.read"}), opts)
+      [forbidden_challenge] = Plug.Conn.get_resp_header(forbidden, "www-authenticate")
+      assert forbidden_challenge =~ ~s(resource_metadata="#{url}")
+    end
+
     test "the resource_metadata pointer is omitted when not configured" do
       opts = RequireScopes.init(["documents.write"])
 
