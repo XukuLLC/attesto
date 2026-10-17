@@ -14,7 +14,7 @@ defmodule Attesto.RequestObject.Policy do
   alias Attesto.SigningAlg
 
   @type t :: %__MODULE__{
-          accepted_algs: [SigningAlg.alg()],
+          accepted_algs: [SigningAlg.alg()] | nil,
           enforce_fapi_alg_policy: boolean(),
           require_nbf: boolean(),
           max_nbf_age_seconds: pos_integer() | nil,

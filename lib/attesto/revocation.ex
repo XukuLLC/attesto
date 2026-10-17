@@ -40,7 +40,7 @@ defmodule Attesto.Revocation do
   credential, which is what RFC 7009 revocation is primarily for.
   """
 
-  alias Attesto.{RefreshToken, Secret}
+  alias Attesto.{Options, RefreshToken, Secret, Store}
 
   @doc """
   Revoke the refresh token `token` (and its whole family) via `store`.
@@ -82,7 +82,7 @@ defmodule Attesto.Revocation do
   defp revoke_present(store, record, opts) do
     case check_issuer(record.data, opts) do
       :ok -> revoke_for_client(store, record, opts)
-      :mismatch -> :ok
+      {:error, :issuer_mismatch} -> :ok
     end
   end
 
@@ -138,21 +138,18 @@ defmodule Attesto.Revocation do
 
   defp check_issuer(data, opts) do
     case Keyword.fetch(opts, :issuer) do
-      :error -> :ok
-      {:ok, expected} -> if RefreshToken.issuer_matches?(data, expected), do: :ok, else: :mismatch
+      :error ->
+        :ok
+
+      {:ok, expected} ->
+        if RefreshToken.issuer_matches?(data, expected), do: :ok, else: {:error, :issuer_mismatch}
     end
   end
 
   defp allow_missing_client?(opts) do
-    case Keyword.fetch(opts, :allow_missing_client_id?) do
-      :error -> false
-      {:ok, value} when is_boolean(value) -> value
-      {:ok, _value} -> raise ArgumentError, ":allow_missing_client_id? must be true or false"
-    end
+    Options.boolean!(opts, :allow_missing_client_id?, false)
   end
 
-  defp store_contract_error(:get), do: raise(RuntimeError, "refresh store get/1 violated its contract")
-
-  defp store_contract_error(:revoke_family),
-    do: raise(RuntimeError, "refresh store revoke_family/1 violated its contract")
+  defp store_contract_error(:get), do: Store.contract_violation!("refresh store", {:get, 1})
+  defp store_contract_error(:revoke_family), do: Store.contract_violation!("refresh store", {:revoke_family, 1})
 end

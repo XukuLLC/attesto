@@ -22,6 +22,7 @@ defmodule Attesto.AttackClassRegressionTest do
   alias Attesto.RedirectURI
   alias Attesto.RequestObject
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
 
   @registered ["https://app.example.com/cb"]
 
@@ -151,15 +152,13 @@ defmodule Attesto.AttackClassRegressionTest do
       attacker = JOSE.JWK.generate_key({:ec, "P-256"})
       now = System.system_time(:second)
 
-      {_, forged} =
-        attacker
-        |> JOSE.JWT.sign(%{"alg" => "ES256"}, %{
+      forged =
+        JWT.sign_compact(attacker, %{"alg" => "ES256"}, %{
           "client_id" => "c1",
           "scope" => "admin",
           "iss" => "c1",
           "exp" => now + 300
         })
-        |> JOSE.JWS.compact()
 
       assert {:error, :invalid_signature} = RequestObject.verify(forged, trusted)
     end

@@ -695,6 +695,22 @@ defmodule Attesto.RefreshTokenTest do
       assert {:error, :expired} = RefreshToken.rotate(RefreshStore.ETS, t0, now: 5_000)
     end
 
+    test "expiry takes precedence over a presenting-client mismatch" do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(
+          RefreshStore.ETS,
+          context(%{client_id: "client-a"}),
+          ttl: 1,
+          now: 1_000
+        )
+
+      assert {:error, :expired} =
+               RefreshToken.rotate(RefreshStore.ETS, t0,
+                 client_id: "client-b",
+                 now: 5_000
+               )
+    end
+
     test "a multi-generation chain rotates 1 -> 2 -> 3 in the same family" do
       {:ok, %{token: t0, family_id: fam, generation: 0}} =
         RefreshToken.issue(RefreshStore.ETS, context())
@@ -736,7 +752,7 @@ defmodule Attesto.RefreshTokenTest do
   end
 
   describe "rotate/3 reuse detection and family revocation" do
-    test "replaying a swept expired ancestor revokes its live descendant" do
+    test "a swept expired ancestor is invalid while its live descendant remains usable" do
       now = System.system_time(:second)
 
       {:ok, %{token: t0}} =
@@ -752,14 +768,12 @@ defmodule Attesto.RefreshTokenTest do
       send(RefreshStore.ETS, :sweep)
       :sys.get_state(RefreshStore.ETS)
 
-      assert {:ok, parent} = RefreshStore.ETS.get(Secret.hash(t0))
-      assert parent.expires_at < now
-      assert parent.successor == %{retry_until: now - 9, recoverable: false}
-
-      assert {:error, :reuse_detected} =
-               RefreshToken.rotate(RefreshStore.ETS, t0, now: now)
+      assert :error = RefreshStore.ETS.get(Secret.hash(t0))
 
       assert {:error, :invalid_grant} =
+               RefreshToken.rotate(RefreshStore.ETS, t0, now: now)
+
+      assert {:ok, %{generation: 2}} =
                RefreshToken.rotate(RefreshStore.ETS, t1, now: now)
     end
 

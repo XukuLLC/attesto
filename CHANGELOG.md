@@ -1,8 +1,95 @@
 # Changelog
 
 All notable changes to this project are documented here. The format is
-based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Public
+functions and behaviour contracts remain compatible within 2.x where security
+permits; security and correctness fixes may tighten validation or derived
+defaults in a minor release.
+
+## [2.6.0] - 2026-10-17
+
+### Breaking
+
+- Durable logout-delivery integrations must require atomic `lease_targets/4`,
+  `acknowledge_targets/2`, and `release_targets/2` callbacks. Delivery targets
+  carry a stable `delivery_id`; this lets workers retry failed back-channel
+  logout deliveries without losing them or letting a stale worker acknowledge
+  a newer lease. The callbacks are optional in the core behaviour during 2.x
+  so existing stores still compile, while integrations such as AttestoPhoenix
+  4.2 validate them at startup. Custom stores must also schedule a bounded
+  retry driver for released rows and expired leases.
+- `TrustMark.verify/3` now requires an explicit non-empty `:subject` option so
+  a valid Trust Mark cannot be accepted for the wrong entity.
+- Issuer-derived token and JWKS endpoint URLs now preserve issuer path
+  prefixes. For example, issuer `https://id.example/tenant` derives
+  `https://id.example/tenant/oauth/token`; hosts that intentionally published
+  endpoints at the origin root must configure those endpoint URLs explicitly.
+### Security
+
+- Bind client assertions to their token-endpoint role. Verification now accepts
+  only the absent, `JWT`, or `client-authentication+jwt` `typ` values, rejects
+  authorization-request claims, and limits the remaining lifetime at
+  verification to 300 seconds by default. Set `max_lifetime: :unbounded` only
+  for an intentional exception.
+- Enforce `cnf` sender constraints after every custom access-token verifier and
+  safely normalize non-text verifier errors instead of letting malformed host
+  callback results raise while rendering an OAuth response.
+- Reject SD-JWT VCs that reconstruct `iss`, `vct`, `exp`, `nbf`, `status`, or
+  `cnf` from disclosures. These claims must be in the issuer-signed payload
+  when present; selectively disclosed `sub` and `iat` remain valid.
+- Bound reference refresh-token retention by removing expired consumed
+  ancestors after their successor retry deadline, while keeping a family index
+  so revocation and cleanup do not scan the complete token table.
+- Validate every trusted JWK's public-only status, signature use, key
+  operations, declared algorithm, key type and curve before verification.
+  Explicit RSA, Edwards, and ES256K algorithm identifiers must match their key.
+- Limit decoded mdoc CBOR input to 256 KiB before parsing, and fail closed on
+  invalid UTF-8 in resource indicators, Client ID Metadata identifiers, device
+  verification URIs, and `did:web` identifiers.
+- Add a default cap of 16 presentations per OID4VP query, including queries
+  permitting multiple credentials. Hosts can set a smaller positive
+  `max_presentations_per_query` value when verifying a response.
+- Trust chains now default to at most ten statements and reject repeated entity
+  identifiers as cycles.
+- Protect the ETS code, device-code, CIBA, and authorization-code replay-marker
+  tables from writes by arbitrary co-resident processes; all mutations now run
+  through their owning store processes.
+
+### Changed
+
+- Document the public verification-option families and their protocol-specific
+  algorithm defaults. Internal option, record, store-contract, query-policy,
+  and refresh-rotation paths now use shared validators without changing their
+  accepted inputs or return values.
+- Treat omitted OID4VP `multiple` constraints as `false`, normalize Federation
+  `scope` policy values for every entity type, and require multi-audience ID
+  Tokens to carry a matching `azp`.
+- Make Trust Mark subject binding mandatory and add the configurable
+  `max_chain_length` trust-chain verification option with a default of ten.
+- Normalize a pathless HTTPS DPoP target to `/` in both proof construction and
+  verification, following RFC 3986 equivalence rules.
+- Widen CIBA's decision-time tolerance to 60 seconds for ordinary cross-node
+  clock skew.
+
+### Fixed
+
+- Preserve the issuer authority when an appended endpoint path begins with a
+  colon-bearing segment such as `/org:tenant`; URI resolution no longer
+  mistakes that segment for a new scheme.
+- Detect a keystore whose active signing algorithm is absent from its published
+  verification algorithms and report `:signing_algorithm_not_published` in
+  rotation health.
+- Reject conflicting outer `response_type` and `request_uri` parameters when a
+  signed authorization Request Object is present instead of silently ignoring
+  them.
+- Check refresh-token expiry before client binding so expired grants do not
+  disclose whether a supplied client identifier matches.
+- Implement `CodeStore.ETS.mark_consumed/2` replay markers for bounded,
+  unbounded, and no-refresh authorization-code outcomes so reuse detection also
+  works with the reference store. The reference store also supports the
+  capability-detected code-to-access-token linkage and revocation operations
+  used by AttestoPhoenix 4.1, preserving authorization-code issuance when core
+  is upgraded independently.
 
 ## [2.5.0] - 2026-10-17
 

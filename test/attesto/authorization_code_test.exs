@@ -390,6 +390,15 @@ defmodule Attesto.AuthorizationCodeTest do
       assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
+    test "the reference store reports reuse after successful finalization", %{challenge: challenge} do
+      {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
+      assert {:ok, grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
+      assert :ok = AuthorizationCode.finalize(CodeStore.ETS, code, grant)
+
+      assert {:error, {:reuse, %{family_id: nil, subject: @subject}}} =
+               AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
+    end
+
     test "rejects an invalid clock before consuming the code", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge), now: 1_000)
 

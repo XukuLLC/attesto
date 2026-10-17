@@ -39,7 +39,7 @@ defmodule Attesto.CredentialProof do
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
-  @future_skew_seconds 60
+  @future_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type verified :: %{jwk: map(), jkt: String.t(), key_attestation: KeyAttestation.verified() | nil}
 
@@ -96,12 +96,15 @@ defmodule Attesto.CredentialProof do
   """
   @spec verify_jwt(String.t(), keyword()) :: {:ok, verified()} | {:error, verify_error()}
   def verify_jwt(proof, opts) when is_binary(proof) and is_list(opts) do
-    with {:ok, header} <- parse_header(proof),
+    with {:ok, header} <-
+           JWS.protected_header(proof,
+             error: :invalid_proof,
+             crit_error: :invalid_proof
+           ),
          :ok <- check_typ(header),
-         :ok <- check_crit(header),
          {:ok, alg} <- check_alg(header, opts),
          {:ok, jwk_map, jwk} <- extract_jwk(header, alg),
-         {:ok, claims} <- verify_signature(proof, alg, jwk),
+         {:ok, claims} <- verify_signature(proof, header, jwk_map),
          :ok <- check_audience(claims, opts),
          :ok <- check_nonce(claims, opts),
          :ok <- check_issuer(claims, opts),
@@ -115,20 +118,6 @@ defmodule Attesto.CredentialProof do
   def verify_jwt(_proof, _opts), do: {:error, :invalid_proof}
 
   # ── header ───────────────────────────────────────────────────────────────
-
-  defp parse_header(proof) do
-    case JWS.peek_json(proof, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_proof}
-    end
-  end
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :invalid_proof}
-    end
-  end
 
   defp check_typ(%{"typ" => @proof_typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
@@ -156,14 +145,16 @@ defmodule Attesto.CredentialProof do
 
   # ── signature ────────────────────────────────────────────────────────────
 
-  defp verify_signature(proof, alg, jwk) do
-    JWS.verify_strict(proof, [{nil, alg, jwk}],
+  defp verify_signature(proof, header, jwk_map) do
+    JWS.verify_trusted(proof, header, jwk_map,
+      alg: Map.get(header, "alg"),
+      select_kid: false,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
-      malformed_error: :invalid_signature
+      malformed_error: :invalid_signature,
+      claims_map?: true
     )
-  rescue
-    _ -> {:error, :invalid_signature}
   end
 
   defp jwk_thumbprint(jwk) do

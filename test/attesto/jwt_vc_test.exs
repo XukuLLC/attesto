@@ -3,6 +3,7 @@ defmodule Attesto.JwtVcTest do
   use ExUnit.Case, async: true
 
   alias Attesto.{JWS, JwtVc, Key}
+  alias Attesto.Test.JWT
 
   @issuer "https://issuer.example"
   @subject "did:example:holder"
@@ -45,8 +46,7 @@ defmodule Attesto.JwtVcTest do
         header_overrides
       )
 
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   defp valid_claims(now) do

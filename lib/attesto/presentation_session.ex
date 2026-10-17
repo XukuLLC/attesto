@@ -38,7 +38,7 @@ defmodule Attesto.PresentationSession do
   validated.
   """
 
-  alias Attesto.{MapParams, NumericDate, Secret, VpToken}
+  alias Attesto.{MapParams, NumericDate, Options, Record, Secret, Store, VpToken}
 
   @default_ttl_seconds 300
 
@@ -93,12 +93,7 @@ defmodule Attesto.PresentationSession do
     end
   end
 
-  defp ttl_seconds!(opts) do
-    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
-      ttl when is_integer(ttl) and ttl > 0 -> ttl
-      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
-    end
-  end
+  defp ttl_seconds!(opts), do: Options.positive_integer!(opts, :ttl, @default_ttl_seconds)
 
   @doc """
   Verify a wallet response and atomically complete its pending session.
@@ -416,12 +411,7 @@ defmodule Attesto.PresentationSession do
       valid_optional_field?(data, :response_encryption_jwk, &is_map/1)
   end
 
-  defp valid_optional_field?(data, key, validator) do
-    case Map.fetch(data, key) do
-      {:ok, value} -> validator.(value)
-      :error -> true
-    end
-  end
+  defp valid_optional_field?(data, key, validator), do: Record.optional_field?(data, key, validator)
 
   defp verify(vp_token, data, opts) do
     verify_opts =
@@ -481,14 +471,14 @@ defmodule Attesto.PresentationSession do
     end
   end
 
-  defp store_contract_error(callback) do
-    raise RuntimeError, "presentation session store #{callback_name(callback)} violated its contract"
-  end
+  defp store_contract_error(:put), do: Store.contract_violation!("presentation session store", {:put, 1})
+  defp store_contract_error(:get), do: Store.contract_violation!("presentation session store", {:get, 1})
+  defp store_contract_error(:take), do: Store.contract_violation!("presentation session store", {:take, 1})
+  defp store_contract_error(:complete), do: Store.contract_violation!("presentation session store", {:complete, 2})
 
-  defp callback_name(:put), do: "put/1"
-  defp callback_name(:get), do: "get/1"
-  defp callback_name(:take), do: "take/1"
-  defp callback_name(:complete), do: "complete/2"
-  defp callback_name(:attach_request_object), do: "attach_request_object/2"
-  defp callback_name(:attach_response_encryption_jwk), do: "attach_response_encryption_jwk/2"
+  defp store_contract_error(:attach_request_object),
+    do: Store.contract_violation!("presentation session store", {:attach_request_object, 2})
+
+  defp store_contract_error(:attach_response_encryption_jwk),
+    do: Store.contract_violation!("presentation session store", {:attach_response_encryption_jwk, 2})
 end

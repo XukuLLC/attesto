@@ -44,8 +44,9 @@ defmodule Attesto.CIBA do
   """
 
   alias Attesto.CIBA.Grant
+  alias Attesto.CIBA.Record, as: CIBARecord
   alias Attesto.CIBA.Request
-  alias Attesto.{Claims, NumericDate, Scope, Secret, Thumbprint}
+  alias Attesto.{Claims, NumericDate, Options, Secret, Store}
 
   @grant_type "urn:openid:params:grant-type:ciba"
 
@@ -67,37 +68,11 @@ defmodule Attesto.CIBA do
 
   # §7.3: the default minimum token-request interval.
   @default_interval 5
-  # Approval and redemption may land on nodes whose whole-second clocks differ
-  # by one second. Keep the tolerance narrow; larger future timestamps indicate
-  # impossible persisted state or a badly skewed deployment and fail closed.
-  @decision_clock_skew_seconds 1
-  @notification_token_pattern ~r/\A[A-Za-z0-9\-._~+\/]+=*\z/
-  @notification_token_max_length 1024
-  @statuses [:pending, :approved, :denied, :consumed]
+  # Approval and redemption may land on different nodes. Use the same modest
+  # whole-second clock tolerance as signed-token validation; timestamps farther
+  # ahead still indicate impossible persisted state or a badly skewed deploy.
+  @decision_clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @decision_errors [:not_found, :already_decided, :expired]
-  @canonical_data_keys [
-    :acr_values,
-    :binding_message,
-    :client_id,
-    :client_notification_token,
-    :delivery_mode,
-    :dpop_jkt,
-    :resource,
-    :scope,
-    :subject
-  ]
-  @consume_bound_fields [
-    :auth_req_id_hash,
-    :data,
-    :subject,
-    :acr,
-    :auth_time,
-    :granted_scope,
-    :granted_claims,
-    :interval,
-    :expires_at
-  ]
-  @poll_bound_fields [:auth_req_id_hash, :data, :interval, :expires_at]
 
   @typedoc "What `issue/4` hands back: the §7.3 authentication request acknowledgement."
   @type issued :: %{
@@ -318,9 +293,7 @@ defmodule Attesto.CIBA do
 
     case store.poll(hash, %{now: now}) do
       {:ok, polled_record} ->
-        if valid_record?(polled_record, hash) and
-             Map.get(polled_record, :last_polled_at) == now and
-             fields_match?(trusted_record, polled_record, @poll_bound_fields) do
+        if CIBARecord.poll_transition?(trusted_record, polled_record, hash, now) do
           resolve_polled_status(store, hash, polled_record, opts)
         else
           ciba_store_contract_error(:poll)
@@ -346,7 +319,7 @@ defmodule Attesto.CIBA do
   defp consume(store, hash, trusted_record, opts) do
     case store.consume(hash, %{now: Keyword.fetch!(opts, :now)}) do
       {:ok, consumed_record} ->
-        if valid_consume_transition?(trusted_record, consumed_record, hash) do
+        if CIBARecord.consume_transition?(trusted_record, consumed_record, hash) do
           {:ok, Grant.from_record(consumed_record)}
         else
           ciba_store_contract_error(:consume)
@@ -410,7 +383,7 @@ defmodule Attesto.CIBA do
   end
 
   defp validate_approve_result({:ok, record}, trusted_record, fields, hash) do
-    if valid_approve_transition?(trusted_record, record, fields, hash),
+    if CIBARecord.approve_transition?(trusted_record, record, fields, hash),
       do: {:ok, decision_view(record)},
       else: ciba_store_contract_error(:approve)
   end
@@ -441,7 +414,7 @@ defmodule Attesto.CIBA do
   end
 
   defp validate_deny_result({:ok, %{status: :denied} = record}, trusted_record, hash) do
-    if valid_deny_transition?(trusted_record, record, hash),
+    if CIBARecord.deny_transition?(trusted_record, record, hash),
       do: {:ok, decision_view(record)},
       else: ciba_store_contract_error(:deny)
   end
@@ -517,16 +490,7 @@ defmodule Attesto.CIBA do
   defp require_subject(_attrs), do: {:error, :invalid_subject}
 
   defp validate_request_for_issue(%Request{} = request, now) do
-    if valid_ciba_request_data?(
-         request.acr_values,
-         request.binding_message,
-         request.client_id,
-         request.client_notification_token,
-         request.delivery_mode
-       ) and valid_ciba_hint?(request.hint) and valid_ciba_scope?(request.scope) and
-         valid_optional_display_text?(request.user_code) and
-         valid_requested_expiry?(request.requested_expiry) and
-         valid_signed_request_state?(request, now) do
+    if CIBARecord.request_for_issue?(request, now) do
       :ok
     else
       {:error, :invalid_request}
@@ -535,24 +499,17 @@ defmodule Attesto.CIBA do
 
   defp validate_issue_attrs(attrs) do
     cond do
-      not valid_resource_list?(Map.get(attrs, :resource, [])) -> {:error, :invalid_resource}
-      not valid_optional_jkt?(Map.get(attrs, :dpop_jkt)) -> {:error, :invalid_dpop_jkt}
+      not CIBARecord.resource_list?(Map.get(attrs, :resource, [])) -> {:error, :invalid_resource}
+      not CIBARecord.optional_jkt?(Map.get(attrs, :dpop_jkt)) -> {:error, :invalid_dpop_jkt}
       true -> :ok
     end
   end
 
   defp validate_issue_options!(opts) do
-    positive_option!(opts, :expires_in, @default_expires_in)
-    positive_option!(opts, :max_expires_in, @max_expires_in)
-    positive_option!(opts, :interval, @default_interval)
+    Options.positive_integer!(opts, :expires_in, @default_expires_in)
+    Options.positive_integer!(opts, :max_expires_in, @max_expires_in)
+    Options.positive_integer!(opts, :interval, @default_interval)
     :ok
-  end
-
-  defp positive_option!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> value
-      _invalid -> raise ArgumentError, ":#{key} must be a positive integer"
-    end
   end
 
   defp approval_fields(approval, trusted_record, now) do
@@ -575,13 +532,13 @@ defmodule Attesto.CIBA do
 
   defp validate_approval_types(fields, now) do
     cond do
-      not valid_optional_non_empty_binary?(fields.acr) ->
+      not CIBARecord.optional_non_empty_binary?(fields.acr) ->
         {:error, :invalid_acr}
 
       not (is_integer(fields.auth_time) and fields.auth_time >= 0 and fields.auth_time <= now) ->
         {:error, :invalid_auth_time}
 
-      not valid_optional_scope_list?(fields.granted_scope) ->
+      not CIBARecord.optional_scope_list?(fields.granted_scope) ->
         {:error, :invalid_scope}
 
       not Claims.portable_json_object?(fields.granted_claims) ->
@@ -690,7 +647,7 @@ defmodule Attesto.CIBA do
   defp lookup_record(store, hash) do
     case store.lookup(hash) do
       {:ok, record} ->
-        if valid_record?(record, hash),
+        if CIBARecord.valid?(record, hash),
           do: {:ok, record},
           else: ciba_store_contract_error(:lookup)
 
@@ -702,217 +659,10 @@ defmodule Attesto.CIBA do
     end
   end
 
-  defp valid_record?(
-         %{
-           auth_req_id_hash: record_hash,
-           data:
-             %{
-               acr_values: acr_values,
-               binding_message: binding_message,
-               client_id: client_id,
-               client_notification_token: client_notification_token,
-               delivery_mode: delivery_mode,
-               dpop_jkt: dpop_jkt,
-               resource: resource,
-               scope: scope,
-               subject: requested_subject
-             } = data,
-           status: status,
-           interval: interval,
-           expires_at: expires_at
-         } = record,
-         expected_hash
-       ) do
-    record_hash == expected_hash and
-      valid_ciba_request_data?(
-        acr_values,
-        binding_message,
-        client_id,
-        client_notification_token,
-        delivery_mode
-      ) and
-      valid_ciba_grant_data?(dpop_jkt, resource, scope, requested_subject) and
-      exact_canonical_data_keys?(data) and
-      valid_ciba_state?(status, interval, expires_at) and valid_ciba_optional_fields?(record) and
-      valid_decision_fields?(record)
-  end
-
-  defp valid_record?(_record, _expected_hash), do: false
-
-  defp valid_ciba_request_data?(acr_values, binding_message, client_id, notification_token, delivery_mode) do
-    valid_non_empty_string_list?(acr_values) and valid_optional_display_text?(binding_message) and
-      is_binary(client_id) and client_id != "" and
-      valid_notification_binding?(delivery_mode, notification_token)
-  end
-
-  defp valid_notification_binding?(:poll, nil), do: true
-
-  defp valid_notification_binding?(mode, token) when mode in [:ping, :push],
-    do:
-      is_binary(token) and token != "" and byte_size(token) <= @notification_token_max_length and
-        Regex.match?(@notification_token_pattern, token)
-
-  defp valid_notification_binding?(_mode, _token), do: false
-
-  defp valid_ciba_hint?({kind, value}) when kind in [:login_hint, :login_hint_token, :id_token_hint],
-    do: is_binary(value) and value != ""
-
-  defp valid_ciba_hint?(_hint), do: false
-
-  defp valid_ciba_scope?(scope), do: Scope.valid_list?(scope, allow_empty?: false) and "openid" in scope
-
-  defp valid_optional_display_text?(nil), do: true
-
-  defp valid_optional_display_text?(value) when is_binary(value) and value != "",
-    do: String.valid?(value) and not Regex.match?(~r/[\x00-\x1F\x7F]/u, value)
-
-  defp valid_optional_display_text?(_value), do: false
-
-  defp valid_requested_expiry?(nil), do: true
-  defp valid_requested_expiry?(value), do: is_integer(value) and value > 0
-
-  defp valid_signed_request_state?(%Request{signed?: false, request_jti: nil, request_exp: nil}, _now), do: true
-
-  defp valid_signed_request_state?(%Request{signed?: true, request_jti: jti, request_exp: request_exp}, now),
-    do: is_binary(jti) and jti != "" and is_integer(request_exp) and request_exp > now
-
-  defp valid_signed_request_state?(_request, _now), do: false
-
-  defp valid_ciba_grant_data?(dpop_jkt, resource, scope, requested_subject) do
-    valid_optional_jkt?(dpop_jkt) and valid_resource_list?(resource) and
-      valid_scope_list?(scope) and is_binary(requested_subject) and requested_subject != ""
-  end
-
-  # The issue-time CIBA context is canonical. Host-specific values belong in a
-  # separate host record, not beside these protocol fields, so extra keys make
-  # a persisted record malformed rather than being silently ignored.
-  defp exact_canonical_data_keys?(data),
-    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
-
-  defp valid_ciba_state?(status, interval, expires_at) do
-    status in @statuses and is_integer(interval) and interval >= 0 and
-      is_integer(expires_at) and expires_at >= 0
-  end
-
-  defp valid_ciba_optional_fields?(record) do
-    valid_optional_field?(record, :subject, &valid_optional_binary?/1) and
-      valid_optional_field?(record, :acr, &valid_optional_binary?/1) and
-      valid_optional_field?(record, :auth_time, &valid_optional_non_negative_integer?/1) and
-      valid_optional_field?(record, :granted_scope, &valid_optional_scope_list?/1) and
-      valid_optional_field?(record, :granted_claims, &valid_optional_json_object?/1) and
-      valid_optional_field?(record, :last_polled_at, &valid_optional_non_negative_integer?/1)
-  end
-
-  defp valid_decision_fields?(%{status: status} = record) when status in [:approved, :consumed] do
-    case record do
-      %{
-        subject: subject,
-        acr: acr,
-        auth_time: auth_time,
-        granted_scope: granted_scope,
-        granted_claims: granted_claims
-      } ->
-        valid_decision_subject?(subject, record.data.subject) and
-          valid_decision_authentication?(acr, record.data.acr_values, auth_time, record.expires_at) and
-          valid_decision_grant?(granted_scope, record.data.scope, granted_claims)
-
-      _missing_decision_fields ->
-        false
-    end
-  end
-
-  defp valid_decision_fields?(_record), do: true
-
-  defp valid_decision_subject?(subject, requested_subject),
-    do: is_binary(subject) and subject != "" and subject == requested_subject
-
-  defp valid_decision_authentication?(acr, requested_acrs, auth_time, expires_at) do
-    valid_decision_acr?(acr, requested_acrs) and is_integer(auth_time) and
-      auth_time >= 0 and auth_time <= expires_at
-  end
-
-  defp valid_decision_grant?(granted_scope, requested_scope, granted_claims) do
-    valid_optional_scope_list?(granted_scope) and
-      valid_granted_scope?(granted_scope, requested_scope) and Claims.portable_json_object?(granted_claims)
-  end
-
-  defp valid_decision_acr?(acr, [_requested | _]), do: is_binary(acr) and acr != ""
-  defp valid_decision_acr?(acr, []), do: valid_optional_non_empty_binary?(acr)
-
-  defp valid_consume_transition?(trusted_record, consumed_record, hash) do
-    trusted_record.status == :approved and consumed_record.status == :consumed and
-      valid_record?(consumed_record, hash) and
-      fields_match?(trusted_record, consumed_record, @consume_bound_fields)
-  end
-
-  defp valid_approve_transition?(trusted_record, approved_record, approval_fields, hash) do
-    trusted_record.status == :pending and approved_record.status == :approved and
-      valid_record?(approved_record, hash) and
-      fields_match?(trusted_record, approved_record, @poll_bound_fields) and
-      Enum.all?([:subject, :acr, :auth_time, :granted_scope, :granted_claims], fn field ->
-        Map.get(approved_record, field) == Map.get(approval_fields, field)
-      end)
-  end
-
-  defp valid_deny_transition?(trusted_record, denied_record, hash) do
-    trusted_record.status == :pending and denied_record.status == :denied and
-      valid_record?(denied_record, hash) and
-      fields_match?(trusted_record, denied_record, @poll_bound_fields)
-  end
-
-  defp fields_match?(left, right, fields) do
-    Enum.all?(fields, fn field -> Map.get(left, field) == Map.get(right, field) end)
-  end
-
-  defp valid_optional_field?(record, field, validator) do
-    case Map.fetch(record, field) do
-      {:ok, value} -> validator.(value)
-      :error -> true
-    end
-  end
-
-  defp valid_non_empty_string_list?(value), do: is_list(value) and Enum.all?(value, &(is_binary(&1) and &1 != ""))
-
-  defp valid_scope_list?(value), do: Scope.valid_list?(value)
-  defp valid_resource_list?(value), do: valid_non_empty_string_list?(value)
-  defp valid_optional_scope_list?(nil), do: true
-  defp valid_optional_scope_list?(value), do: valid_scope_list?(value)
-  defp valid_granted_scope?(nil, _requested), do: true
-
-  defp valid_granted_scope?(granted, requested), do: MapSet.subset?(MapSet.new(granted), MapSet.new(requested))
-
-  defp valid_optional_binary?(nil), do: true
-  defp valid_optional_binary?(value), do: is_binary(value)
-  defp valid_optional_non_empty_binary?(nil), do: true
-  defp valid_optional_non_empty_binary?(value), do: is_binary(value) and value != ""
-  defp valid_optional_jkt?(nil), do: true
-  defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
-  defp valid_optional_json_object?(nil), do: true
-  defp valid_optional_json_object?(value), do: Claims.portable_json_object?(value)
-  defp valid_optional_non_negative_integer?(nil), do: true
-  defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
-
-  defp ciba_store_contract_error(:put) do
-    raise RuntimeError, "CIBA store put/1 violated its contract"
-  end
-
-  defp ciba_store_contract_error(:lookup) do
-    raise RuntimeError, "CIBA store lookup/1 violated its contract"
-  end
-
-  defp ciba_store_contract_error(:approve) do
-    raise RuntimeError, "CIBA store approve/3 violated its contract"
-  end
-
-  defp ciba_store_contract_error(:deny) do
-    raise RuntimeError, "CIBA store deny/2 violated its contract"
-  end
-
-  defp ciba_store_contract_error(:poll) do
-    raise RuntimeError, "CIBA store poll/2 violated its contract"
-  end
-
-  defp ciba_store_contract_error(:consume) do
-    raise RuntimeError, "CIBA store consume/2 violated its contract"
-  end
+  defp ciba_store_contract_error(:put), do: Store.contract_violation!("CIBA store", {:put, 1})
+  defp ciba_store_contract_error(:lookup), do: Store.contract_violation!("CIBA store", {:lookup, 1})
+  defp ciba_store_contract_error(:approve), do: Store.contract_violation!("CIBA store", {:approve, 3})
+  defp ciba_store_contract_error(:deny), do: Store.contract_violation!("CIBA store", {:deny, 2})
+  defp ciba_store_contract_error(:poll), do: Store.contract_violation!("CIBA store", {:poll, 2})
+  defp ciba_store_contract_error(:consume), do: Store.contract_violation!("CIBA store", {:consume, 2})
 end

@@ -3,6 +3,7 @@ defmodule Attesto.AuthorizationRequestTest do
 
   alias Attesto.AuthorizationRequest
   alias Attesto.RequestObject.Policy
+  alias Attesto.Test.JWT
 
   @redirect_uri "https://client.example.com/cb"
   @registered [@redirect_uri]
@@ -55,7 +56,7 @@ defmodule Attesto.AuthorizationRequestTest do
     {_, public_map} = JOSE.JWK.to_public_map(jwk)
     client_jwk = Map.merge(public_map, %{"kid" => kid, "alg" => alg})
     header = Map.merge(%{"alg" => alg, "kid" => kid}, Keyword.get(opts, :header, %{}))
-    {_, request} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+    request = JWT.sign_compact(jwk, header, claims)
     {request, client_jwk}
   end
 
@@ -348,6 +349,55 @@ defmodule Attesto.AuthorizationRequestTest do
       assert err.state == "xyz"
     end
 
+    test "an explicitly present empty or malformed request_uri is still rejected" do
+      for request_uri <- ["", nil, 123] do
+        assert {:error, {:redirect, err}} =
+                 validate(base_params(%{"request_uri" => request_uri}))
+
+        assert err.error == "request_uri_not_supported"
+      end
+    end
+
+    test "request_uri is rejected when an inline request object is also present" do
+      {request, client_jwk} = signed_request_object(fapi_request_claims(%{"state" => "signed-state"}))
+
+      assert {:error, {:redirect, err}} =
+               AuthorizationRequest.validate(
+                 %{
+                   "request" => request,
+                   "request_uri" => "https://rp.example/request.jwt",
+                   "client_id" => "client-123",
+                   "redirect_uri" => @redirect_uri
+                 },
+                 registered_redirect_uris: @registered,
+                 request_object_jwks: %{"keys" => [client_jwk]},
+                 request_object_audience: @issuer
+               )
+
+      assert err.error == "request_uri_not_supported"
+      assert err.state == "signed-state"
+    end
+
+    test "an empty outer request_uri is rejected with an inline request object" do
+      {request, client_jwk} = signed_request_object(fapi_request_claims(%{"state" => "signed-state"}))
+
+      assert {:error, {:redirect, err}} =
+               AuthorizationRequest.validate(
+                 %{
+                   "request" => request,
+                   "request_uri" => "",
+                   "client_id" => "client-123",
+                   "redirect_uri" => @redirect_uri
+                 },
+                 registered_redirect_uris: @registered,
+                 request_object_jwks: %{"keys" => [client_jwk]},
+                 request_object_audience: @issuer
+               )
+
+      assert err.error == "request_uri_not_supported"
+      assert err.state == "signed-state"
+    end
+
     test "request object is rejected when no trusted client keys are supplied" do
       assert {:error, {:redirect, err}} = validate(base_params(%{"request" => "header.body.sig"}))
 
@@ -538,6 +588,25 @@ defmodule Attesto.AuthorizationRequestTest do
                  registered_redirect_uris: @registered,
                  request_object_jwks: %{"keys" => [client_jwk]},
                  request_object_audience: "https://issuer.example"
+               )
+
+      assert err.error == "invalid_request_object"
+    end
+
+    test "rejects a response_type that conflicts with the signed request object" do
+      {request, client_jwk} = signed_request_object(fapi_request_claims())
+
+      assert {:error, {:redirect, err}} =
+               AuthorizationRequest.validate(
+                 %{
+                   "request" => request,
+                   "response_type" => "token",
+                   "client_id" => "client-123",
+                   "redirect_uri" => @redirect_uri
+                 },
+                 registered_redirect_uris: @registered,
+                 request_object_jwks: %{"keys" => [client_jwk]},
+                 request_object_audience: @issuer
                )
 
       assert err.error == "invalid_request_object"

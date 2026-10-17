@@ -60,6 +60,18 @@ defmodule Attesto.DPoP.ProofTest do
       end
     end
 
+    test "normalizes a pathless target to the equivalent slash path" do
+      assert {:ok, proof} = Proof.build(ec_key(), "GET", "https://issuer.example.com", now: @now)
+      assert claims(proof)["htu"] == "https://issuer.example.com/"
+
+      assert {:ok, _verified} =
+               DPoP.verify_proof(proof,
+                 http_method: "GET",
+                 http_uri: "https://issuer.example.com",
+                 now: @now
+               )
+    end
+
     test "accepts a DateTime clock and validates method, jti, nonce, and access token" do
       datetime = DateTime.from_unix!(@now)
       assert {:ok, proof} = Proof.build(ec_key(), "GET", @htu, now: datetime)

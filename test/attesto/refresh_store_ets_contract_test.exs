@@ -65,7 +65,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
     assert token == successor.token
   end
 
-  test "the sweeper retains replay evidence after retry deadline while a descendant is live" do
+  test "the sweeper drops an expired ancestor after its retry deadline while a descendant is live" do
     now = System.system_time(:second)
     rotation_now = now - 100
     record = contract_refresh_record(%{expires_at: now - 2})
@@ -76,8 +76,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
     send(ETS, :sweep)
     :sys.get_state(ETS)
 
-    assert {:ok, stored} = ETS.get(record.token_hash)
-    assert stored.successor == %{retry_until: now - 1, recoverable: false}
+    assert :error = ETS.get(record.token_hash)
     assert {:ok, ^child} = ETS.get(child.token_hash)
   end
 
@@ -97,6 +96,7 @@ defmodule Attesto.RefreshStoreETSContractTest do
 
     assert :error = ETS.get(record.token_hash)
     assert :error = ETS.get(child.token_hash)
+    assert [] = :ets.lookup(:"#{ETS}.Families", record.family_id)
   end
 
   test "revocation remains sticky past the legacy 30-day horizon for a long-lived imported family" do
@@ -115,5 +115,46 @@ defmodule Attesto.RefreshStoreETSContractTest do
 
     late_record = contract_refresh_record(%{family_id: family_id, generation: 1, expires_at: now + 365 * 24 * 60 * 60})
     assert {:error, :family_revoked} = ETS.insert(late_record)
+  end
+
+  test "a live family may rotate beyond 1,024 generations" do
+    now = System.system_time(:second)
+    family_id = "bounded-family"
+
+    record =
+      contract_refresh_record(%{
+        family_id: family_id,
+        generation: 1_023,
+        expires_at: now + 3_600
+      })
+
+    :ok = ETS.insert(record)
+    {child, successor} = rotate_fixture(record, now, now + 60)
+
+    assert {:ok, _parent, ^child} = ETS.rotate(record.token_hash, child, successor, now: now)
+    assert {:ok, ^child} = ETS.get(child.token_hash)
+  end
+
+  test "family membership index is maintained through rotation and revocation" do
+    now = System.system_time(:second)
+    family_id = "indexed-family"
+    record = contract_refresh_record(%{family_id: family_id, expires_at: now + 3_600})
+    :ok = ETS.insert(record)
+    {child, successor} = rotate_fixture(record, now, now + 60)
+    assert {:ok, _parent, ^child} = ETS.rotate(record.token_hash, child, successor, now: now)
+
+    families_table = :"#{ETS}.Families"
+
+    assert [{^family_id, child_hash}, {^family_id, parent_hash}] =
+             families_table
+             |> :ets.lookup(family_id)
+             |> Enum.sort()
+
+    assert Enum.sort([child_hash, parent_hash]) == Enum.sort([child.token_hash, record.token_hash])
+
+    :ok = ETS.revoke_family(family_id)
+    assert [] = :ets.lookup(families_table, family_id)
+    assert :error = ETS.get(record.token_hash)
+    assert :error = ETS.get(child.token_hash)
   end
 end

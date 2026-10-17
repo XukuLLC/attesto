@@ -22,15 +22,19 @@ defmodule Attesto.ClientAssertion do
 
   alias Attesto.{Claims, JWS}
   alias Attesto.NumericDate
+  alias Attesto.Options
   alias Attesto.SigningAlg
 
   @assertion_type "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  @default_max_lifetime_seconds 300
   @max_jti_bytes 256
+  @accepted_typ [nil, "JWT", "client-authentication+jwt"]
+  @authorization_request_claims ~w(response_type redirect_uri code_challenge request request_uri)
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
-          | {:max_lifetime, pos_integer()}
+          | {:max_lifetime, pos_integer() | :unbounded}
           | {:accepted_algs, [SigningAlg.alg()]}
           | {:enforce_fapi_alg_policy, boolean()}
         ]
@@ -70,6 +74,10 @@ defmodule Attesto.ClientAssertion do
 
   Opts:
 
+    * `:max_lifetime` - maximum remaining assertion lifetime in seconds,
+      measured from verification time to `exp`. Defaults to 300. Set
+      `:unbounded` only when the deployment deliberately applies its own
+      assertion-lifetime policy.
     * `:accepted_algs` - the JOSE algorithms a candidate trusted key may use.
       Defaults to `SigningAlg.fapi_algs/0` (PS256, ES256, EdDSA over Ed25519,
       and explicit Ed25519). An empty list always denies all algorithms.
@@ -91,7 +99,9 @@ defmodule Attesto.ClientAssertion do
              error: :invalid_assertion,
              crit_error: :unsupported_critical_header
            ),
+         :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(assertion, header, trusted_jwks, opts),
+         :ok <- reject_authorization_request_claims(claims),
          :ok <- check_client_id(claims, client_id),
          :ok <- check_audience(claims, expected_audience),
          :ok <- check_expiry(claims, opts),
@@ -109,7 +119,7 @@ defmodule Attesto.ClientAssertion do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
+      Keyword.fetch!(opts, :enforce_fapi_alg_policy)
 
     JWS.verify_trusted(assertion, header, trusted_jwks,
       accepted_algs: accepted_algs,
@@ -123,16 +133,13 @@ defmodule Attesto.ClientAssertion do
 
   defp validate_policy_options!(opts) do
     enforce_fapi_policy =
-      case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
-        :error -> SigningAlg.default_fapi_policy?(opts)
-        {:ok, value} when is_boolean(value) -> value
-        {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
-      end
+      Options.boolean!(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?())
 
     case Keyword.fetch(opts, :max_lifetime) do
       :error -> :ok
+      {:ok, :unbounded} -> :ok
       {:ok, value} when is_integer(value) and value > 0 -> :ok
-      {:ok, _invalid} -> raise ArgumentError, ":max_lifetime must be a positive integer"
+      {:ok, _invalid} -> raise ArgumentError, ":max_lifetime must be a positive integer or :unbounded"
     end
 
     Keyword.put(opts, :enforce_fapi_alg_policy, enforce_fapi_policy)
@@ -140,6 +147,18 @@ defmodule Attesto.ClientAssertion do
 
   defp check_client_id(%{"iss" => id, "sub" => id}, id) when is_binary(id) and id != "", do: :ok
   defp check_client_id(_claims, _client_id), do: {:error, :invalid_client_id}
+
+  defp check_typ(header) do
+    if Claims.typ_matches?(Map.get(header, "typ"), @accepted_typ, normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :invalid_assertion}
+  end
+
+  defp reject_authorization_request_claims(claims) do
+    if Enum.any?(@authorization_request_claims, &Map.has_key?(claims, &1)),
+      do: {:error, :invalid_assertion},
+      else: :ok
+  end
 
   # FAPI 2 requires a single-valued string `aud`. An array audience is
   # rejected even when it contains an accepted value, and the string must
@@ -163,11 +182,11 @@ defmodule Attesto.ClientAssertion do
   defp check_expiry(_claims, _opts), do: {:error, :expired}
 
   defp check_max_lifetime(exp, now, opts) do
-    case Keyword.get(opts, :max_lifetime) do
+    case Keyword.get(opts, :max_lifetime, @default_max_lifetime_seconds) do
       n when is_integer(n) and n > 0 ->
         if NumericDate.within_lifetime?(exp, now, n), do: :ok, else: {:error, :invalid_assertion}
 
-      _ ->
+      :unbounded ->
         :ok
     end
   end

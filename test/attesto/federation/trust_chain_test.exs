@@ -185,6 +185,25 @@ defmodule Attesto.Federation.TrustChainTest do
              TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
   end
 
+  test "bounds chain length before signature verification" do
+    fixture = chain_fixture()
+
+    assert {:error, :invalid_trust_chain} =
+             TrustChain.validate(fixture.chain, fixture.anchor_jwks,
+               now: @now,
+               max_chain_length: 2
+             )
+
+    assert_raise ArgumentError, fn ->
+      TrustChain.validate(fixture.chain, fixture.anchor_jwks, max_chain_length: 0)
+    end
+  end
+
+  test "rejects repeated entity identifiers as a cycle" do
+    fixture = chain_fixture(anchor_entity: @leaf)
+    assert {:error, :broken_trust_chain} = TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+  end
+
   defp chain_fixture(overrides \\ []) do
     leaf_pem = Factory.ec_pem()
     intermediate_pem = Factory.ec_pem()
@@ -214,10 +233,12 @@ defmodule Attesto.Federation.TrustChainTest do
 
     leaf = EntityStatement.entity_configuration(leaf_pem, @leaf, leaf_options)
 
+    intermediate_entity = Keyword.get(overrides, :intermediate_entity, @intermediate)
+
     intermediate =
       subordinate_statement(
         intermediate_pem,
-        @intermediate,
+        intermediate_entity,
         @leaf,
         leaf_jwks,
         @now + 400,
@@ -233,12 +254,14 @@ defmodule Attesto.Federation.TrustChainTest do
         "allowed_entity_types" => ["openid_relying_party"]
       })
 
+    anchor_entity = Keyword.get(overrides, :anchor_entity, @anchor)
+
     anchor =
       EntityStatement.build(
         anchor_pem,
         %{
-          "iss" => @anchor,
-          "sub" => @intermediate,
+          "iss" => anchor_entity,
+          "sub" => intermediate_entity,
           "jwks" => intermediate_jwks,
           "metadata_policy" => anchor_policy,
           "constraints" => anchor_constraints

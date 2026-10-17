@@ -9,6 +9,7 @@ defmodule Attesto.C11PolicyPinTest do
   alias Attesto.Key
   alias Attesto.RequestObject
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
   alias Attesto.Token
 
   @client_id "client-123"
@@ -46,8 +47,7 @@ defmodule Attesto.C11PolicyPinTest do
       )
 
     header = %{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}
-    {_header, jwt} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(jwk, header, claims)
   end
 
   test "ClientAssertion keeps scalar-only audience acceptance" do
@@ -89,8 +89,7 @@ defmodule Attesto.C11PolicyPinTest do
       "typ" => "oauth-id-jag+jwt"
     }
 
-    {_header, jwt} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(jwk, header, claims)
   end
 
   test "IdentityAssertion accepts one-element audience arrays and rejects longer arrays" do
@@ -129,7 +128,11 @@ defmodule Attesto.C11PolicyPinTest do
     assert {:ok, %{"aud" => [^configured_audience, "https://resource.example"]}} =
              Token.verify(config, access_token)
 
-    id_token = signed_id_token(config, %{"aud" => [@client_id, "https://other-rp.example"]})
+    id_token =
+      signed_id_token(config, %{
+        "aud" => [@client_id, "https://other-rp.example"],
+        "azp" => @client_id
+      })
 
     assert {:ok, %{"aud" => [@client_id, "https://other-rp.example"]}} =
              IDToken.verify(config, id_token, client_id: @client_id)
@@ -174,8 +177,7 @@ defmodule Attesto.C11PolicyPinTest do
       "typ" => header_typ
     }
 
-    {_header, jwt} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(jwk, header, claims)
   end
 
   test "RequestObject normalizes application/ typ prefixes case-insensitively" do

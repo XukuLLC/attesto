@@ -1,9 +1,7 @@
 defmodule Attesto.AuthorizationCodeReuseETSTest do
   @moduledoc false
-  # The ETS reference CodeStore does NOT implement the optional reuse-tracking
-  # callbacks, so a re-presentation surfaces as plain invalid_grant rather than
-  # {:error, {:reuse, meta}}. (The reuse-tracking path is covered by the
-  # per-test Agent store in authorization_code_reuse_test.exs.)
+  # The ETS reference CodeStore retains a marker after a completed redemption,
+  # so a re-presentation carries the context needed for containment.
   #
   # async: false - `Attesto.CodeStore.ETS` is a named singleton; running this
   # concurrently with any other test that boots the same named store races on
@@ -45,17 +43,17 @@ defmodule Attesto.AuthorizationCodeReuseETSTest do
     Map.merge(%{redirect_uri: @redirect_uri, code_verifier: @verifier, client_id: @client_id}, overrides)
   end
 
-  describe "redeem/4 without reuse tracking (ETS reference store)" do
-    test "a second redeem is invalid_grant: the store does not track reuse", %{challenge: challenge} do
+  describe "redeem/4 with ETS reuse tracking" do
+    test "a finalized redemption is reported as reuse on the second attempt", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(ETS, code_attrs(challenge, %{family_id: @family_id}))
 
-      # family_id still round-trips even when reuse tracking is absent.
-      assert {:ok, %Grant{family_id: @family_id}} = AuthorizationCode.redeem(ETS, code, redeem_params())
+      assert {:ok, %Grant{family_id: @family_id} = grant} =
+               AuthorizationCode.redeem(ETS, code, redeem_params())
 
-      # A store without mark_consumed/2 surfaces a re-presentation as plain
-      # invalid_grant - reuse detection is additive, never required.
-      refute function_exported?(ETS, :mark_consumed, 2)
-      assert {:error, :invalid_grant} = AuthorizationCode.redeem(ETS, code, redeem_params())
+      assert :ok = AuthorizationCode.finalize(ETS, code, grant)
+
+      assert {:error, {:reuse, %{family_id: nil, subject: @subject}}} =
+               AuthorizationCode.redeem(ETS, code, redeem_params())
     end
   end
 end

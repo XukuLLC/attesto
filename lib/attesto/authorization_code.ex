@@ -101,10 +101,12 @@ defmodule Attesto.AuthorizationCode do
   alias Attesto.AuthorizationCode.Grant
   alias Attesto.Claims
   alias Attesto.NumericDate
+  alias Attesto.Options
   alias Attesto.PKCE
+  alias Attesto.Record
   alias Attesto.Scope
   alias Attesto.Secret
-  alias Attesto.Thumbprint
+  alias Attesto.Store
 
   @default_ttl_seconds 60
   @canonical_data_keys [
@@ -202,12 +204,7 @@ defmodule Attesto.AuthorizationCode do
     end
   end
 
-  defp ttl_seconds!(opts) do
-    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
-      ttl when is_integer(ttl) and ttl > 0 -> ttl
-      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
-    end
-  end
+  defp ttl_seconds!(opts), do: Options.positive_integer!(opts, :ttl, @default_ttl_seconds)
 
   @doc """
   Validate and consume a code at the token endpoint.
@@ -438,9 +435,9 @@ defmodule Attesto.AuthorizationCode do
   end
 
   defp valid_refresh_grant?(%Grant{} = grant) do
-    non_empty_binary?(grant.client_id) and non_empty_binary?(grant.redirect_uri) and
-      non_empty_binary?(grant.subject) and valid_scope?(grant.scope) and
-      valid_resource?(grant.resource) and valid_optional_jkt?(grant.dpop_jkt) and
+    Record.non_empty_binary?(grant.client_id) and Record.non_empty_binary?(grant.redirect_uri) and
+      Record.non_empty_binary?(grant.subject) and valid_scope?(grant.scope) and
+      valid_resource?(grant.resource) and Record.optional_jkt?(grant.dpop_jkt) and
       valid_optional_family_id?(grant.family_id) and Claims.portable_json_object?(grant.claims)
   end
 
@@ -473,7 +470,7 @@ defmodule Attesto.AuthorizationCode do
   end
 
   defp validate_issued_refresh!(_invalid) do
-    raise RuntimeError, "refresh token issue/3 violated its contract"
+    Store.contract_violation!("refresh token", {:issue, 3})
   end
 
   # Record the successful redemption so a re-presentation of the same code
@@ -524,11 +521,7 @@ defmodule Attesto.AuthorizationCode do
   end
 
   defp allow_missing_client?(opts) do
-    case Keyword.fetch(opts, :allow_missing_client_id?) do
-      :error -> false
-      {:ok, value} when is_boolean(value) -> value
-      {:ok, _value} -> raise ArgumentError, ":allow_missing_client_id? must be true or false"
-    end
+    Options.boolean!(opts, :allow_missing_client_id?, false)
   end
 
   # ----- issue validation -----
@@ -571,16 +564,16 @@ defmodule Attesto.AuthorizationCode do
   # explicit while holding the function's branching low.
   defp validate_issue_attrs(attrs, scope, resource, dpop_jkt, family_id, claims) do
     [
-      {non_empty_binary?(Map.get(attrs, :client_id)), :invalid_client_id},
-      {non_empty_binary?(Map.get(attrs, :redirect_uri)), :invalid_redirect_uri},
+      {Record.non_empty_binary?(Map.get(attrs, :client_id)), :invalid_client_id},
+      {Record.non_empty_binary?(Map.get(attrs, :redirect_uri)), :invalid_redirect_uri},
       {valid_optional_challenge?(Map.get(attrs, :code_challenge)), :invalid_code_challenge},
-      {non_empty_binary?(Map.get(attrs, :subject)), :invalid_subject},
+      {Record.non_empty_binary?(Map.get(attrs, :subject)), :invalid_subject},
       {valid_scope?(scope), :invalid_scope},
       # RFC 8707 §2.2: the resource indicator(s) the user authorized are bound to
       # the code (like scope) so the token endpoint mints `aud` from what was
       # granted at authorization, not a value re-submitted at redemption.
       {valid_resource?(resource), :invalid_resource},
-      {valid_optional_jkt?(dpop_jkt), :invalid_dpop_jkt},
+      {Record.optional_jkt?(dpop_jkt), :invalid_dpop_jkt},
       {valid_optional_family_id?(family_id), :invalid_family_id},
       {Claims.portable_json_object?(claims), :invalid_claims}
     ]
@@ -645,8 +638,6 @@ defmodule Attesto.AuthorizationCode do
 
   # ----- helpers -----
 
-  defp non_empty_binary?(v), do: is_binary(v) and v != ""
-
   defp valid_record?(
          %{
            code_hash: record_hash,
@@ -666,7 +657,7 @@ defmodule Attesto.AuthorizationCode do
          },
          expected_hash
        ) do
-    exact_canonical_data_keys?(data) and
+    Record.exact_keys?(data, @canonical_data_keys) and
       valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) and
       valid_code_grant?(code_challenge, subject, scope, resource) and
       valid_code_context?(dpop_jkt, family_id, claims, expires_at)
@@ -675,40 +666,28 @@ defmodule Attesto.AuthorizationCode do
   defp valid_record?(_record, _expected_hash), do: false
 
   defp valid_code_identity?(record_hash, expected_hash, client_id, redirect_uri) do
-    record_hash == expected_hash and non_empty_binary?(client_id) and non_empty_binary?(redirect_uri)
+    record_hash == expected_hash and Record.non_empty_binary?(client_id) and Record.non_empty_binary?(redirect_uri)
   end
 
   defp valid_code_grant?(code_challenge, subject, scope, resource) do
-    valid_optional_challenge?(code_challenge) and non_empty_binary?(subject) and
+    valid_optional_challenge?(code_challenge) and Record.non_empty_binary?(subject) and
       valid_scope?(scope) and valid_resource?(resource)
   end
 
   defp valid_code_context?(dpop_jkt, family_id, claims, expires_at) do
-    valid_optional_jkt?(dpop_jkt) and valid_optional_family_id?(family_id) and
+    Record.optional_jkt?(dpop_jkt) and valid_optional_family_id?(family_id) and
       Claims.portable_json_object?(claims) and is_integer(expires_at)
   end
 
   # The authorization-code grant context is canonical. Host-specific values
   # belong inside `:claims`, so extra sibling keys make a persisted record
   # malformed rather than being silently ignored.
-  defp exact_canonical_data_keys?(data),
-    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
+  defp code_store_contract_error(:put), do: Store.contract_violation!("authorization code store", {:put, 1})
+  defp code_store_contract_error(:take), do: Store.contract_violation!("authorization code store", {:take, 1})
+  defp code_store_contract_error(:get), do: Store.contract_violation!("authorization code store", {:get, 1})
 
-  defp code_store_contract_error(:put) do
-    raise RuntimeError, "authorization code store put/1 violated its contract"
-  end
-
-  defp code_store_contract_error(:take) do
-    raise RuntimeError, "authorization code store take/1 violated its contract"
-  end
-
-  defp code_store_contract_error(:get) do
-    raise RuntimeError, "authorization code store get/1 violated its contract"
-  end
-
-  defp code_store_contract_error(:mark_consumed) do
-    raise RuntimeError, "authorization code store mark_consumed/2 violated its contract"
-  end
+  defp code_store_contract_error(:mark_consumed),
+    do: Store.contract_violation!("authorization code store", {:mark_consumed, 2})
 
   # PKCE is optional at issuance: a host that relaxed `:require_pkce` for a
   # confidential client issues a code with no challenge (nil). A challenge that
@@ -720,9 +699,7 @@ defmodule Attesto.AuthorizationCode do
   # The bound resource indicators are validated as RFC 8707 §2.1 absolute-URI
   # indicators at the authorization-server framing layer; here they are
   # shape-checked as a list of non-empty strings before being stored.
-  defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &non_empty_binary?/1)
-  defp valid_optional_jkt?(nil), do: true
-  defp valid_optional_jkt?(jkt), do: Thumbprint.valid?(jkt)
+  defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &Record.non_empty_binary?/1)
   defp valid_optional_family_id?(nil), do: true
-  defp valid_optional_family_id?(family_id), do: non_empty_binary?(family_id)
+  defp valid_optional_family_id?(family_id), do: Record.non_empty_binary?(family_id)
 end

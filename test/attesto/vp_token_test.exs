@@ -931,6 +931,37 @@ defmodule Attesto.VpTokenTest do
                  query_constraints: %{"id" => %{}}
                )
     end
+
+    test "caps presentations per query even without DCQL constraints" do
+      ctx = valid_context()
+      presentations = List.duplicate(ctx.presentation, 17)
+
+      assert {:error, {"id", :too_many_presentations}} =
+               VpToken.verify(%{"id" => presentations},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now
+               )
+
+      assert {:ok, %{"id" => [_, _]}} =
+               VpToken.verify(%{"id" => Enum.take(presentations, 2)},
+                 nonce: ctx.nonce,
+                 audience: ctx.audience,
+                 issuer_jwks: ctx.issuer_jwk,
+                 now: ctx.now,
+                 max_presentations_per_query: 2
+               )
+
+      assert_raise ArgumentError, fn ->
+        VpToken.verify(%{"id" => [ctx.presentation]},
+          nonce: ctx.nonce,
+          audience: ctx.audience,
+          issuer_jwks: ctx.issuer_jwk,
+          max_presentations_per_query: 0
+        )
+      end
+    end
   end
 
   describe "constraints_from_dcql/1" do

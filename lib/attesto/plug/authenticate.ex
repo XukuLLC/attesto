@@ -184,7 +184,7 @@ if Code.ensure_loaded?(Plug.Conn) do
             conn,
             :dpop,
             "invalid_dpop_proof",
-            error_opts(opts, description: to_string(reason))
+            error_opts(opts, description: safe_error_description(reason, "DPoP proof verification failed"))
           )
 
         {:token_error, reason} ->
@@ -192,7 +192,7 @@ if Code.ensure_loaded?(Plug.Conn) do
             conn,
             token_error_scheme(conn, reason),
             "invalid_token",
-            error_opts(opts, description: to_string(reason))
+            error_opts(opts, description: safe_error_description(reason, "token verification failed"))
           )
 
         {:scope_error, required} ->
@@ -469,32 +469,40 @@ if Code.ensure_loaded?(Plug.Conn) do
         [dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb] ++
           Keyword.take(opts, [:trusted_audiences])
 
-      case invoke_verifier(Keyword.get(opts, :verify), config, token, verify_opts) do
-        {:ok, claims} when is_map(claims) and not is_struct(claims) ->
-          {:ok, claims}
+      opts
+      |> Keyword.get(:verify)
+      |> invoke_verifier(config, token, verify_opts)
+      |> normalize_verifier_result(verify_opts, opts)
+    end
 
-        {:ok, claims} ->
-          raise ArgumentError,
-                "Attesto.Plug.Authenticate :verify must return {:ok, claims} with a plain map; " <>
-                  "got #{inspect({:ok, claims})}"
-
-        {:error, :insufficient_scope} ->
-          {:scope_error, required_scopes(opts)}
-
-        {:error, {:temporarily_unavailable, reason}} ->
-          {:token_service_error, reason}
-
-        {:error, {:jwks_refresh_failed, reason}} ->
-          {:token_service_error, reason}
-
-        {:error, reason} ->
-          {:token_error, reason}
-
-        other ->
-          raise ArgumentError,
-                "Attesto.Plug.Authenticate :verify must return {:ok, claims} or " <>
-                  "{:error, reason}; got #{inspect(other)}"
+    defp normalize_verifier_result({:ok, claims}, verify_opts, _opts) when is_map(claims) and not is_struct(claims) do
+      case Token.check_confirmation(claims, verify_opts) do
+        :ok -> {:ok, claims}
+        {:error, reason} -> {:token_error, reason}
       end
+    end
+
+    defp normalize_verifier_result({:ok, claims}, _verify_opts, _opts) do
+      raise ArgumentError,
+            "Attesto.Plug.Authenticate :verify must return {:ok, claims} with a plain map; " <>
+              "got #{inspect({:ok, claims})}"
+    end
+
+    defp normalize_verifier_result({:error, :insufficient_scope}, _verify_opts, opts),
+      do: {:scope_error, required_scopes(opts)}
+
+    defp normalize_verifier_result({:error, {:temporarily_unavailable, reason}}, _verify_opts, _opts),
+      do: {:token_service_error, reason}
+
+    defp normalize_verifier_result({:error, {:jwks_refresh_failed, reason}}, _verify_opts, _opts),
+      do: {:token_service_error, reason}
+
+    defp normalize_verifier_result({:error, reason}, _verify_opts, _opts), do: {:token_error, reason}
+
+    defp normalize_verifier_result(other, _verify_opts, _opts) do
+      raise ArgumentError,
+            "Attesto.Plug.Authenticate :verify must return {:ok, claims} or " <>
+              "{:error, reason}; got #{inspect(other)}"
     end
 
     defp required_scopes(opts) do
@@ -525,6 +533,14 @@ if Code.ensure_loaded?(Plug.Conn) do
             "Attesto.Plug.Authenticate :verify must be a 3-arity function or MFA tuple; " <>
               "got #{inspect(other)}"
     end
+
+    defp safe_error_description(reason, _fallback) when is_atom(reason), do: Atom.to_string(reason)
+
+    defp safe_error_description(reason, _fallback) when is_binary(reason) do
+      if String.valid?(reason), do: reason, else: "verification failed"
+    end
+
+    defp safe_error_description(_reason, fallback), do: fallback
 
     # ----- mTLS thumbprint -----
 

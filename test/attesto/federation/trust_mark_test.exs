@@ -44,7 +44,7 @@ defmodule Attesto.Federation.TrustMarkTest do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims())
 
-    assert {:ok, verified} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:ok, verified} = TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
     assert verified["iss"] == @tmi
     assert verified["sub"] == @entity
     assert verified["trust_mark_type"] == @mark_type
@@ -63,10 +63,23 @@ defmodule Attesto.Federation.TrustMarkTest do
              )
 
     assert {:error, :invalid_trust_mark} =
-             TrustMark.verify(jwt, jwks(pem), now: @now, issuer: "https://someone-else.example")
+             TrustMark.verify(jwt, jwks(pem),
+               now: @now,
+               subject: @entity,
+               issuer: "https://someone-else.example"
+             )
 
     assert {:error, :invalid_trust_mark} =
-             TrustMark.verify(jwt, jwks(pem), now: @now, trust_mark_type: "https://other-mark.example")
+             TrustMark.verify(jwt, jwks(pem),
+               now: @now,
+               subject: @entity,
+               trust_mark_type: "https://other-mark.example"
+             )
+
+    assert {:error, :invalid_trust_mark} =
+             TrustMark.verify(jwt, jwks(pem), now: @now, subject: "https://other-entity.example")
+
+    assert {:error, :invalid_trust_mark} = TrustMark.verify(jwt, jwks(pem), now: @now)
   end
 
   test "a tampered trust mark is rejected" do
@@ -79,7 +92,8 @@ defmodule Attesto.Federation.TrustMarkTest do
     flipped = flip_first_char(signature)
     tampered = Enum.join([header, payload, flipped], ".")
 
-    assert {:error, :invalid_signature} = TrustMark.verify(tampered, jwks(pem), now: @now)
+    assert {:error, :invalid_signature} =
+             TrustMark.verify(tampered, jwks(pem), now: @now, subject: @entity)
   end
 
   defp flip_first_char(segment) do
@@ -93,35 +107,37 @@ defmodule Attesto.Federation.TrustMarkTest do
     wrong_pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims())
 
-    assert {:error, :invalid_signature} = TrustMark.verify(jwt, jwks(wrong_pem), now: @now)
+    assert {:error, :invalid_signature} =
+             TrustMark.verify(jwt, jwks(wrong_pem), now: @now, subject: @entity)
   end
 
   test "an expired trust mark is rejected" do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims(%{"exp" => @now - 1}))
 
-    assert {:error, :expired} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:error, :expired} = TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
   end
 
   test "a trust mark with no exp at all is accepted (exp is OPTIONAL)" do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims() |> Map.delete("exp"))
 
-    assert {:ok, _} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:ok, _} = TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
   end
 
   test "rejects a token not typed trust-mark+jwt" do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims(), %{"typ" => "JWT"})
 
-    assert {:error, :invalid_typ} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:error, :invalid_typ} = TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
   end
 
   test "rejects a missing trust_mark_type claim" do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims() |> Map.delete("trust_mark_type"))
 
-    assert {:error, :invalid_trust_mark} = TrustMark.verify(jwt, jwks(pem), now: @now)
+    assert {:error, :invalid_trust_mark} =
+             TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
   end
 
   test "requires a non-empty protected kid" do
@@ -136,8 +152,11 @@ defmodule Attesto.Federation.TrustMarkTest do
 
     empty_kid = trust_mark(pem, claims(), %{"kid" => ""})
 
-    assert {:error, :invalid_trust_mark} = TrustMark.verify(without_kid, jwks(pem), now: @now)
-    assert {:error, :invalid_trust_mark} = TrustMark.verify(empty_kid, jwks(pem), now: @now)
+    assert {:error, :invalid_trust_mark} =
+             TrustMark.verify(without_kid, jwks(pem), now: @now, subject: @entity)
+
+    assert {:error, :invalid_trust_mark} =
+             TrustMark.verify(empty_kid, jwks(pem), now: @now, subject: @entity)
   end
 
   test "requires a non-negative numeric iat" do
@@ -149,7 +168,9 @@ defmodule Attesto.Federation.TrustMarkTest do
           claims(%{"iat" => -1})
         ] do
       jwt = trust_mark(pem, invalid_claims)
-      assert {:error, :invalid_trust_mark} = TrustMark.verify(jwt, jwks(pem), now: @now)
+
+      assert {:error, :invalid_trust_mark} =
+               TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
     end
   end
 
@@ -157,7 +178,9 @@ defmodule Attesto.Federation.TrustMarkTest do
     pem = Factory.ec_pem()
     jwt = trust_mark(pem, claims(%{"iat" => @now + 10}))
 
-    assert {:error, :not_yet_valid} = TrustMark.verify(jwt, jwks(pem), now: @now)
-    assert {:ok, _claims} = TrustMark.verify(jwt, jwks(pem), now: @now, leeway: 10)
+    assert {:error, :not_yet_valid} = TrustMark.verify(jwt, jwks(pem), now: @now, subject: @entity)
+
+    assert {:ok, _claims} =
+             TrustMark.verify(jwt, jwks(pem), now: @now, leeway: 10, subject: @entity)
   end
 end

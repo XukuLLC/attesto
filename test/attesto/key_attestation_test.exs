@@ -3,6 +3,7 @@ defmodule Attesto.KeyAttestationTest do
   use ExUnit.Case, async: true
 
   alias Attesto.KeyAttestation
+  alias Attesto.Test.JWT
 
   @now 1_659_145_924
 
@@ -13,10 +14,7 @@ defmodule Attesto.KeyAttestationTest do
     map
   end
 
-  defp sign(key, header, claims) do
-    {_header, compact} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
-  end
+  defp sign(key, header, claims), do: JWT.sign_compact(key, header, claims)
 
   defp key_attestation(signer, attested_keys, overrides \\ %{}) do
     header = %{"alg" => "ES256", "typ" => "key-attestation+jwt", "kid" => "ks-1"}

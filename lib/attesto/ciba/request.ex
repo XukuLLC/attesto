@@ -55,6 +55,7 @@ defmodule Attesto.CIBA.Request do
   duplicate CIBA transactions within its lifetime.
   """
 
+  alias Attesto.Options
   alias Attesto.RequestObject
   alias Attesto.ResourceIndicator
   alias Attesto.Scope
@@ -257,22 +258,22 @@ defmodule Attesto.CIBA.Request do
   defp validate_client(_client), do: {:error, :unauthorized_client}
 
   defp validate_policy_options!(opts) do
-    require_signed = boolean_option!(opts, :require_signed_request, false)
-    require_binding = boolean_option!(opts, :require_binding_message, false)
-    user_code_supported = boolean_option!(opts, :user_code_supported, false)
+    require_signed = Options.boolean!(opts, :require_signed_request, false)
+    require_binding = Options.boolean!(opts, :require_binding_message, false)
+    user_code_supported = Options.boolean!(opts, :user_code_supported, false)
 
     enforce_fapi =
-      boolean_option!(
+      Options.boolean!(
         opts,
         :enforce_fapi_alg_policy,
-        SigningAlg.default_fapi_policy?(opts)
+        SigningAlg.default_fapi_policy?()
       )
 
-    max_lifetime = positive_option!(opts, :max_request_lifetime_seconds, @default_max_request_lifetime_seconds)
-    binding_max = positive_option!(opts, :binding_message_max_length, @default_binding_message_max_length)
+    max_lifetime = Options.positive_integer!(opts, :max_request_lifetime_seconds, @default_max_request_lifetime_seconds)
+    binding_max = Options.positive_integer!(opts, :binding_message_max_length, @default_binding_message_max_length)
 
     notification_min =
-      positive_option!(opts, :min_client_notification_token_length, @default_notification_token_min_length)
+      Options.positive_integer!(opts, :min_client_notification_token_length, @default_notification_token_min_length)
 
     if notification_min > @notification_token_max_length do
       raise ArgumentError,
@@ -287,20 +288,6 @@ defmodule Attesto.CIBA.Request do
     |> Keyword.put(:max_request_lifetime_seconds, max_lifetime)
     |> Keyword.put(:binding_message_max_length, binding_max)
     |> Keyword.put(:min_client_notification_token_length, notification_min)
-  end
-
-  defp boolean_option!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_boolean(value) -> value
-      _invalid -> raise ArgumentError, ":#{key} must be true or false"
-    end
-  end
-
-  defp positive_option!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 -> value
-      _invalid -> raise ArgumentError, ":#{key} must be a positive integer"
-    end
   end
 
   # ----- signed authentication request (§7.1.1) -----
@@ -374,7 +361,7 @@ defmodule Attesto.CIBA.Request do
         # explicit type remains rejected.
         accepted_typ: [nil, "JWT", "oauth-authz-req+jwt"],
         accepted_algs: algs,
-        enforce_fapi_alg_policy: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts)),
+        enforce_fapi_alg_policy: Keyword.fetch!(opts, :enforce_fapi_alg_policy),
         # §7.1.1 makes exp, iat, nbf, and jti all REQUIRED.
         require_exp: true,
         require_iat: true,

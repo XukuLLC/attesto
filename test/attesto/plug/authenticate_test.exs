@@ -145,6 +145,102 @@ defmodule Attesto.Plug.AuthenticateTest do
       end
     end
 
+    test "an alternate verifier cannot skip DPoP confirmation binding" do
+      conn =
+        [{"authorization", "Bearer remote-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            verify:
+              {__MODULE__, :verify_result_callback,
+               [
+                 {:ok,
+                  %{
+                    "sub" => "remote-subject",
+                    "cnf" => %{"jkt" => Base.url_encode64(:crypto.hash(:sha256, "remote-key"), padding: false)}
+                  }}
+               ]}
+          )
+        )
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+      assert [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ "dpop_proof_required"
+    end
+
+    test "an alternate verifier accepts a matching DPoP confirmation binding" do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      token = "remote-dpop-token"
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: ath)
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            replay_check: fn _key, _ttl -> :ok end,
+            verify:
+              {__MODULE__, :verify_result_callback, [{:ok, %{"sub" => "remote-subject", "cnf" => %{"jkt" => jkt}}}]}
+          )
+        )
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "remote-subject"
+    end
+
+    test "an alternate verifier accepts a matching mTLS confirmation binding" do
+      der = cert_der("cn=attesto-custom-verifier")
+      {:ok, thumbprint} = Attesto.MTLS.compute_thumbprint(der)
+
+      conn =
+        [{"authorization", "Bearer remote-mtls-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            cert_der: fn _conn -> der end,
+            verify:
+              {__MODULE__, :verify_result_callback,
+               [
+                 {:ok,
+                  %{
+                    "sub" => "remote-subject",
+                    "cnf" => %{"x5t#S256" => thumbprint}
+                  }}
+               ]}
+          )
+        )
+
+      refute conn.halted
+      assert conn.assigns.attesto_claims["sub"] == "remote-subject"
+    end
+
+    test "a structured verifier error returns a generic 401 instead of raising" do
+      conn =
+        [{"authorization", "Bearer remote-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            verify: {__MODULE__, :verify_result_callback, [{:error, {:remote, :rejected}}]}
+          )
+        )
+
+      assert conn.halted
+      assert conn.status == 401
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "invalid_token",
+               "error_description" => "token verification failed"
+             }
+    end
+
     test "an alternate verifier preserves insufficient-scope semantics" do
       conn =
         [{"authorization", "Bearer remote-token"}]

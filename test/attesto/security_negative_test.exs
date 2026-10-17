@@ -13,6 +13,7 @@ defmodule Attesto.SecurityNegativeTest do
   alias Attesto.DPoP
   alias Attesto.Key
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
   alias Attesto.Test.RotationKeystore
   alias Attesto.Token
 
@@ -55,12 +56,7 @@ defmodule Attesto.SecurityNegativeTest do
       |> maybe_put_kid(Keyword.get(opts, :kid, Key.kid(pem)))
       |> Map.merge(Keyword.get(opts, :header, %{}))
 
-    {_protected, compact} =
-      jwk
-      |> JOSE.JWT.sign(header, claims)
-      |> JOSE.JWS.compact()
-
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   defp maybe_put_kid(header, :__none__), do: header
@@ -267,7 +263,7 @@ defmodule Attesto.SecurityNegativeTest do
         "deep" => deeply_nested(5_000)
       }
 
-      {_, proof} = jwk |> JOSE.JWT.sign(header, payload) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(jwk, header, payload)
 
       result =
         DPoP.verify_proof(proof,

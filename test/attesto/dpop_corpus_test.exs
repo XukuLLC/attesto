@@ -41,8 +41,8 @@ defmodule Attesto.DPoPCorpusTest do
   use ExUnit.Case, async: true
 
   alias Attesto.DPoP
+  alias Attesto.Test.DPoPFixtures
   alias Attesto.Test.Factory
-  alias Attesto.Test.JWT
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -64,39 +64,27 @@ defmodule Attesto.DPoPCorpusTest do
   # would refuse to emit the shape we want to test)
   # -----------------------------------------------------------------
 
-  defp gen_ec_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
-  defp gen_rsa_key, do: JOSE.JWK.generate_key({:rsa, 2048})
-  defp gen_eddsa_key, do: JOSE.JWK.generate_key({:okp, :Ed25519})
-
-  defp public_map(%JOSE.JWK{} = key) do
-    {_, map} = JOSE.JWK.to_public_map(key)
-    map
-  end
+  defp gen_ec_key, do: DPoPFixtures.ec_key()
+  defp gen_rsa_key, do: DPoPFixtures.rsa_key()
+  defp gen_eddsa_key, do: DPoPFixtures.ed25519_key()
+  defp public_map(key), do: DPoPFixtures.public_map(key)
 
   defp base_header(jwk_map, overrides \\ %{}) do
-    Map.merge(%{"typ" => "dpop+jwt", "alg" => "ES256", "jwk" => jwk_map}, overrides)
+    DPoPFixtures.header(jwk_map, overrides)
   end
 
   defp base_claims(overrides \\ %{}) do
-    Map.merge(
-      %{
-        "htm" => @http_method,
-        "htu" => @http_uri,
-        "iat" => @now,
-        "jti" => "jti-" <> Integer.to_string(System.unique_integer([:positive]))
-      },
-      overrides
-    )
+    DPoPFixtures.claims(@http_method, @http_uri, @now, overrides)
   end
 
   # Produce a signature consistent with the declared algorithm, including
   # exact JWA PSS parameters on native and fallback crypto backends.
   defp sign(key, header, claims) do
-    JWT.sign_compact(key, header, claims)
+    DPoPFixtures.sign(key, header, claims)
   end
 
   defp encode_segment(map) do
-    map |> JSON.encode!() |> Base.url_encode64(padding: false)
+    DPoPFixtures.encode_segment(map)
   end
 
   # Replace the protected header of a real compact JWS while reusing its
@@ -105,14 +93,13 @@ defmodule Attesto.DPoPCorpusTest do
   # such a vector is always WHICH guard fires first, so the now-mismatched
   # signature on the swapped header is intentional.
   defp reheader(signed_compact, new_header_map) do
-    [_old, payload, sig] = String.split(signed_compact, ".")
-    Enum.join([encode_segment(new_header_map), payload, sig], ".")
+    DPoPFixtures.reheader(signed_compact, new_header_map)
   end
 
   # Verify opts pinned to the corpus clock; callers add the case-specific
   # extras (access_token, replay_check, nonce_check, max_age_seconds, …).
   defp opts(extra \\ []) do
-    Keyword.merge([http_method: @http_method, http_uri: @http_uri, now: @now], extra)
+    DPoPFixtures.verification_options(@http_method, @http_uri, Keyword.put_new(extra, :now, @now))
   end
 
   # =================================================================

@@ -243,9 +243,17 @@ defmodule Attesto.ConfigTest do
       assert Config.token_endpoint_url(config) == "https://api.example.com/auth/token"
     end
 
-    test "uses the issuer's host even when the issuer carries a path" do
+    test "preserves the issuer path prefix" do
       config = Config.new(base_opts(issuer: "https://id.example.com/tenant/"))
-      assert Config.token_endpoint_url(config) == "https://id.example.com/oauth/token"
+      assert Config.token_endpoint_url(config) == "https://id.example.com/tenant/oauth/token"
+    end
+
+    test "does not interpret a colon in the first appended segment as a URI scheme" do
+      assert Config.append_endpoint_path("https://id.example.com", "/org:tenant/oauth/token") ==
+               "https://id.example.com/org:tenant/oauth/token"
+
+      assert Config.append_endpoint_path("https://id.example.com/root", "/org:tenant/oauth/token") ==
+               "https://id.example.com/root/org:tenant/oauth/token"
     end
   end
 

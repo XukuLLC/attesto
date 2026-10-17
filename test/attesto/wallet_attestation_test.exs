@@ -2,6 +2,7 @@ defmodule Attesto.WalletAttestationTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
+  alias Attesto.Test.JWT
   alias Attesto.WalletAttestation
 
   @client_id "https://wallet.example.org"
@@ -15,10 +16,7 @@ defmodule Attesto.WalletAttestationTest do
     map
   end
 
-  defp sign(key, header, claims) do
-    {_header, compact} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
-  end
+  defp sign(key, header, claims), do: JWT.sign_compact(key, header, claims)
 
   defp attestation(wallet_provider_key, instance_jwk_map, overrides \\ %{}) do
     header = %{"alg" => "ES256", "typ" => "oauth-client-attestation+jwt", "kid" => "wp-1"}

@@ -47,7 +47,7 @@ defmodule Attesto.JwtVc do
   @context "https://www.w3.org/2018/credentials/v1"
   @header_typ "JWT"
   @default_lifetime_seconds 3600
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @confirmation_methods ~w(jwk jwe jku kid)
   @private_jwk_members ~w(d p q dp dq qi oth k)
 

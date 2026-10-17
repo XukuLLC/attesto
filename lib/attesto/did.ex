@@ -65,10 +65,10 @@ defmodule Attesto.Did do
   def resolve(did, opts \\ [])
 
   def resolve(did, opts) when is_binary(did) and is_list(opts) do
-    if Keyword.keyword?(opts) and valid_resolver_option?(Keyword.get(opts, :resolver)) do
+    if String.valid?(did) and Keyword.keyword?(opts) and valid_resolver_option?(Keyword.get(opts, :resolver)) do
       do_resolve(did, opts)
     else
-      {:error, :invalid_options}
+      if String.valid?(did), do: {:error, :invalid_options}, else: {:error, :invalid_did}
     end
   end
 

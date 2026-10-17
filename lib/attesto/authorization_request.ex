@@ -49,6 +49,7 @@ defmodule Attesto.AuthorizationRequest do
   module only classifies.
   """
 
+  alias Attesto.Options
   alias Attesto.PKCE
   alias Attesto.RedirectURI
   alias Attesto.RequestObject
@@ -258,12 +259,7 @@ defmodule Attesto.AuthorizationRequest do
     end
   end
 
-  defp boolean_option!(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_boolean(value) -> value
-      _invalid -> raise ArgumentError, ":#{key} must be true or false"
-    end
-  end
+  defp boolean_option!(opts, key, default), do: Options.boolean!(opts, key, default)
 
   # OIDC Core §3.1.2.1: an OpenID Connect Authentication Request is one whose
   # (effective) `scope` carries the reserved `openid` value.
@@ -289,8 +285,9 @@ defmodule Attesto.AuthorizationRequest do
                issuer: Map.get(params, "client_id"),
                audience: Keyword.get(opts, :request_object_audience)
              ] ++ Policy.to_verify_opts(policy)
-           ) do
-      {:ok, object_params}
+           ),
+         :ok <- matching_outer_response_type(params, object_params) do
+      {:ok, preserve_unsupported_request_uri(object_params, params)}
     else
       {:error, :request_not_supported} ->
         redirect_request_object_error(params, "request_not_supported", "request object is not supported", opts)
@@ -312,6 +309,26 @@ defmodule Attesto.AuthorizationRequest do
     else
       {:ok, params}
     end
+  end
+
+  # OIDC Core §6.1: when response_type is duplicated outside and inside the
+  # Request Object, the values must match. Silently discarding a conflicting
+  # outer value lets intermediaries and endpoint policy observe a different
+  # flow from the one that is eventually processed.
+  defp matching_outer_response_type(params, object_params) do
+    case Map.fetch(params, "response_type") do
+      :error -> :ok
+      {:ok, response_type} -> if response_type == Map.get(object_params, "response_type"), do: :ok, else: :error
+    end
+  end
+
+  # This endpoint does not resolve request_uri. Keep an outer request_uri in
+  # the effective map so validate_request_object_params/3 rejects it even when
+  # a valid inline Request Object is also present.
+  defp preserve_unsupported_request_uri(object_params, params) do
+    if Map.has_key?(params, "request_uri"),
+      do: Map.put(object_params, "request_uri", Map.get(params, "request_uri")),
+      else: object_params
   end
 
   # FAPI 2.0 Message Signing §5.3.1: a required-but-absent request object is a
@@ -495,7 +512,7 @@ defmodule Attesto.AuthorizationRequest do
   # still rejected here unless the transport layer has already resolved it
   # (PAR) into normal params.
   defp validate_request_object_params(params, redirect_uri, state) do
-    if present?(Map.get(params, "request_uri")) do
+    if Map.has_key?(params, "request_uri") do
       {:error,
        redirect_error(
          "request_uri_not_supported",
@@ -824,9 +841,6 @@ defmodule Attesto.AuthorizationRequest do
   # OIDC Core §3.1.2.1 defines prompt and acr_values as space-delimited lists.
   defp parse_space_list(value) when is_binary(value), do: Scope.parse(value)
   defp parse_space_list(_), do: []
-
-  defp present?(value) when is_binary(value) and value != "", do: true
-  defp present?(_), do: false
 
   defp string_or_nil(value) when is_binary(value) and value != "", do: value
   defp string_or_nil(_), do: nil

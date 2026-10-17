@@ -10,9 +10,10 @@ defmodule Attesto.RequestObject do
 
   alias Attesto.{Claims, JWS}
   alias Attesto.NumericDate
+  alias Attesto.Options
   alias Attesto.SigningAlg
 
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -175,50 +176,36 @@ defmodule Attesto.RequestObject do
   end
 
   defp validate_boolean_option!(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error -> :ok
-      {:ok, value} when is_boolean(value) -> :ok
-      {:ok, _value} -> raise ArgumentError, ":#{key} must be true or false"
-    end
+    Options.boolean!(opts, key, false)
+    :ok
   end
 
   defp validate_positive_integer_option!(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error -> :ok
-      {:ok, nil} -> :ok
-      {:ok, value} when is_integer(value) and value > 0 -> :ok
-      {:ok, _value} -> raise ArgumentError, ":#{key} must be a positive integer or nil"
-    end
+    Options.optional_positive_integer!(opts, key)
+    :ok
   end
 
   defp verify_signature(jwt, header, trusted_jwks, opts) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?())
 
-    candidates =
-      JWS.verification_candidates(trusted_jwks,
-        kid: Map.get(header, "kid"),
-        accepted_algs: accepted_algs,
-        fapi?: enforce_fapi_policy,
-        malformed_key: :reject_set
-      )
-
-    candidates =
-      if Keyword.get(opts, :profile, :jar) == :oid4vp do
-        Enum.filter(candidates, fn {_kid, alg, jwk} ->
-          alg != "PS256" or SigningAlg.rsa_modulus_at_least?(jwk, 2048)
-        end)
-      else
-        candidates
-      end
-
-    JWS.verify_strict(jwt, candidates,
+    verify_opts = [
+      accepted_algs: accepted_algs,
+      fapi?: enforce_fapi_policy,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_request_object
-    )
+    ]
+
+    verify_opts =
+      if Keyword.get(opts, :profile, :jar) == :oid4vp,
+        do: Keyword.put(verify_opts, :min_rsa_bits, 2048),
+        else: verify_opts
+
+    JWS.verify_trusted(jwt, header, trusted_jwks, verify_opts)
   end
 
   # RFC 9101 §4: "The Request Object MAY contain... [it] MUST NOT contain the

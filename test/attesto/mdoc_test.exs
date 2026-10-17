@@ -462,4 +462,9 @@ defmodule Attesto.MdocTest do
                Mdoc.verify_device_response(device_response, incomplete_context, ctx.issuer_public, now: ctx.now)
     end
   end
+
+  test "rejects oversized deeply nested CBOR before decoding" do
+    nested_arrays = :binary.copy(<<0x81>>, 262_145)
+    assert {:error, :invalid_mdoc} = Mdoc.peek_doc_type(nested_arrays)
+  end
 end

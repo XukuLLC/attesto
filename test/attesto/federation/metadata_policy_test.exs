@@ -164,4 +164,21 @@ defmodule Attesto.Federation.MetadataPolicyTest do
     assert {:ok, %{}} = MetadataPolicy.merge(%{}, policy)
     assert {:ok, ^metadata} = MetadataPolicy.apply(policy, metadata)
   end
+
+  test "normalizes space-separated scope for every federation entity type" do
+    policy = %{
+      "openid_relying_party" => %{
+        "scope" => %{"subset_of" => ["openid", "profile"]}
+      }
+    }
+
+    metadata = %{
+      "openid_relying_party" => %{
+        "scope" => "openid email profile"
+      }
+    }
+
+    assert {:ok, %{"openid_relying_party" => %{"scope" => "openid profile"}}} =
+             MetadataPolicy.apply(policy, metadata)
+  end
 end

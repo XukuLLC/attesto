@@ -43,8 +43,8 @@ defmodule Attesto.Federation.TrustMark do
       to `Attesto.SigningAlg.allowed/0`.
     * `:issuer` - if given, the verified `iss` must equal it (the expected
       Trust Mark Issuer).
-    * `:subject` - if given, the verified `sub` must equal it (the entity
-      the mark was expected to be issued to).
+    * `:subject` - required. The verified `sub` must equal this entity; a
+      Trust Mark is never accepted without binding it to its intended holder.
     * `:trust_mark_type` - if given, the verified `trust_mark_type` must
       equal it (the mark the caller asked about).
     * `:now` / `:leeway` - clock reference and skew for the required `iat`
@@ -61,9 +61,13 @@ defmodule Attesto.Federation.TrustMark do
   def verify(trust_mark_jwt, trusted_jwks, opts \\ [])
 
   def verify(trust_mark_jwt, trusted_jwks, opts) when is_binary(trust_mark_jwt) and is_list(opts) do
-    with {:ok, header} <- peek_header(trust_mark_jwt),
+    with :ok <- require_subject(opts),
+         {:ok, header} <-
+           JWS.protected_header(trust_mark_jwt,
+             error: :invalid_trust_mark,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header),
-         :ok <- check_crit(header),
          :ok <- check_alg(header, opts),
          :ok <- check_kid(header),
          {:ok, claims} <- verify_signature(trust_mark_jwt, header, trusted_jwks, opts),
@@ -74,22 +78,15 @@ defmodule Attesto.Federation.TrustMark do
 
   def verify(_trust_mark_jwt, _trusted_jwks, _opts), do: {:error, :invalid_trust_mark}
 
-  defp peek_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_trust_mark}
+  defp require_subject(opts) do
+    case Keyword.get(opts, :subject) do
+      subject when is_binary(subject) and subject != "" -> :ok
+      _missing_or_invalid -> {:error, :invalid_trust_mark}
     end
   end
 
   defp check_typ(%{"typ" => @typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
 
   defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())

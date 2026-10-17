@@ -98,6 +98,10 @@ defmodule Attesto.CIBATest do
     Process.delete({ContractStore, callback})
   end
 
+  test "prevents non-owner processes from mutating the store directly" do
+    assert_raise ArgumentError, fn -> :ets.insert(Store, {"injected", 9_999_999_999, %{}}) end
+  end
+
   defp approve_after_lookup(auth_req_id, now),
     do: Process.put({ContractStore, :approve_after_lookup}, {Secret.hash(auth_req_id), now})
 
@@ -348,25 +352,25 @@ defmodule Attesto.CIBATest do
       %{auth_req_id: id} = issue()
       assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
 
-      fault(:lookup, {:mutate_ok, fn record -> Map.put(record, :auth_time, @now + 10) end})
+      fault(:lookup, {:mutate_ok, fn record -> Map.put(record, :auth_time, @now + 120) end})
 
       assert_raise RuntimeError, "CIBA store lookup/1 violated its contract", fn ->
         CIBA.redeem(ContractStore, id, %{client_id: @client_id}, now: @now + 2)
       end
     end
 
-    test "one-second approval clock skew is safe for both poll and ping redemption" do
+    test "modest approval clock skew is safe for both poll and ping redemption" do
       for {request_overrides, label} <- [
             {%{}, :poll},
             {%{client_notification_token: @notification_token, delivery_mode: :ping}, :ping}
           ] do
         %{auth_req_id: id} = issue(request_overrides)
-        assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 1)
+        assert {:ok, _decision} = CIBA.approve(Store, id, %{subject: "usr_1"}, now: @now + 60)
 
         assert {:ok, %Grant{auth_time: auth_time}} =
                  CIBA.redeem(Store, id, %{client_id: @client_id}, now: @now)
 
-        assert auth_time == @now + 1
+        assert auth_time == @now + 60
         assert label in [:poll, :ping]
       end
     end

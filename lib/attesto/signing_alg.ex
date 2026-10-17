@@ -63,8 +63,13 @@ defmodule Attesto.SigningAlg do
   def default_client_algs, do: @fapi_algs
 
   @doc false
+  @spec default_fapi_policy?() :: boolean()
+  def default_fapi_policy?, do: true
+
+  @doc false
+  @deprecated "use default_fapi_policy?/0"
   @spec default_fapi_policy?(keyword()) :: boolean()
-  def default_fapi_policy?(_opts), do: true
+  def default_fapi_policy?(_opts), do: default_fapi_policy?()
 
   @doc false
   @spec valid_verification_algorithms?(term()) :: boolean()
@@ -244,13 +249,15 @@ defmodule Attesto.SigningAlg do
     _ -> []
   end
 
-  @doc "Infer the default algorithm from a parsed JWK's public members."
-  @spec infer(JOSE.JWK.t()) :: alg()
+  @doc "Infer the default algorithm from a parsed JWK or raw public JWK map."
+  @spec infer(JOSE.JWK.t() | map()) :: alg()
   def infer(%JOSE.JWK{} = jwk) do
     jwk
     |> public_fields()
     |> infer_from_fields()
   end
+
+  def infer(fields) when is_map(fields), do: infer_from_fields(fields)
 
   @doc """
   Return the fixed digest associated with an ID Token signing algorithm.
@@ -285,6 +292,24 @@ defmodule Attesto.SigningAlg do
       "ES384" -> 24
       alg when alg in ~w(ES512 EdDSA Ed25519) -> 32
       "Ed448" -> raise ArgumentError, "Ed448 uses SHAKE256; use oidc_hash_profile/2 or oidc_hash/3"
+    end
+  end
+
+  @doc false
+  @spec validate_verification_for_key!(term(), JOSE.JWK.t()) :: alg()
+  def validate_verification_for_key!(alg, %JOSE.JWK{} = jwk) do
+    if alg not in @verification_algs do
+      raise ArgumentError, "unsupported verification algorithm #{inspect(alg)}"
+    end
+
+    fields = public_fields(jwk)
+
+    if verification_compatible?(alg, fields) do
+      alg
+    else
+      raise ArgumentError,
+            "verification algorithm #{inspect(alg)} is not compatible with trusted key " <>
+              "#{inspect(Map.take(fields, ["kty", "crv"]))}"
     end
   end
 
@@ -394,6 +419,11 @@ defmodule Attesto.SigningAlg do
   defp compatible?("Ed25519", %{"kty" => "OKP", "crv" => "Ed25519"}), do: true
   defp compatible?("Ed448", %{"kty" => "OKP", "crv" => "Ed448"}), do: true
   defp compatible?(_alg, _fields), do: false
+
+  defp verification_compatible?(alg, %{"kty" => "RSA"}) when alg in ~w(RS256 RS384 RS512 PS256 PS384 PS512), do: true
+  defp verification_compatible?("ES256K", %{"kty" => "EC", "crv" => "secp256k1"}), do: true
+
+  defp verification_compatible?(alg, fields), do: compatible?(alg, fields)
 
   defp fapi_key_compatible?("PS256", %{"kty" => "RSA"} = fields) do
     rsa_modulus_bits(fields) >= @fapi_min_rsa_modulus_bits

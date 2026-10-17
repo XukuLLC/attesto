@@ -402,6 +402,11 @@ defmodule Attesto.IDTokenTest do
       assert {:error, :invalid_azp} = IDToken.verify(config, jwt, client_id: @client_id)
     end
 
+    test "requires azp when aud contains multiple audiences", %{config: config} do
+      jwt = signed_id_token(config, %{aud: [@client_id, "another-rp"]})
+      assert {:error, :invalid_azp} = IDToken.verify(config, jwt, client_id: @client_id)
+    end
+
     test "requires the nonce claim when the caller supplies a nonce", %{config: config} do
       # Minted without a nonce, but the caller expected one: fail closed.
       assert {:ok, jwt} = IDToken.mint(config, @subject, @client_id)

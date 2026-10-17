@@ -257,14 +257,23 @@ defmodule Attesto.JWS do
   `verification_candidates/2` and `verify_strict/3` may be passed together,
   including the protocol-specific `:malformed_key`, `:malformed_result`,
   `:terminal_error`, and `:malformed_error` policies.
+
+  Set `:select_kid` to `false` when a protocol carries one already-validated
+  verification key in another protected member and a separate `kid` must not
+  participate in candidate selection. It defaults to `true`.
   """
   @spec verify_trusted(binary(), map(), term(), keyword()) ::
           {:ok, map()} | {:ok, map(), verification_candidate()} | {:error, atom()}
   def verify_trusted(jwt, header, keys, opts)
 
   def verify_trusted(jwt, header, keys, opts) when is_binary(jwt) and is_map(header) and is_list(opts) do
+    candidate_opts =
+      if Keyword.get(opts, :select_kid, true),
+        do: Keyword.put(opts, :kid, Map.get(header, "kid")),
+        else: Keyword.delete(opts, :kid)
+
     candidates =
-      verification_candidates(keys, Keyword.put(opts, :kid, Map.get(header, "kid")))
+      verification_candidates(keys, candidate_opts)
 
     verify_strict(jwt, candidates, opts)
   end
@@ -526,16 +535,19 @@ defmodule Attesto.JWS do
       raise ArgumentError, "RSA verification key parameters are out of safe bounds"
     end
 
-    jwk = JOSE.JWK.from_map(jwk_map)
-
     alg =
       case Keyword.fetch(opts, :alg) do
         {:ok, fixed_alg} when is_binary(fixed_alg) -> fixed_alg
         {:ok, _other} -> raise ArgumentError, ":alg must be a string"
-        :error -> Map.get(jwk_map, "alg") || SigningAlg.infer(jwk)
+        :error -> Map.get(jwk_map, "alg") || SigningAlg.infer(jwk_map)
       end
 
-    alg = if Keyword.has_key?(opts, :alg), do: alg, else: SigningAlg.validate_for_key!(alg, jwk)
+    jwk =
+      case Key.verification_jwk(jwk_map, alg: alg, minimum_rsa_bits: 1) do
+        {:ok, jwk} -> jwk
+        {:error, reason} -> raise ArgumentError, "invalid verification JWK: #{reason}"
+      end
+
     {Map.get(jwk_map, "kid"), alg, jwk}
   end
 

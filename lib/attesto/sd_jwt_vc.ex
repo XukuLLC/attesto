@@ -34,14 +34,18 @@ defmodule Attesto.SdJwtVc do
   # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
   @typ "vc+sd-jwt"
   @accepted_typ ["vc+sd-jwt", "dc+sd-jwt"]
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   # Registered SD-JWT VC claims MUST always be visible: a holder must not be
   # able to strip `cnf` (defeats holder-binding) or `status` (defeats
   # revocation) by simply omitting the Disclosure, nor any of the other
   # issuer-controlled claims. Subtracted from the effective disclosable list
   # below regardless of whether it came from `:disclosable` or the default.
-  @registered_claim_names ~w(iss vct cnf status iat exp nbf sub)
+  @issuance_visible_claim_names ~w(iss vct cnf status iat exp nbf sub)
+
+  # SD-JWT VC permits `sub` and `iat` to be selectively disclosed. The other
+  # profile claims must remain in the Issuer-signed JWT when present.
+  @verification_visible_claim_names ~w(iss vct cnf status exp nbf)
 
   @type verified :: %{
           claims: map(),
@@ -57,6 +61,7 @@ defmodule Attesto.SdJwtVc do
           SdJwt.verify_error()
           | :missing_iss
           | :invalid_issuer_identity
+          | :disclosed_registered_claim
           | :missing_vct
           | :expired
           | :not_yet_valid
@@ -111,7 +116,7 @@ defmodule Attesto.SdJwtVc do
     disclosable =
       opts
       |> Keyword.get(:disclosable, Map.keys(subject_claims))
-      |> Enum.reject(&(to_string(&1) in @registered_claim_names))
+      |> Enum.reject(&(to_string(&1) in @issuance_visible_claim_names))
 
     status = validate_status!(Keyword.get(opts, :status))
 
@@ -191,6 +196,13 @@ defmodule Attesto.SdJwtVc do
   binding is NOT checked here - if `cnf` is present and the presentation carries
   a Key Binding JWT, pass both to `Attesto.SdJwt.verify_key_binding/3` with the
   verifier's expected `nonce`/`audience`.
+
+  A presentation is rejected if a supplied disclosure reconstructs one of the
+  registered claims that must have remained visible. A digest does not reveal
+  the name of an omitted disclosure, so a nonconforming issuer-hidden optional
+  claim that the holder omits is indistinguishable from an absent optional
+  claim. Verifiers must therefore trust the issuer to follow the profile's
+  registered-claim visibility rule.
   """
   @spec verify(String.t(), map() | [map()] | list(), keyword()) ::
           {:ok, verified()} | {:error, verify_error()}
@@ -198,6 +210,7 @@ defmodule Attesto.SdJwtVc do
     opts = Keyword.put_new(opts, :accepted_typ, @accepted_typ)
 
     with {:ok, base} <- SdJwt.verify(combined, jwks, opts),
+         :ok <- check_registered_claim_visibility(base),
          {:ok, iss} <- credential_issuer(base, opts),
          {:ok, vct} <- require_string(base.claims, "vct", :missing_vct),
          :ok <- check_exp(base.claims, opts),
@@ -216,6 +229,21 @@ defmodule Attesto.SdJwtVc do
   end
 
   # ── claim rules ──────────────────────────────────────────────────────────
+
+  defp check_registered_claim_visibility(base) do
+    case JWS.peek_json(base.issuer_jwt, :payload) do
+      {:ok, signed_claims} ->
+        disclosed_registered? =
+          Enum.any?(@verification_visible_claim_names, fn claim ->
+            Map.has_key?(base.claims, claim) and not Map.has_key?(signed_claims, claim)
+          end)
+
+        if disclosed_registered?, do: {:error, :disclosed_registered_claim}, else: :ok
+
+      _invalid ->
+        {:error, :invalid_signature}
+    end
+  end
 
   defp credential_issuer(base, opts) do
     case Keyword.get(opts, :issuer_identity, :claim) do

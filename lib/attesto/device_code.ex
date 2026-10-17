@@ -27,7 +27,7 @@ defmodule Attesto.DeviceCode do
   same fail-closed discipline `Attesto.ResourceIndicator.validate/1` applies.
   """
 
-  alias Attesto.{Claims, NumericDate, Scope, Secret, Thumbprint}
+  alias Attesto.{Claims, NumericDate, Options, Record, Scope, Secret, Store}
   alias Attesto.DeviceCode.Grant
 
   # RFC 8628 §6.1: a base-20 alphabet with no vowels (no accidental words) and no
@@ -333,17 +333,21 @@ defmodule Attesto.DeviceCode do
   """
   @spec normalize_user_code(String.t(), keyword()) :: {:ok, String.t()} | {:error, :invalid_user_code}
   def normalize_user_code(user_code, opts \\ []) when is_binary(user_code) do
-    length = user_code_length!(opts)
+    if String.valid?(user_code) do
+      length = user_code_length!(opts)
 
-    normalized =
-      user_code
-      |> String.upcase()
-      |> String.replace(~r/[\s-]/, "")
+      normalized =
+        user_code
+        |> String.upcase()
+        |> String.replace(~r/[\s-]/, "")
 
-    cond do
-      String.length(normalized) != length -> {:error, :invalid_user_code}
-      not all_in_alphabet?(normalized) -> {:error, :invalid_user_code}
-      true -> {:ok, normalized}
+      cond do
+        String.length(normalized) != length -> {:error, :invalid_user_code}
+        not all_in_alphabet?(normalized) -> {:error, :invalid_user_code}
+        true -> {:ok, normalized}
+      end
+    else
+      {:error, :invalid_user_code}
     end
   end
 
@@ -396,12 +400,7 @@ defmodule Attesto.DeviceCode do
     end
   end
 
-  defp ttl_seconds!(opts) do
-    case Keyword.get(opts, :ttl, @default_ttl_seconds) do
-      ttl when is_integer(ttl) and ttl > 0 -> ttl
-      _invalid -> raise ArgumentError, ":ttl must be a positive integer"
-    end
-  end
+  defp ttl_seconds!(opts), do: Options.positive_integer!(opts, :ttl, @default_ttl_seconds)
 
   defp interval_seconds!(opts) do
     case Keyword.get(opts, :interval, @default_interval_seconds) do
@@ -542,8 +541,7 @@ defmodule Attesto.DeviceCode do
   # The issue-time device context is canonical. Host-specific values do not
   # belong beside these protocol fields, so extra keys make a persisted record
   # malformed rather than being silently ignored.
-  defp exact_canonical_data_keys?(data),
-    do: map_size(data) == length(@canonical_data_keys) and Enum.all?(@canonical_data_keys, &Map.has_key?(data, &1))
+  defp exact_canonical_data_keys?(data), do: Record.exact_keys?(data, @canonical_data_keys)
 
   defp valid_device_state?(status, expires_at), do: status in @statuses and is_integer(expires_at) and expires_at >= 0
 
@@ -645,12 +643,7 @@ defmodule Attesto.DeviceCode do
 
   defp validate_deny_result(_unexpected, _trusted, _user_code), do: device_store_contract_error(:deny)
 
-  defp valid_optional_field?(record, field, validator) do
-    case Map.fetch(record, field) do
-      {:ok, value} -> validator.(value)
-      :error -> true
-    end
-  end
+  defp valid_optional_field?(record, field, validator), do: Record.optional_field?(record, field, validator)
 
   defp valid_scope_list?(value), do: Scope.valid_list?(value)
 
@@ -658,40 +651,20 @@ defmodule Attesto.DeviceCode do
 
   defp valid_optional_string_list?(nil), do: true
   defp valid_optional_string_list?(value), do: valid_scope_list?(value)
-  defp valid_optional_binary?(nil), do: true
-  defp valid_optional_binary?(value), do: is_binary(value)
-  defp valid_optional_jkt?(nil), do: true
-  defp valid_optional_jkt?(value), do: Thumbprint.valid?(value)
+  defp valid_optional_binary?(value), do: Record.optional_binary?(value)
+  defp valid_optional_jkt?(value), do: Record.optional_jkt?(value)
   defp valid_optional_json_object?(nil), do: true
   defp valid_optional_json_object?(value), do: Claims.portable_json_object?(value)
-  defp valid_optional_non_negative_integer?(nil), do: true
-  defp valid_optional_non_negative_integer?(value), do: is_integer(value) and value >= 0
+  defp valid_optional_non_negative_integer?(value), do: Record.optional_non_negative_integer?(value)
 
-  defp device_store_contract_error(:put) do
-    raise RuntimeError, "device code store put/1 violated its contract"
-  end
+  defp device_store_contract_error(:put), do: Store.contract_violation!("device code store", {:put, 1})
 
-  defp device_store_contract_error(:lookup_user_code) do
-    raise RuntimeError, "device code store lookup_user_code/1 violated its contract"
-  end
+  defp device_store_contract_error(:lookup_user_code),
+    do: Store.contract_violation!("device code store", {:lookup_user_code, 1})
 
-  defp device_store_contract_error(:get) do
-    raise RuntimeError, "device code store get/1 violated its contract"
-  end
-
-  defp device_store_contract_error(:approve) do
-    raise RuntimeError, "device code store approve/3 violated its contract"
-  end
-
-  defp device_store_contract_error(:deny) do
-    raise RuntimeError, "device code store deny/2 violated its contract"
-  end
-
-  defp device_store_contract_error(:poll) do
-    raise RuntimeError, "device code store poll/2 violated its contract"
-  end
-
-  defp device_store_contract_error(:consume) do
-    raise RuntimeError, "device code store consume/2 violated its contract"
-  end
+  defp device_store_contract_error(:get), do: Store.contract_violation!("device code store", {:get, 1})
+  defp device_store_contract_error(:approve), do: Store.contract_violation!("device code store", {:approve, 3})
+  defp device_store_contract_error(:deny), do: Store.contract_violation!("device code store", {:deny, 2})
+  defp device_store_contract_error(:poll), do: Store.contract_violation!("device code store", {:poll, 2})
+  defp device_store_contract_error(:consume), do: Store.contract_violation!("device code store", {:consume, 2})
 end

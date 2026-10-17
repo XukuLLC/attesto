@@ -833,8 +833,7 @@ defmodule Attesto.RequestObjectTest do
       |> Map.delete(claim)
 
     header = %{"alg" => "ES256", "kid" => JOSE.JWK.thumbprint(jwk)}
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims)
   end
 
   # JOSE.JWT.sign injects `typ: "JWT"`; JOSE.JWS.sign leaves the protected

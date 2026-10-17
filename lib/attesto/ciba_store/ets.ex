@@ -26,7 +26,7 @@ defmodule Attesto.CIBAStore.ETS do
 
   use Attesto.Store.ETS,
     default_sweep_interval_ms: 30_000,
-    table_options: [:named_table, :public, :set, read_concurrency: true],
+    table_options: [:named_table, :protected, :set, read_concurrency: true],
     cluster_guard?: false,
     interval_before_tables?: false,
     reset: :server,

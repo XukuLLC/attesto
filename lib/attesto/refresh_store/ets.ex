@@ -14,11 +14,13 @@ defmodule Attesto.RefreshStore.ETS do
   transaction is atomic across nodes and serialized against family
   revocation, or reuse detection only holds per node.
 
-  Start options: `:sweep_interval_ms` (default `60_000`). The sweeper
-  retains expired consumed generations while a later generation in the same
-  family can still be used, so replay of any ancestor can revoke the live
-  family. Plaintext successor retry data is redacted after its `:retry_until`
-  deadline, and all token rows are removed after the last generation expires.
+  Start options: `:sweep_interval_ms` (default `60_000`). The sweeper retains
+  expired consumed generations only through their successor retry deadline,
+  then removes them even while a later generation remains live. This bounds a
+  continuously rotated family's retained history without forcing a live
+  family to reauthenticate after an arbitrary number of rotations. A
+  family-keyed membership index keeps revocation proportional to that family's
+  retained size instead of scanning the complete token table.
   Revoked-family markers are retained for the lifetime of the store, as
   required by the sticky-revocation contract, including after all token rows
   have expired.
@@ -33,13 +35,15 @@ defmodule Attesto.RefreshStore.ETS do
     table_options: [:set, :named_table, read_concurrency: true],
     extra_tables: [
       {__MODULE__.Revoked, [:set, :named_table, read_concurrency: true]},
-      {__MODULE__.Generations, [:set, :named_table, read_concurrency: true]}
+      {__MODULE__.Generations, [:set, :named_table, read_concurrency: true]},
+      {__MODULE__.Families, [:bag, :named_table, read_concurrency: true]}
     ],
     reset: :server
 
   @table __MODULE__
   @revoked :"#{__MODULE__}.Revoked"
   @generations :"#{__MODULE__}.Generations"
+  @families :"#{__MODULE__}.Families"
   @impl Attesto.RefreshStore
   def insert(
         %{
@@ -85,6 +89,7 @@ defmodule Attesto.RefreshStore.ETS do
           row = {record.token_hash, record.family_id, record.expires_at, record}
           true = :ets.insert(@table, row)
           true = :ets.insert(@generations, {{record.family_id, record.generation}, record.token_hash})
+          true = :ets.insert(@families, {record.family_id, record.token_hash})
           :ok
       end
 
@@ -188,6 +193,8 @@ defmodule Attesto.RefreshStore.ETS do
         {{Map.fetch!(child, :family_id), Map.fetch!(child, :generation)}, Map.fetch!(child, :token_hash)}
       )
 
+    true = :ets.insert(@families, {Map.fetch!(child, :family_id), Map.fetch!(child, :token_hash)})
+
     {:ok, consumed_parent, child}
   end
 
@@ -202,8 +209,20 @@ defmodule Attesto.RefreshStore.ETS do
     # of the store. An expiry would let an imported or long-lived family be
     # resurrected after the marker disappeared.
     true = :ets.insert(@revoked, {family_id, :infinity})
-    :ets.match_delete(@table, {:_, family_id, :_, :_})
-    :ets.match_delete(@generations, {{family_id, :_}, :_})
+
+    for {^family_id, token_hash} <- :ets.lookup(@families, family_id) do
+      case :ets.lookup(@table, token_hash) do
+        [{^token_hash, ^family_id, _expires_at, %{generation: generation}}] ->
+          true = :ets.delete(@generations, {family_id, generation})
+
+        _missing_or_invalid_row ->
+          :ok
+      end
+
+      true = :ets.delete(@table, token_hash)
+    end
+
+    true = :ets.delete(@families, family_id)
     :ok
   end
 
@@ -215,59 +234,27 @@ defmodule Attesto.RefreshStore.ETS do
   end
 
   defp sweep_refresh_records(now) do
-    live_generations = live_family_generations(now)
-
     :ets.foldl(
       fn row, :ok ->
-        sweep_refresh_record(row, now, live_generations)
+        sweep_refresh_record(row, now)
       end,
       :ok,
       @table
     )
   end
 
-  # Capture the highest generation that remains live in each family before
-  # deleting anything. The sweep runs inside the store GenServer, so rotations
-  # and revocations cannot interleave between this snapshot and the cleanup.
-  defp live_family_generations(now) do
-    :ets.foldl(
-      fn
-        {_token_hash, family, expires_at, %{generation: generation, consumed: false}}, generations
-        when expires_at > now and is_integer(generation) ->
-          Map.update(generations, family, generation, &max(&1, generation))
-
-        _row, generations ->
-          generations
-      end,
-      %{},
-      @table
-    )
-  end
-
   defp sweep_refresh_record(
-         {token_hash, family, expires_at, %{generation: generation, consumed: true}} = row,
-         now,
-         live_generations
+         {token_hash, family, expires_at,
+          %{generation: generation, consumed: true, successor: %{retry_until: retry_until}}},
+         now
        )
-       when expires_at < now do
-    if live_descendant?(live_generations, family, generation) do
-      redact_successor_after_retry(row, now)
-    else
-      delete_record(token_hash, family, generation)
-    end
-  end
+       when expires_at < now and is_integer(retry_until) and retry_until < now,
+       do: delete_record(token_hash, family, generation)
 
-  defp sweep_refresh_record({token_hash, family, expires_at, %{generation: generation}}, now, _live_generations)
+  defp sweep_refresh_record({token_hash, family, expires_at, %{generation: generation, consumed: false}}, now)
        when expires_at < now, do: delete_record(token_hash, family, generation)
 
-  defp sweep_refresh_record(row, now, _live_generations), do: redact_successor_after_retry(row, now)
-
-  defp live_descendant?(live_generations, family, generation) do
-    case Map.fetch(live_generations, family) do
-      {:ok, live_generation} -> live_generation > generation
-      :error -> false
-    end
-  end
+  defp sweep_refresh_record(row, now), do: redact_successor_after_retry(row, now)
 
   defp redact_successor_after_retry(
          {token_hash, family, expires_at, %{successor: %{retry_until: retry_until} = successor} = record},
@@ -287,6 +274,7 @@ defmodule Attesto.RefreshStore.ETS do
   defp delete_record(token_hash, family_id, generation) do
     true = :ets.delete(@table, token_hash)
     true = :ets.delete(@generations, {family_id, generation})
+    true = :ets.delete_object(@families, {family_id, token_hash})
     :ok
   end
 

@@ -77,6 +77,11 @@ defmodule Attesto.DeviceCodeTest do
     Process.delete({ContractStore, callback})
   end
 
+  test "prevents non-owner processes from mutating store tables directly" do
+    assert_raise ArgumentError, fn -> :ets.insert(Store, {"injected", 9_999_999_999, %{}}) end
+    assert_raise ArgumentError, fn -> :ets.insert(Store.UserIndex, {"INJECTED", "injected"}) end
+  end
+
   defp approve_after_get(user_code, now), do: Process.put({ContractStore, :approve_after_get}, {user_code, now})
 
   describe "issue/3" do
@@ -214,6 +219,10 @@ defmodule Attesto.DeviceCodeTest do
       for bad <- ["BCDF-GHJ", "BCDFGHJKL", "AEIO-UEIO", "BCDF-GH0K", "BCDF-GH1K", ""] do
         assert {:error, :invalid_user_code} = DeviceCode.normalize_user_code(bad), "expected reject for #{inspect(bad)}"
       end
+    end
+
+    test "rejects invalid UTF-8 without raising" do
+      assert {:error, :invalid_user_code} = DeviceCode.normalize_user_code(<<"BCDF", 0xFF, "HJK">>)
     end
   end
 

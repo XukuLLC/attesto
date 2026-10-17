@@ -19,7 +19,7 @@ defmodule Attesto.Federation.EntityStatement do
   """
 
   alias Attesto.Federation.MetadataPolicy
-  alias Attesto.{JWS, Key, NumericDate, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, NumericDate, Options, SigningAlg, Thumbprint}
 
   @typ "entity-statement+jwt"
   @default_lifetime_seconds 3600
@@ -44,8 +44,8 @@ defmodule Attesto.Federation.EntityStatement do
   one-hour lifetime, and public JWK respectively. A Subordinate Statement
   normally supplies its subject's `jwks` explicitly.
 
-  Options include `:now`, `:iat`, `:exp`, `:lifetime` (with
-  `:lifetime_seconds` accepted as an alias), `:jwks`, and, for a PEM key,
+  Options include `:now`, `:iat`, `:exp`, `:lifetime_seconds`, `:jwks`, and,
+  for a PEM key,
   `:alg`.
   """
   @spec build(signing_key(), map(), keyword()) :: String.t()
@@ -104,7 +104,11 @@ defmodule Attesto.Federation.EntityStatement do
   def verify(jwt, jwks, opts \\ [])
 
   def verify(jwt, jwks, opts) when is_binary(jwt) and is_list(opts) do
-    with {:ok, header} <- peek_header(jwt),
+    with {:ok, header} <-
+           JWS.protected_header(jwt,
+             error: :invalid_entity_statement,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_header(header, opts),
          :ok <- validate_trusted_keys(jwks),
          {:ok, claims} <- verify_signature(jwt, header, jwks, opts),
@@ -175,14 +179,7 @@ defmodule Attesto.Federation.EntityStatement do
   defp default_exp(iat, lifetime) when is_integer(iat), do: iat + lifetime
   defp default_exp(_iat, _lifetime), do: nil
 
-  defp lifetime_seconds!(opts) do
-    lifetime = Keyword.get(opts, :lifetime, Keyword.get(opts, :lifetime_seconds, @default_lifetime_seconds))
-
-    case lifetime do
-      value when is_integer(value) and value > 0 -> value
-      value -> raise ArgumentError, ":lifetime must be a positive integer; got #{inspect(value)}"
-    end
-  end
+  defp lifetime_seconds!(opts), do: Options.positive_integer!(opts, :lifetime_seconds, @default_lifetime_seconds)
 
   defp public_jwks(%{jwk: jwk, alg: alg, kid: kid}) do
     {_metadata, public} = JOSE.JWK.to_public_map(jwk)
@@ -230,13 +227,6 @@ defmodule Attesto.Federation.EntityStatement do
     end
   end
 
-  defp peek_header(jwt) do
-    case JWS.peek_json(jwt, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_entity_statement}
-    end
-  end
-
   defp peek_claims(jwt) do
     case JWS.peek_json(jwt, :payload) do
       {:ok, claims} -> {:ok, claims}
@@ -246,7 +236,6 @@ defmodule Attesto.Federation.EntityStatement do
 
   defp check_header(header, opts) do
     with :ok <- check_typ(header),
-         :ok <- check_critical_header(header),
          :ok <- check_alg(header, opts) do
       check_kid(header)
     end
@@ -254,13 +243,6 @@ defmodule Attesto.Federation.EntityStatement do
 
   defp check_typ(%{"typ" => @typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
-
-  defp check_critical_header(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
 
   defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())

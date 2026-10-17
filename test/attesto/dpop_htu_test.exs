@@ -265,10 +265,10 @@ defmodule Attesto.DPoPHtuTest do
                )
     end
 
-    test "bare-authority trailing slash vs no path: '/' differs from empty" do
-      # "https://host/" keeps the "/" after the split (no query/fragment),
-      # while "https://host" has none. Distinct strings, rejected.
-      assert {:error, :invalid_htu} =
+    test "bare-authority trailing slash and no path are equivalent" do
+      # RFC 3986 section 6.2.3 treats an empty authority-based HTTP path as
+      # equivalent to "/".
+      assert {:ok, _verified} =
                verify(
                  "https://api.example.com/",
                  "https://api.example.com"

@@ -14,6 +14,7 @@ defmodule Attesto.TokenTemporalTest do
 
   alias Attesto.Key
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
   alias Attesto.Token
 
   @audience "https://api.example.com/"
@@ -53,13 +54,7 @@ defmodule Attesto.TokenTemporalTest do
   # genuine, so verify can only fail on the claim content.
   defp resign(pem, claims) do
     jwk = Key.signing_jwk(pem)
-
-    {_header, compact} =
-      jwk
-      |> JOSE.JWT.sign(%{"alg" => Token.signing_alg(), "kid" => Key.kid(pem)}, claims)
-      |> JOSE.JWS.compact()
-
-    compact
+    JWT.sign_compact(jwk, %{"alg" => Token.signing_alg(), "kid" => Key.kid(pem)}, claims)
   end
 
   # Override a single claim on the baseline and re-sign.

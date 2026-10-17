@@ -48,10 +48,10 @@ defmodule Attesto.KeyAttestation do
   fails closed.
   """
 
-  alias Attesto.{JWS, NumericDate, SecureCompare, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, NumericDate, Options, SecureCompare, SigningAlg, Thumbprint}
 
   @typ "key-attestation+jwt"
-  @future_skew_seconds 60
+  @future_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type verified :: %{
           attested_keys: [map()],
@@ -152,11 +152,7 @@ defmodule Attesto.KeyAttestation do
 
   defp validate_options!(opts) do
     Enum.each([:require_exp, :enforce_fapi_alg_policy], fn key ->
-      case Keyword.fetch(opts, key) do
-        :error -> :ok
-        {:ok, value} when is_boolean(value) -> :ok
-        {:ok, _value} -> raise ArgumentError, ":#{key} must be true or false"
-      end
+      Options.boolean!(opts, key, false)
     end)
 
     :ok
@@ -202,7 +198,7 @@ defmodule Attesto.KeyAttestation do
     # RSA-modulus / Edwards-curve strength gate on the attestation signer,
     # unless the caller explicitly disables the FAPI gate.
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
+      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?())
 
     JWS.verify_trusted(attestation, header, trusted,
       accepted_algs: accepted_algs,

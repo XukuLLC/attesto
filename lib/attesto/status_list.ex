@@ -107,9 +107,12 @@ defmodule Attesto.StatusList do
   def verify(token, jwks, opts) when is_binary(token) do
     opts = MapParams.ensure_keyword!(opts)
 
-    with {:ok, header} <- peek_header(token),
+    with {:ok, header} <-
+           JWS.protected_header(token,
+             error: :invalid_signature,
+             crit_error: :invalid_signature
+           ),
          :ok <- check_typ(header),
-         :ok <- check_crit(header),
          {:ok, alg} <- accepted_alg(header, opts),
          {:ok, claims} <- verify_signature(token, header, alg, jwks),
          :ok <- check_expiry(claims, opts) do
@@ -219,22 +222,8 @@ defmodule Attesto.StatusList do
     raise ArgumentError, ":bits must be one of 1, 2, 4, or 8; got #{inspect(bits)}"
   end
 
-  defp peek_header(token) do
-    case JWS.peek_json(token, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_signature}
-    end
-  end
-
   defp check_typ(%{"typ" => @header_typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
-
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :invalid_signature}
-    end
-  end
 
   defp accepted_alg(header, opts) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())

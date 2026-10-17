@@ -123,9 +123,6 @@ defmodule Attesto.Discovery do
   end
 
   defp default_jwks_uri(%Config{issuer: issuer}) do
-    issuer
-    |> URI.parse()
-    |> URI.merge(@default_jwks_path)
-    |> URI.to_string()
+    Config.append_endpoint_path(issuer, @default_jwks_path)
   end
 end

@@ -121,6 +121,7 @@ boundary, use the lower-level
   - [Configure once](#configure-once)
   - [Mint and verify a token](#mint-and-verify-a-token)
   - [Sender-constrain a token to a DPoP key](#sender-constrain-a-token-to-a-dpop-key)
+  - [Verification option conventions](#verification-option-conventions)
   - [Authorization request and response JWTs](#authorization-request-and-response-jwts)
   - [Token introspection](#token-introspection)
   - [Match scopes](#match-scopes)
@@ -148,7 +149,7 @@ boundary, use the lower-level
 ```elixir
 def deps do
   [
-    {:attesto, "~> 2.5"}
+    {:attesto, "~> 2.6"}
   ]
 end
 ```
@@ -255,6 +256,38 @@ Pass a JWK thumbprint at issue time, then verify the proof and the binding toget
 ```
 
 A DPoP- or mTLS-bound token presented without (or with a mismatched) proof is rejected, and a proof presented against a token that is not bound that way is rejected too.
+
+### Verification option conventions
+
+Attesto keeps option names aligned with the protocol object being processed.
+The following conventions explain the names that intentionally differ across
+modules:
+
+- `:lifetime` controls the lifetime of a newly issued object.
+  `:max_lifetime` and `:max_lifetime_seconds` bound the lifetime of an object
+  being verified. Protocol-specific bounds retain their full names, such as
+  `:max_request_lifetime_seconds` for a CIBA request. These options are seconds;
+  `:unbounded` is accepted only where the function documentation says so.
+- Trusted verification keys are normally the verifier's second positional
+  argument, named `trusted_jwks` in the function documentation. A nested proof
+  uses a distinct option so its trust source cannot be confused with the outer
+  signature: for example, `:key_attestation_trusted_jwks` applies only to the
+  embedded key attestation in `Attesto.CredentialProof`. Resolver callbacks,
+  such as an OID4VP issuer resolver, remain protocol-specific because they also
+  locate metadata rather than merely supplying keys.
+- `:accepted_algs` always narrows the library policy; it never enables an
+  algorithm that Attesto does not support for verification. FAPI-bound inputs
+  such as client assertions, Request Objects, credential proofs, and wallet or
+  key attestations default to `Attesto.SigningAlg.fapi_algs/0`. Generic signed
+  artifacts such as JWT VCs, identity assertions, status lists, SIOP tokens,
+  Entity Statements, and Trust Marks default to
+  `Attesto.SigningAlg.allowed/0`. Each verifier documents its own default.
+- `:enforce_fapi_alg_policy` applies key-family and curve restrictions in
+  addition to `:accepted_algs`. It defaults to `true` only on the protocol
+  paths whose profile requires that policy.
+
+All verification allow-lists fail closed: an explicit empty list accepts no
+algorithms, and malformed option values raise before cryptographic work begins.
 
 ### Authorization request and response JWTs
 
@@ -649,7 +682,7 @@ constraint.
 
 ## Status
 
-A stable `2.x` release: the public API follows [semantic versioning](https://semver.org/) — minor and patch releases are backward-compatible and breaking changes wait for a new major version (read the CHANGELOG before upgrading). Implemented and tested: token issue/verify, DPoP, RFC 8705 mTLS client authentication and certificate-bound tokens, extractable and non-extractable signing, rotation health, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against documented storage behaviours with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own atomic adapters. Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 2.5`.
+A stable `2.x` release. Public functions and behaviour contracts remain compatible within 2.x where security permits. Security and correctness fixes may tighten validation or derived defaults in a minor release; the CHANGELOG identifies required migrations and behavior changes. Pin an exact minor when unchanged behavior is required. Implemented and tested: token issue/verify, DPoP, RFC 8705 mTLS client authentication and certificate-bound tokens, extractable and non-extractable signing, rotation health, scope, keystore, PKCE validation, JWKS publication, OIDC discovery, the authorization-code grant (single-use, optionally DPoP-bound), refresh-token rotation with reuse detection, token revocation (RFC 7009, refresh-token family), Pushed Authorization Request primitives (RFC 9126), Resource Indicators (RFC 8707), signed request-object policy (JAR) and JARM response signing, token introspection and signed introspection response JWTs, Step-Up Authentication challenges (RFC 9470), the JWT-assertion (`jwt-bearer`) grant, the Device Authorization Grant (RFC 8628), Client-Initiated Backchannel Authentication (CIBA; poll/ping, signed requests per FAPI-CIBA), the RP-Initiated / Back-Channel / Front-Channel Logout and Session Management primitives, RFC 9728 protected-resource metadata, Client ID Metadata Document (CIMD) verification, and `:telemetry` events for security-relevant refusals. The stateful grants run against documented storage behaviours with ETS reference implementations included; a production host either takes the Ecto implementations from `attesto_phoenix` or writes its own atomic adapters. Cross-language parity tests check Attesto-issued artifacts against a reference implementation in another language. Pin to `~> 2.6`.
 
 ## Development
 

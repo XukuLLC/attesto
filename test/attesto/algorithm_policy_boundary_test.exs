@@ -208,7 +208,7 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
 
   defp verify_for(:client_assertion, context, opts) do
     claims = Map.merge(common_claims(), %{"iss" => @client, "sub" => @client, "aud" => @issuer})
-    jwt = signed(context.signer, context.alg, claims)
+    jwt = signed(context.signer, context.alg, claims, "client-authentication+jwt")
     ClientAssertion.verify(jwt, @client, @issuer, trusted(context), [now: @now] ++ opts)
   end
 

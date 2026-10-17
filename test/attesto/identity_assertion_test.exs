@@ -2,6 +2,7 @@ defmodule Attesto.IdentityAssertionTest do
   use ExUnit.Case, async: true
 
   alias Attesto.IdentityAssertion
+  alias Attesto.Test.JWT
 
   @iss "https://idp.example.com"
   @aud "https://as.example.com"
@@ -37,8 +38,7 @@ defmodule Attesto.IdentityAssertionTest do
 
   defp assertion(jwk, alg, claim_overrides \\ %{}, header_overrides \\ %{}) do
     header = Map.merge(%{"alg" => alg, "kid" => JOSE.JWK.thumbprint(jwk), "typ" => @typ}, header_overrides)
-    {_header, compact} = jwk |> JOSE.JWT.sign(header, claims(claim_overrides)) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(jwk, header, claims(claim_overrides))
   end
 
   defp opts(extra \\ []) do

@@ -84,10 +84,17 @@ defmodule Attesto.KeyTest do
       assert {:error, :incompatible_key} = Key.verification_jwk(jwk_map, alg: "Ed448")
     end
 
-    test "leaves other key-type and algorithm mismatches to signature verification" do
+    test "accepts ES256K with a secp256k1 verification key" do
+      jwk_map = JOSE.JWK.generate_key({:ec, "secp256k1"}) |> public_map()
+
+      assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(jwk_map, alg: "ES256K")
+      assert {:error, :incompatible_key} = Key.verification_jwk(jwk_map, alg: "ES256")
+    end
+
+    test "rejects every key-type and algorithm mismatch before signature verification" do
       jwk_map = JOSE.JWK.generate_key({:ec, "P-256"}) |> public_map()
 
-      assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(jwk_map, alg: "RS256")
+      assert {:error, :incompatible_key} = Key.verification_jwk(jwk_map, alg: "RS256")
     end
   end
 end

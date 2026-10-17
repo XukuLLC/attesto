@@ -181,6 +181,7 @@ defmodule Attesto.DidTest do
     assert {:error, :invalid_did} = Did.resolve(nil)
     assert {:error, :invalid_options} = Did.resolve("did:web:example.com", resolver: :http_client)
     assert {:error, :invalid_options} = Did.resolve("did:web:example.com", %{})
+    assert {:error, :invalid_did} = Did.resolve(<<"did:web:example.com:", 0xFF>>)
   end
 
   defp keypair(spec) do

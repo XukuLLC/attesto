@@ -174,13 +174,13 @@ defmodule Attesto.Federation.MetadataPolicy do
     end
   end
 
-  defp normalize_scope_value({:ok, value}, "oauth_client", "scope") when is_binary(value),
+  defp normalize_scope_value({:ok, value}, _entity_type, "scope") when is_binary(value),
     do: {:present, String.split(value, " ", trim: true)}
 
   defp normalize_scope_value({:ok, value}, _entity_type, _parameter), do: {:present, value}
   defp normalize_scope_value(:error, _entity_type, _parameter), do: :absent
 
-  defp restore_scope_value({:present, value}, "oauth_client", "scope") when is_list(value),
+  defp restore_scope_value({:present, value}, _entity_type, "scope") when is_list(value),
     do: {:present, Enum.join(value, " ")}
 
   defp restore_scope_value(state, _entity_type, _parameter), do: state

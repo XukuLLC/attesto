@@ -50,7 +50,7 @@ defmodule Attesto.IdentityAssertion do
   alias Attesto.SigningAlg
 
   @typ "oauth-id-jag+jwt"
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_jti_bytes 256
   @required_claims ~w(iss sub aud client_id jti exp iat)
 
@@ -184,6 +184,9 @@ defmodule Attesto.IdentityAssertion do
   defp check_supported_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
+    # Keep the library-wide asymmetric allow-list as a second boundary. A host
+    # cannot opt an Identity Assertion into a symmetric or otherwise unsupported
+    # algorithm merely by including it in :accepted_algs.
     if alg in SigningAlg.allowed() and SigningAlg.valid_verification_algorithms?(accepted) and alg in accepted,
       do: :ok,
       else: {:error, :unsupported_alg}

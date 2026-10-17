@@ -5,6 +5,7 @@ defmodule Attesto.SiopTest do
   import Bitwise
 
   alias Attesto.{Siop, Thumbprint}
+  alias Attesto.Test.JWT
 
   @base58_alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -426,8 +427,7 @@ defmodule Attesto.SiopTest do
 
   defp sign(key, claims, header_overrides \\ %{}) do
     header = Map.merge(%{"alg" => "ES256", "typ" => "JWT"}, header_overrides)
-    {_signed, compact} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    compact
+    JWT.sign_compact(key, header, claims)
   end
 
   defp tamper_signature(token) do

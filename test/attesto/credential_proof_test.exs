@@ -3,6 +3,7 @@ defmodule Attesto.CredentialProofTest do
   use ExUnit.Case, async: true
 
   alias Attesto.CredentialProof
+  alias Attesto.Test.JWT
 
   @issuer "https://credential-issuer.example"
   @client_id "wallet-client"
@@ -32,8 +33,7 @@ defmodule Attesto.CredentialProofTest do
         claim_overrides
       )
 
-    {_, proof} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    proof
+    JWT.sign_compact(key, header, claims)
   end
 
   defp verify_opts do
@@ -131,8 +131,7 @@ defmodule Attesto.CredentialProofTest do
           overrides
         )
 
-      {_header, compact} = signer |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-      compact
+      JWT.sign_compact(signer, header, claims)
     end
 
     defp trusted_key_attestation_signer(signer), do: %{"keys" => [Map.put(public_map(signer), "kid", "ks-1")]}
@@ -152,7 +151,7 @@ defmodule Attesto.CredentialProofTest do
       }
 
       claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
-      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(holder, header, claims)
 
       assert {:ok, %{key_attestation: nil}} = CredentialProof.verify_jwt(proof, verify_opts())
     end
@@ -172,7 +171,7 @@ defmodule Attesto.CredentialProofTest do
       }
 
       claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
-      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(holder, header, claims)
 
       opts = Keyword.put(verify_opts(), :key_attestation_trusted_jwks, trusted_key_attestation_signer(signer))
 
@@ -196,7 +195,7 @@ defmodule Attesto.CredentialProofTest do
       }
 
       claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
-      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(holder, header, claims)
 
       opts = Keyword.put(verify_opts(), :key_attestation_trusted_jwks, trusted_key_attestation_signer(signer))
 
@@ -219,7 +218,7 @@ defmodule Attesto.CredentialProofTest do
       }
 
       claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
-      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(holder, header, claims)
 
       opts = Keyword.put(verify_opts(), :key_attestation_trusted_jwks, trusted_key_attestation_signer(signer))
 
@@ -262,7 +261,7 @@ defmodule Attesto.CredentialProofTest do
       }
 
       claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
-      {_header, proof} = holder |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+      proof = JWT.sign_compact(holder, header, claims)
 
       opts =
         verify_opts()

@@ -15,7 +15,7 @@ defmodule Attesto.ClientAssertionTest do
     Map.merge(map, Map.merge(%{"kid" => JOSE.JWK.thumbprint(jwk), "alg" => "ES256"}, overrides))
   end
 
-  defp assertion(jwk, overrides \\ %{}, alg \\ "ES256") do
+  defp assertion(jwk, overrides \\ %{}, alg \\ "ES256", header_overrides \\ %{}) do
     now = System.system_time(:second)
 
     claims =
@@ -31,7 +31,7 @@ defmodule Attesto.ClientAssertionTest do
         overrides
       )
 
-    header = %{"alg" => alg, "kid" => JOSE.JWK.thumbprint(jwk)}
+    header = Map.merge(%{"alg" => alg, "kid" => JOSE.JWK.thumbprint(jwk)}, header_overrides)
     JWT.sign_compact(jwk, header, claims)
   end
 
@@ -44,6 +44,53 @@ defmodule Attesto.ClientAssertionTest do
 
     assert claims["iss"] == @client_id
     assert claims["sub"] == @client_id
+  end
+
+  test "accepts only client-assertion typ values and rejects tokens from other JWT contexts" do
+    key = ec_key()
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    for typ <- [nil, "JWT", "application/JWT", "client-authentication+jwt", "application/client-authentication+jwt"] do
+      assert {:ok, _claims} =
+               key
+               |> assertion(%{}, "ES256", if(typ == nil, do: %{}, else: %{"typ" => typ}))
+               |> ClientAssertion.verify(@client_id, @audience, trusted)
+    end
+
+    for typ <- ["oauth-authz-req+jwt", "application/oauth-authz-req+jwt", "dpop+jwt", "at+jwt"] do
+      assert {:error, :invalid_assertion} =
+               key
+               |> assertion(%{}, "ES256", %{"typ" => typ})
+               |> ClientAssertion.verify(@client_id, @audience, trusted)
+    end
+  end
+
+  test "rejects authorization-request claims even when the JWT otherwise looks like a client assertion" do
+    key = ec_key()
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    for claim <- ~w(response_type redirect_uri code_challenge request request_uri) do
+      assert {:error, :invalid_assertion} =
+               key
+               |> assertion(%{claim => "captured-authorization-request-value"})
+               |> ClientAssertion.verify(@client_id, @audience, trusted)
+    end
+  end
+
+  test "bounds assertion expiry by default and requires an explicit opt-out" do
+    key = ec_key()
+    now = 1_700_000_000
+    trusted = %{"keys" => [public_jwk(key)]}
+    jwt = assertion(key, %{"iat" => now, "exp" => now + 301})
+
+    assert {:error, :invalid_assertion} =
+             ClientAssertion.verify(jwt, @client_id, @audience, trusted, now: now)
+
+    assert {:ok, _claims} =
+             ClientAssertion.verify(jwt, @client_id, @audience, trusted,
+               now: now,
+               max_lifetime: :unbounded
+             )
   end
 
   test "keeps zero expiry leeway and 60-second future iat skew" do
@@ -227,7 +274,7 @@ defmodule Attesto.ClientAssertionTest do
     }
 
     header = %{"alg" => "RS256", "kid" => JOSE.JWK.thumbprint(key)}
-    {_header, jwt} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
+    jwt = JWT.sign_compact(key, header, claims)
 
     {_kty, jwk} = JOSE.JWK.to_public_map(key)
     jwk = Map.merge(jwk, %{"kid" => JOSE.JWK.thumbprint(key), "alg" => "RS256"})
@@ -273,7 +320,7 @@ defmodule Attesto.ClientAssertionTest do
     end
 
     for invalid <- [nil, 0, -1, 1.5, "60"] do
-      assert_raise ArgumentError, ~r/:max_lifetime must be a positive integer/, fn ->
+      assert_raise ArgumentError, ~r/:max_lifetime must be a positive integer or :unbounded/, fn ->
         ClientAssertion.verify("not-a-jwt", @client_id, @audience, %{}, max_lifetime: invalid)
       end
     end

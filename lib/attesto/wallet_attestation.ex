@@ -51,12 +51,12 @@ defmodule Attesto.WalletAttestation do
   key - this module verifies exactly that.
   """
 
-  alias Attesto.{Claims, JWS, Key, NumericDate, SigningAlg, Thumbprint}
+  alias Attesto.{Claims, JWS, Key, NumericDate, Options, SigningAlg, Thumbprint}
 
   @attestation_typ "oauth-client-attestation+jwt"
   @pop_typ "oauth-client-attestation-pop+jwt"
   @default_pop_max_age_seconds 300
-  @future_skew_seconds 60
+  @future_skew_seconds NumericDate.default_clock_skew_seconds()
   # No normative limit in the draft; bounded so a replay store keying on
   # `jti` cannot be forced to retain unbounded-size identifiers.
   @max_jti_length 256
@@ -184,17 +184,9 @@ defmodule Attesto.WalletAttestation do
 
   defp validate_policy_options!(opts) do
     enforce_fapi_policy =
-      case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
-        :error -> SigningAlg.default_fapi_policy?(opts)
-        {:ok, value} when is_boolean(value) -> value
-        {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
-      end
+      Options.boolean!(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?())
 
-    max_age =
-      case Keyword.get(opts, :max_age_seconds, @default_pop_max_age_seconds) do
-        value when is_integer(value) and value > 0 -> value
-        _invalid -> raise ArgumentError, ":max_age_seconds must be a positive integer"
-      end
+    max_age = Options.positive_integer!(opts, :max_age_seconds, @default_pop_max_age_seconds)
 
     now = NumericDate.non_negative_now!(opts)
 
@@ -230,7 +222,7 @@ defmodule Attesto.WalletAttestation do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.fapi_algs())
 
     enforce_fapi_policy =
-      Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts))
+      Keyword.fetch!(opts, :enforce_fapi_alg_policy)
 
     JWS.verify_trusted(attestation, header, trusted,
       accepted_algs: accepted_algs,
@@ -304,8 +296,8 @@ defmodule Attesto.WalletAttestation do
            ),
          :ok <- check_typ(header, @pop_typ, :invalid_pop_typ),
          {:ok, alg} <- check_pop_alg(header, opts),
-         {:ok, cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg, opts),
-         {:ok, claims} <- verify_pop_signature(pop, alg, cnf_jwk),
+         {:ok, _cnf_jwk} <- verification_jwk_from_cnf(cnf_jwk_map, alg, opts),
+         {:ok, claims} <- verify_pop_signature(pop, header, cnf_jwk_map),
          :ok <- check_pop_audience(claims, opts),
          :ok <- check_pop_time_claims(claims, opts),
          :ok <- check_pop_challenge_type(claims),
@@ -340,11 +332,15 @@ defmodule Attesto.WalletAttestation do
     end
   end
 
-  defp verify_pop_signature(pop, alg, jwk) do
-    JWS.verify_strict(pop, [{nil, alg, jwk}],
+  defp verify_pop_signature(pop, header, jwk_map) do
+    JWS.verify_trusted(pop, header, jwk_map,
+      alg: Map.get(header, "alg"),
+      select_kid: false,
+      malformed_key: :reject_set,
       terminal_error: :invalid_pop_signature,
       malformed_result: :halt,
-      malformed_error: :invalid_pop_signature
+      malformed_error: :invalid_pop_signature,
+      claims_map?: true
     )
   end
 

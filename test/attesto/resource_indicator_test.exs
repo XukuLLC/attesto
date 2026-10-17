@@ -53,6 +53,11 @@ defmodule Attesto.ResourceIndicatorTest do
                {:error, :invalid_target}
     end
 
+    test "rejects invalid UTF-8 without raising" do
+      assert ResourceIndicator.validate(<<"https://api.example/", 0xFF>>) == {:error, :invalid_target}
+      refute ResourceIndicator.valid_indicator?(<<"urn:example:", 0xFF>>)
+    end
+
     test "rejects when any member of an array is invalid" do
       assert ResourceIndicator.validate(["https://ok.example.com", "not a uri"]) ==
                {:error, :invalid_target}

@@ -47,7 +47,7 @@ defmodule Attesto.Siop do
 
   @self_issued_issuer "https://self-issued.me/v2"
   @header_typ "JWT"
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type verified :: %{subject: String.t(), jwk: map()}
 
@@ -114,7 +114,7 @@ defmodule Attesto.Siop do
          {:ok, alg} <- check_alg(header, opts),
          {:ok, unverified_claims} <- peek_json(id_token, :payload),
          {:ok, binding} <- resolve_subject_binding(header, unverified_claims, alg),
-         {:ok, claims} <- verify_signature(id_token, alg, binding.jwk),
+         {:ok, claims} <- verify_signature(id_token, header, binding.jwk_map),
          :ok <- check_verified_subject_binding(header, claims, binding, alg),
          {:ok, subject} <- check_subject(claims, binding),
          :ok <- check_issuer(claims, subject, binding.type),
@@ -151,6 +151,9 @@ defmodule Attesto.Siop do
   defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
+    # Keep the library-wide asymmetric allow-list as a second boundary. A host
+    # cannot opt a SIOP response into HS256 or another unsupported algorithm by
+    # placing it in :accepted_algs.
     if SigningAlg.valid_verification_algorithms?(accepted_algs) and alg in accepted_algs and
          alg in SigningAlg.allowed(),
        do: {:ok, alg},
@@ -266,15 +269,16 @@ defmodule Attesto.Siop do
   defp binding_error(:did), do: :invalid_subject
   defp binding_error(:jwk_thumbprint), do: :invalid_sub_jwk
 
-  defp verify_signature(id_token, alg, jwk) do
-    JWS.verify_strict(id_token, [{nil, alg, jwk}],
+  defp verify_signature(id_token, header, jwk_map) do
+    JWS.verify_trusted(id_token, header, jwk_map,
+      alg: Map.get(header, "alg"),
+      select_kid: false,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_token,
       claims_map?: true
     )
-  rescue
-    _ -> {:error, :invalid_signature}
   end
 
   defp thumbprint(jwk) do

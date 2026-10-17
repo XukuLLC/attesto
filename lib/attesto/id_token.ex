@@ -80,6 +80,7 @@ defmodule Attesto.IDToken do
   alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.NumericDate
+  alias Attesto.Record
   alias Attesto.SigningAlg
 
   @signing_alg "RS256"
@@ -96,7 +97,7 @@ defmodule Attesto.IDToken do
 
   # Modest tolerance for a verifier clock running slightly ahead of the
   # issuer's, applied to the future-`iat` check, mirroring `Attesto.Token`.
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type mint_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -365,10 +366,7 @@ defmodule Attesto.IDToken do
              crit_error: :unsupported_critical_header
            ),
          :ok <- check_header_typ(header) do
-      case candidate_jwks(config, Map.get(header, "kid")) do
-        [] -> {:error, :invalid_signature}
-        jwks -> verify_against_any(jwks, jwt)
-      end
+      verify_against_trusted(config, jwt, header)
     end
   end
 
@@ -376,18 +374,12 @@ defmodule Attesto.IDToken do
   defp check_header_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
   defp check_header_typ(_header), do: :ok
 
-  defp candidate_jwks(config, header_kid) do
-    JWS.verification_candidates(config.keystore.verification_pems(),
-      kid: header_kid,
+  defp verify_against_trusted(config, jwt, header) do
+    JWS.verify_trusted(jwt, header, config.keystore.verification_pems(),
       malformed_key: :raise,
       candidate_builder: fn pem ->
         {Key.kid(pem), SigningAlg.for_key(config.keystore, pem), Key.jwk(pem)}
-      end
-    )
-  end
-
-  defp verify_against_any(candidates, jwt) do
-    JWS.verify_strict(jwt, candidates,
+      end,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_token
@@ -436,8 +428,16 @@ defmodule Attesto.IDToken do
 
   defp check_audience(_claims, _client_id), do: {:error, :invalid_audience}
 
-  # OIDC Core §3.1.3.7 item 4/5: if `azp` is present it MUST equal the
-  # client. Absent `azp` is permitted (single-audience case).
+  # OIDC Core §3.1.3.7 item 4/5: multiple audiences require `azp`, and any
+  # present `azp` MUST equal the client. Absent `azp` is permitted only for a
+  # single-audience token.
+  defp check_azp(%{"aud" => audiences} = claims, client_id) when is_list(audiences) and length(audiences) > 1 do
+    case Map.fetch(claims, "azp") do
+      {:ok, ^client_id} -> :ok
+      _missing_or_mismatch -> {:error, :invalid_azp}
+    end
+  end
+
   defp check_azp(%{"azp" => azp}, client_id) do
     if azp == client_id, do: :ok, else: {:error, :invalid_azp}
   end
@@ -446,7 +446,7 @@ defmodule Attesto.IDToken do
 
   defp check_required_claims(claims) do
     cond do
-      not non_empty_binary?(Map.get(claims, "sub")) -> {:error, :invalid_claims}
+      not Record.non_empty_binary?(Map.get(claims, "sub")) -> {:error, :invalid_claims}
       not non_negative_integer?(Map.get(claims, "iat")) -> {:error, :invalid_claims}
       true -> :ok
     end
@@ -489,6 +489,5 @@ defmodule Attesto.IDToken do
   defp check_non_empty(value, _error) when is_binary(value) and value != "", do: :ok
   defp check_non_empty(_value, error), do: {:error, error}
 
-  defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
 end

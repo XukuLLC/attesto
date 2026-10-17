@@ -159,7 +159,7 @@ defmodule Attesto.Config do
 
   @doc """
   The canonical external URL of the token endpoint: the configured issuer
-  merged with `token_endpoint_path`. This is the URL a client's DPoP proof
+  path followed by `token_endpoint_path`. This is the URL a client's DPoP proof
   must sign in its `htu` claim (RFC 9449 §4.3) and the URL OAuth
   Authorization Server Metadata (RFC 8414) would publish. Derived from
   `issuer` rather than a live request so it is stable behind any TLS
@@ -167,9 +167,16 @@ defmodule Attesto.Config do
   """
   @spec token_endpoint_url(t()) :: String.t()
   def token_endpoint_url(%__MODULE__{issuer: issuer, token_endpoint_path: path}) do
-    issuer
-    |> URI.parse()
-    |> URI.merge(path)
+    append_endpoint_path(issuer, path)
+  end
+
+  @doc false
+  @spec append_endpoint_path(String.t(), String.t()) :: String.t()
+  def append_endpoint_path(issuer, path) when is_binary(issuer) and is_binary(path) do
+    base = if String.ends_with?(issuer, "/"), do: issuer, else: issuer <> "/"
+
+    base
+    |> URI.merge("./" <> String.trim_leading(path, "/"))
     |> URI.to_string()
   end
 
@@ -261,10 +268,9 @@ defmodule Attesto.Config do
     do:
       raise(ArgumentError, "Attesto.Config :default_lifetime_seconds must be a positive integer; got #{inspect(other)}")
 
-  # The path is merged onto the issuer to derive `token_endpoint_url/1`.
+  # The path is appended to the issuer path to derive `token_endpoint_url/1`.
   # Require a path-only absolute URI reference: exactly one leading `/`, no
-  # authority, query, or fragment. `URI.merge/2` treats `//host/path` as a
-  # network-path reference and would otherwise switch hosts.
+  # authority, query, or fragment.
   defp validate_token_endpoint_path!(path) when is_binary(path) do
     uri = URI.parse(path)
 

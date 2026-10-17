@@ -6,6 +6,7 @@ defmodule Attesto.TokenVerifyTest do
 
   alias Attesto.Keystore.Static
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
   alias Attesto.Test.RotationKeystore
   alias Attesto.Token
 
@@ -40,12 +41,7 @@ defmodule Attesto.TokenVerifyTest do
     kid = Keyword.get(opts, :kid, Attesto.Key.kid(pem))
     alg = Keyword.get(opts, :alg, Token.signing_alg())
 
-    {_header, compact} =
-      jwk
-      |> JOSE.JWT.sign(%{"alg" => alg, "kid" => kid}, with_defaults)
-      |> JOSE.JWS.compact()
-
-    compact
+    JWT.sign_compact(jwk, %{"alg" => alg, "kid" => kid}, with_defaults)
   end
 
   defp put_default(map, key, value) do

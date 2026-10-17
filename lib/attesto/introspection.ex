@@ -41,7 +41,7 @@ defmodule Attesto.Introspection do
   unmatched hint still falls through to the other.
   """
 
-  alias Attesto.{Config, NumericDate, RefreshToken, Scope, Secret, Thumbprint, Token}
+  alias Attesto.{Config, NumericDate, Record, RefreshToken, Scope, Secret, Token}
 
   @inactive %{"active" => false}
 
@@ -227,7 +227,7 @@ defmodule Attesto.Introspection do
   # silently degrading to a minimal response.
   defp valid_refresh_entry?(entry, expected_hash) when is_map(entry) do
     Map.get(entry, :token_hash) == expected_hash and
-      non_empty_binary?(Map.get(entry, :family_id)) and
+      Record.non_empty_binary?(Map.get(entry, :family_id)) and
       non_negative_integer?(Map.get(entry, :generation)) and
       non_negative_integer?(Map.get(entry, :expires_at)) and
       is_boolean(Map.get(entry, :consumed)) and
@@ -248,13 +248,13 @@ defmodule Attesto.Introspection do
   defp valid_refresh_state?(_entry), do: false
 
   defp valid_refresh_data?(data) when is_map(data) do
-    valid_optional_data_member?(data, :subject, &non_empty_binary?/1) and
-      valid_optional_data_member?(data, :client_id, &nil_or_non_empty_binary?/1) and
+    valid_optional_data_member?(data, :subject, &Record.non_empty_binary?/1) and
+      valid_optional_data_member?(data, :client_id, &Record.optional_non_empty_binary?/1) and
       valid_optional_data_member?(data, :scope, &Scope.valid_list?/1) and
       valid_optional_data_member?(data, :resource, &valid_resource?/1) and
-      valid_optional_data_member?(data, :dpop_jkt, &nil_or_thumbprint?/1) and
-      valid_optional_data_member?(data, :acr, &nil_or_non_empty_binary?/1) and
-      valid_optional_data_member?(data, :auth_time, &nil_or_non_negative_integer?/1) and
+      valid_optional_data_member?(data, :dpop_jkt, &Record.optional_jkt?/1) and
+      valid_optional_data_member?(data, :acr, &Record.optional_non_empty_binary?/1) and
+      valid_optional_data_member?(data, :auth_time, &Record.optional_non_negative_integer?/1) and
       valid_optional_data_member?(data, :claims, &is_map/1) and
       RefreshToken.valid_issuer_binding?(data)
   end
@@ -274,15 +274,8 @@ defmodule Attesto.Introspection do
     end
   end
 
-  defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
-  defp nil_or_non_empty_binary?(nil), do: true
-  defp nil_or_non_empty_binary?(value), do: non_empty_binary?(value)
-  defp nil_or_non_negative_integer?(nil), do: true
-  defp nil_or_non_negative_integer?(value), do: non_negative_integer?(value)
-  defp nil_or_thumbprint?(nil), do: true
-  defp nil_or_thumbprint?(value), do: Thumbprint.valid?(value)
-  defp valid_resource?(value), do: is_list(value) and Enum.all?(value, &non_empty_binary?/1)
+  defp valid_resource?(value), do: is_list(value) and Enum.all?(value, &Record.non_empty_binary?/1)
 
   defp report_refresh_store_failure(reason) do
     Attesto.Telemetry.introspection_refresh_store_failed(reason)

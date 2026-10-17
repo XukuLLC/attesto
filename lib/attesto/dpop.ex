@@ -99,7 +99,7 @@ defmodule Attesto.DPoP do
   # Match the verifier-wide clock skew used for JWT assertions and ID/access
   # tokens. DPoP proofs are still short-lived by `@default_max_age_seconds`;
   # this only tolerates clients whose clocks are slightly ahead of the server.
-  @future_skew_seconds 60
+  @future_skew_seconds NumericDate.default_clock_skew_seconds()
   # RFC 9449 places no upper bound on `jti` length, but the replay cache
   # holds every `jti` for the entire acceptance window. A malicious
   # client could exhaust memory with megabyte-sized values; cap at 256
@@ -218,12 +218,15 @@ defmodule Attesto.DPoP do
   def verify_proof(proof, opts \\ [])
 
   def verify_proof(proof, opts) when is_binary(proof) and is_list(opts) do
-    with {:ok, header} <- parse_header(proof),
+    with {:ok, header} <-
+           JWS.protected_header(proof,
+             error: :invalid_proof,
+             crit_error: :unsupported_critical_header
+           ),
          :ok <- check_typ(header),
          :ok <- check_alg(header),
-         :ok <- check_crit(header),
          {:ok, jwk} <- extract_jwk(header),
-         {:ok, claims} <- verify_signature(proof, header["alg"], jwk),
+         {:ok, claims} <- verify_signature(proof, header),
          :ok <- check_htm(claims, opts),
          :ok <- check_htu(claims, opts),
          {:ok, iat} <- check_iat(claims, opts),
@@ -314,13 +317,6 @@ defmodule Attesto.DPoP do
   # We pull the protected header out of the compact JWS ourselves rather
   # than letting `JOSE.JWT.verify_strict/3` do it: we need the embedded
   # `jwk` BEFORE we can verify the signature.
-  defp parse_header(proof) do
-    case JWS.peek_json(proof, :protected) do
-      {:ok, header} -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_proof}
-    end
-  end
-
   defp check_typ(%{"typ" => @proof_typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
@@ -329,17 +325,6 @@ defmodule Attesto.DPoP do
   end
 
   defp check_alg(_header), do: {:error, :invalid_alg}
-
-  # RFC 7515 §4.1.11: a recipient that does not understand a JWS extension
-  # named in `crit` MUST reject the JWS. A DPoP proof header that demands a
-  # critical extension Attesto does not implement (Attesto implements none)
-  # is rejected before the signature is trusted.
-  defp check_crit(header) do
-    case JWS.reject_unsupported_crit(header, supported: []) do
-      :ok -> :ok
-      {:error, :unsupported_crit} -> {:error, :unsupported_critical_header}
-    end
-  end
 
   defp extract_jwk(%{"jwk" => jwk} = header) when is_map(jwk) and map_size(jwk) > 0 do
     # RFC 9449 §4.2: the embedded JWK MUST be a public key for signing.
@@ -368,8 +353,11 @@ defmodule Attesto.DPoP do
 
   # ----- internal: signature verification -----
 
-  defp verify_signature(proof, alg, jwk) do
-    JWS.verify_strict(proof, [{nil, alg, jwk}],
+  defp verify_signature(proof, header) do
+    JWS.verify_trusted(proof, header, Map.fetch!(header, "jwk"),
+      alg: Map.get(header, "alg"),
+      select_kid: false,
+      malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_proof,
@@ -409,7 +397,7 @@ defmodule Attesto.DPoP do
       scheme != "https" -> {:error, :invalid_htu}
       is_nil(host) or host == "" -> {:error, :invalid_htu}
       not is_nil(parsed.userinfo) -> {:error, :invalid_htu}
-      true -> {:ok, {scheme, host, normalize_htu_port(parsed.port), parsed.path || ""}}
+      true -> {:ok, {scheme, host, normalize_htu_port(parsed.port), Attesto.URI.normalize_path(parsed.path)}}
     end
   rescue
     _ -> {:error, :invalid_htu}
@@ -418,6 +406,8 @@ defmodule Attesto.DPoP do
   defp normalize_htu_port(443), do: nil
   defp normalize_htu_port(port), do: port
 
+  # RFC 3986 section 6.2.3: an empty path is equivalent to "/" for an
+  # authority-based HTTP URI.
   defp check_iat(%{"iat" => iat}, opts) when is_integer(iat) and iat >= 0 do
     now = NumericDate.now(opts)
     max_age = Keyword.get(opts, :max_age_seconds, @default_max_age_seconds)

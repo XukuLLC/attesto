@@ -74,7 +74,7 @@ defmodule Attesto.ResourceIndicator do
   """
   @spec valid_indicator?(term()) :: boolean()
   def valid_indicator?(value) when is_binary(value) do
-    not invalid_percent_encoding?(value) and absolute_uri_no_fragment?(value)
+    String.valid?(value) and not invalid_percent_encoding?(value) and absolute_uri_no_fragment?(value)
   end
 
   def valid_indicator?(_value), do: false

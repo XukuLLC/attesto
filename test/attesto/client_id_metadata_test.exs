@@ -53,6 +53,12 @@ defmodule Attesto.ClientIdMetadataTest do
       assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("not a url")
       assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("/relative/path")
     end
+
+    test "rejects invalid UTF-8 without raising" do
+      client_id = <<"https://app.example/", 0xFF>>
+      assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id(client_id)
+      refute ClientIdMetadata.client_id_url?(client_id)
+    end
   end
 
   describe "client_id_url?/1" do

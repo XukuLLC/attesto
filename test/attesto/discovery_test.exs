@@ -45,6 +45,13 @@ defmodule Attesto.DiscoveryTest do
       meta = Discovery.metadata(config(token_endpoint_path: "/oauth2/v1/token"))
       assert meta["token_endpoint"] == "https://auth.example.com/oauth2/v1/token"
     end
+
+    test "preserves an issuer path prefix in derived endpoints" do
+      meta = Discovery.metadata(config(issuer: "https://auth.example.com/tenant"))
+
+      assert meta["token_endpoint"] == "https://auth.example.com/tenant/oauth/token"
+      assert meta["jwks_uri"] == "https://auth.example.com/tenant/.well-known/jwks.json"
+    end
   end
 
   describe "metadata/2 host-supplied fields" do

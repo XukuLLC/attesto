@@ -73,7 +73,9 @@ defmodule Attesto.Token do
   alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.NumericDate
+  alias Attesto.Options
   alias Attesto.PrincipalKind
+  alias Attesto.Record
   alias Attesto.Scope
   alias Attesto.Secret
   alias Attesto.SigningAlg
@@ -91,7 +93,7 @@ defmodule Attesto.Token do
 
   # Modest tolerance for a verifier clock running slightly ahead of the
   # issuer's, applied to the `nbf` (not-before) and future-`iat` checks.
-  @clock_skew_seconds 60
+  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   @type principal :: %{
           required(:kind) => String.t(),
@@ -397,11 +399,7 @@ defmodule Attesto.Token do
   end
 
   defp require_confirmation_binding!(opts) do
-    case Keyword.fetch(opts, :require_confirmation_binding) do
-      :error -> true
-      {:ok, value} when is_boolean(value) -> value
-      {:ok, _value} -> raise ArgumentError, ":require_confirmation_binding must be true or false"
-    end
+    Options.boolean!(opts, :require_confirmation_binding, true)
   end
 
   @doc """
@@ -634,10 +632,7 @@ defmodule Attesto.Token do
              error: :invalid_token,
              crit_error: :unsupported_critical_header
            ) do
-      case candidate_jwks(config, Map.get(header, "kid")) do
-        [] -> {:error, :invalid_signature}
-        jwks -> verify_against_any(jwks, jwt)
-      end
+      verify_against_trusted(config, jwt, header)
     end
   end
 
@@ -646,18 +641,12 @@ defmodule Attesto.Token do
   # (-> `:invalid_signature`) before any signature math. A token with no
   # `kid` header (a hand-forged token) is tried against every trusted key,
   # which is safe - they are all ours.
-  defp candidate_jwks(config, header_kid) do
-    JWS.verification_candidates(config.keystore.verification_pems(),
-      kid: header_kid,
+  defp verify_against_trusted(config, jwt, header) do
+    JWS.verify_trusted(jwt, header, config.keystore.verification_pems(),
       malformed_key: :raise,
       candidate_builder: fn pem ->
         {Key.kid(pem), SigningAlg.for_key(config.keystore, pem), Key.jwk(pem)}
-      end
-    )
-  end
-
-  defp verify_against_any(candidates, jwt) do
-    JWS.verify_strict(jwt, candidates,
+      end,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
       malformed_error: :invalid_token
@@ -841,12 +830,12 @@ defmodule Attesto.Token do
 
   defp check_required_claims(config, claims) do
     cond do
-      not non_empty_binary?(Map.get(claims, "sub")) -> {:error, :invalid_claims}
-      not non_empty_binary?(Map.get(claims, "jti")) -> {:error, :invalid_claims}
+      not Record.non_empty_binary?(Map.get(claims, "sub")) -> {:error, :invalid_claims}
+      not Record.non_empty_binary?(Map.get(claims, "jti")) -> {:error, :invalid_claims}
       not is_binary(Map.get(claims, "scope")) -> {:error, :invalid_claims}
       not non_negative_integer?(Map.get(claims, "iat")) -> {:error, :invalid_claims}
-      not non_empty_binary?(Map.get(claims, config.principal_kind_claim)) -> {:error, :invalid_claims}
-      not non_empty_binary?(Map.get(claims, "typ")) -> {:error, :invalid_claims}
+      not Record.non_empty_binary?(Map.get(claims, config.principal_kind_claim)) -> {:error, :invalid_claims}
+      not Record.non_empty_binary?(Map.get(claims, "typ")) -> {:error, :invalid_claims}
       true -> :ok
     end
   end
@@ -888,6 +877,5 @@ defmodule Attesto.Token do
 
   # ----- internal: helpers -----
 
-  defp non_empty_binary?(value), do: is_binary(value) and value != ""
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
 end

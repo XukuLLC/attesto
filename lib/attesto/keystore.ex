@@ -46,6 +46,7 @@ defmodule Attesto.Keystore do
   @type rotation_health :: %{
           status: :healthy | :warning | :invalid,
           signing_kid: String.t(),
+          signing_alg: String.t(),
           overlap?: boolean(),
           key_count: non_neg_integer(),
           keys: [rotation_key()],
@@ -128,6 +129,7 @@ defmodule Attesto.Keystore do
 
     signing_jwk = current_signing_jwk(keystore)
     {:ok, signing_kid} = Thumbprint.of_jwk(signing_jwk)
+    signing_alg = SigningAlg.for_jwk(keystore, signing_jwk, signing?: true)
     verification_pems = verification_pems!(keystore)
     verification_kids = Enum.map(verification_pems, &Key.kid/1)
     metadata = verification_metadata(keystore)
@@ -138,11 +140,12 @@ defmodule Attesto.Keystore do
       |> Enum.map(&rotation_key(keystore, &1, signing_kid, metadata, now, warning_seconds))
       |> Enum.uniq_by(& &1.kid)
 
-    issues = rotation_issues(keys, signing_kid, unknown_metadata_kids)
+    issues = rotation_issues(keys, signing_kid, signing_alg, unknown_metadata_kids)
 
     %{
       status: rotation_status(issues),
       signing_kid: signing_kid,
+      signing_alg: signing_alg,
       overlap?: length(keys) > 1,
       key_count: length(keys),
       keys: keys,
@@ -288,10 +291,20 @@ defmodule Attesto.Keystore do
   defp key_state(true, nil, _now, _warning_seconds), do: :current
   defp key_state(false, nil, _now, _warning_seconds), do: :overlap
 
-  defp rotation_issues(keys, signing_kid, unknown_metadata_kids) do
+  defp rotation_issues(keys, signing_kid, signing_alg, unknown_metadata_kids) do
+    published_signing_alg =
+      case Enum.find(keys, &(&1.kid == signing_kid)) do
+        nil -> nil
+        key -> key.alg
+      end
+
     []
     |> maybe_issue(keys == [], :empty_verification_set)
     |> maybe_issue(not Enum.any?(keys, &(&1.kid == signing_kid)), :signing_key_not_published)
+    |> maybe_issue(
+      is_binary(published_signing_alg) and published_signing_alg != signing_alg,
+      :signing_algorithm_not_published
+    )
     |> maybe_issue(Enum.any?(keys, &(&1.current? and &1.state == :expired)), :expired_signing_key)
     |> maybe_issue(Enum.any?(keys, &(&1.current? and &1.state == :expiring)), :expiring_signing_key)
     |> maybe_issue(Enum.any?(keys, &(not &1.current? and &1.state == :expired)), :expired_verification_key)
@@ -306,6 +319,7 @@ defmodule Attesto.Keystore do
     cond do
       :empty_verification_set in issues -> :invalid
       :signing_key_not_published in issues -> :invalid
+      :signing_algorithm_not_published in issues -> :invalid
       :expired_signing_key in issues -> :invalid
       :unknown_verification_key_metadata in issues -> :invalid
       issues == [] -> :healthy

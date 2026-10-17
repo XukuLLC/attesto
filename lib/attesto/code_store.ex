@@ -60,6 +60,25 @@ defmodule Attesto.CodeStore do
   be useful (a single-redemption window is already closed by `take/1`
   whether or not the marker survives).
 
+  ## Optional access-token replay containment
+
+  Integrations can extend reuse tracking to the access token minted from a
+  code by capability-detecting these functions on the store module:
+
+    * `record_access_token_for_code(code_hash, jti, expires_at)` links the
+      minted token to the code until the token expires.
+    * `revoke_access_token_for_code(code_hash)` revokes the linked token and
+      is idempotent for unknown or legacy codes.
+    * `revoke_family_access_tokens(family_id)` revokes tokens whose code was
+      finalized with that refresh family in `mark_consumed/2`.
+    * `access_token_revoked?(jti)` reports whether an unexpired linked token
+      has been revoked.
+
+  These remain capability-detected extension functions rather than behaviour
+  callbacks. That lets stores compiled against an earlier Attesto 2.x release
+  keep their existing `@impl` annotations without new compiler warnings while
+  allowing bundled and custom stores to adopt the extension independently.
+
   ## Record shape
 
   A stored record is a map with:
@@ -154,12 +173,9 @@ defmodule Attesto.CodeStore do
   `take/1`). Returns `{:ok, entry}` when a code with that hash is stored, else
   `:error`.
 
-  Used for read-only pre-checks at the token endpoint - e.g. surfacing a
-  holder-of-key (DPoP) requirement for a sender-constrained code (RFC 9449 §10 /
-  FAPI2) before the client-authentication failure, WITHOUT burning the
-  single-use code. A store that does not implement it is detected via
-  `function_exported?/3` and the pre-check is skipped (single-use behaviour and
-  the normal error are unchanged).
+  Used for ordinary read-only inspection without burning the single-use code.
+  A store that does not implement it is detected via `function_exported?/3`
+  and the optional read is skipped.
   """
   @callback get(code_hash()) :: {:ok, entry()} | :error
 

@@ -10,6 +10,9 @@ defmodule Attesto.Federation.TrustChain do
   """
 
   alias Attesto.Federation.{EntityStatement, MetadataPolicy}
+  alias Attesto.Options
+
+  @default_max_chain_length 10
 
   @type result :: %{
           metadata: map(),
@@ -30,14 +33,19 @@ defmodule Attesto.Federation.TrustChain do
   `:now`, `:leeway`, and `:accepted_algs` are passed to Entity Statement
   verification. `:trust_anchor` optionally pins the expected Trust Anchor
   Entity Identifier in addition to the out-of-band key pin.
+  `:max_chain_length` bounds signature-verification work and defaults to 10.
   """
   @spec validate([String.t()], map() | [map()], keyword()) ::
           {:ok, result()} | {:error, validation_error()}
   def validate(chain, trust_anchor_jwks, opts \\ [])
 
   def validate([_ | _] = chain, trust_anchor_jwks, opts) when is_list(opts) do
-    with true <- Enum.all?(chain, &is_binary/1),
+    max_chain_length = max_chain_length!(opts)
+
+    with true <- length(chain) <= max_chain_length,
+         true <- Enum.all?(chain, &is_binary/1),
          {:ok, claims} <- verify_from_anchor(chain, trust_anchor_jwks, opts),
+         :ok <- reject_entity_cycles(claims),
          :ok <- verify_leaf_self_signature(hd(chain), hd(claims), opts),
          :ok <- validate_statement_roles(claims),
          :ok <- validate_links(claims),
@@ -60,6 +68,13 @@ defmodule Attesto.Federation.TrustChain do
   end
 
   def validate(_chain, _trust_anchor_jwks, _opts), do: {:error, :invalid_trust_chain}
+
+  defp max_chain_length!(opts), do: Options.positive_integer!(opts, :max_chain_length, @default_max_chain_length)
+
+  defp reject_entity_cycles(claims) do
+    issuers = Enum.map(claims, &Map.get(&1, "iss"))
+    if Enum.uniq(issuers) == issuers, do: :ok, else: {:error, :broken_trust_chain}
+  end
 
   # Start at the only out-of-band trust point and work down. Each successfully
   # verified statement supplies the subject keys used for the next statement.

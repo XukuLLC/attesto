@@ -3,8 +3,8 @@ defmodule Attesto.DPoPTest do
   use ExUnit.Case, async: false
 
   alias Attesto.DPoP
+  alias Attesto.Test.DPoPFixtures
   alias Attesto.Test.Factory
-  alias Attesto.Test.JWT
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -13,37 +13,21 @@ defmodule Attesto.DPoPTest do
   # helpers
   # -----------------------------------------------------------------
 
-  defp gen_ec_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
-  defp gen_rsa_key(bits \\ 2048), do: JOSE.JWK.generate_key({:rsa, bits})
-
-  defp public_map(%JOSE.JWK{} = key) do
-    {_, map} = JOSE.JWK.to_public_map(key)
-    map
-  end
-
-  defp unix_now, do: System.system_time(:second)
+  defp gen_ec_key, do: DPoPFixtures.ec_key()
+  defp gen_rsa_key(bits \\ 2048), do: DPoPFixtures.rsa_key(bits)
+  defp public_map(key), do: DPoPFixtures.public_map(key)
+  defp unix_now, do: DPoPFixtures.now()
 
   defp build_claims(overrides \\ %{}) do
-    Map.merge(
-      %{
-        "htm" => @http_method,
-        "htu" => @http_uri,
-        "iat" => unix_now(),
-        "jti" => "jti-" <> Integer.to_string(System.unique_integer([:positive]))
-      },
-      overrides
-    )
+    DPoPFixtures.claims(@http_method, @http_uri, unix_now(), overrides)
   end
 
   defp build_header(jwk_map, overrides \\ %{}) do
-    Map.merge(
-      %{"alg" => "ES256", "jwk" => jwk_map, "typ" => "dpop+jwt"},
-      overrides
-    )
+    DPoPFixtures.header(jwk_map, overrides)
   end
 
   defp sign_proof(key, header, claims) do
-    JWT.sign_compact(key, header, claims)
+    DPoPFixtures.sign(key, header, claims)
   end
 
   # Compact-form DPoP proof signed by a freshly-generated key. The header
@@ -59,7 +43,7 @@ defmodule Attesto.DPoPTest do
   end
 
   defp base_opts(extra \\ []) do
-    Keyword.merge([http_method: @http_method, http_uri: @http_uri], extra)
+    DPoPFixtures.verification_options(@http_method, @http_uri, extra)
   end
 
   # -----------------------------------------------------------------
@@ -419,6 +403,13 @@ defmodule Attesto.DPoPTest do
   # -----------------------------------------------------------------
 
   describe "verify_proof/2 htu validation" do
+    test "treats an empty path and slash as equivalent" do
+      {proof, _jkt} = Factory.dpop_proof(htu: "https://api.example.com")
+
+      assert {:ok, _verified} =
+               DPoP.verify_proof(proof, base_opts(http_uri: "https://api.example.com/"))
+    end
+
     test "rejects htu mismatch (different path)" do
       {proof, _jkt} = Factory.dpop_proof(htu: "https://api.example.com/other")
       assert {:error, :invalid_htu} = DPoP.verify_proof(proof, base_opts())
@@ -901,6 +892,7 @@ defmodule Attesto.DPoP.ReplayCacheIntegrationTest do
 
   alias Attesto.DPoP
   alias Attesto.DPoP.ReplayCache
+  alias Attesto.Test.DPoPFixtures
   alias Attesto.Test.Factory
 
   @http_method "POST"
@@ -912,7 +904,7 @@ defmodule Attesto.DPoP.ReplayCacheIntegrationTest do
   end
 
   defp base_opts(extra) do
-    Keyword.merge([http_method: @http_method, http_uri: @http_uri], extra)
+    DPoPFixtures.verification_options(@http_method, @http_uri, extra)
   end
 
   test "a second proof with the same jti is rejected as :replay" do

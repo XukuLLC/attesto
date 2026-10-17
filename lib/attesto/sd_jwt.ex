@@ -40,7 +40,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, Key, MapParams, NumericDate, Secret, SecureCompare, SigningAlg}
+  alias Attesto.{JWS, Key, MapParams, NumericDate, Options, Secret, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -503,17 +503,14 @@ defmodule Attesto.SdJwt do
   defp check_typ(_header, _accepted), do: {:error, :invalid_typ}
 
   defp validate_fapi_policy!(opts) do
-    case Keyword.fetch(opts, :enforce_fapi_alg_policy) do
-      :error -> :ok
-      {:ok, value} when is_boolean(value) -> :ok
-      {:ok, _invalid} -> raise ArgumentError, ":enforce_fapi_alg_policy must be true or false"
-    end
+    Options.boolean!(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?())
+    :ok
   end
 
   defp verify_against_keys(jwt, alg, keys, opts) do
     JWS.verify_trusted(jwt, %{}, keys,
       alg: alg,
-      fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?(opts)),
+      fapi?: Keyword.get(opts, :enforce_fapi_alg_policy, SigningAlg.default_fapi_policy?()),
       malformed_key: :skip,
       terminal_error: :invalid_signature,
       malformed_result: :continue,
@@ -551,11 +548,15 @@ defmodule Attesto.SdJwt do
     with true <-
            SigningAlg.valid_verification_algorithms?(accepted) and is_binary(alg) and
              alg in accepted and alg != "none",
-         {:ok, jwk} <- Key.verification_jwk(holder_jwk, alg: alg) do
-      JWS.verify_strict(kb_jwt, [{nil, alg, jwk}],
+         {:ok, _jwk} <- Key.verification_jwk(holder_jwk, alg: alg) do
+      JWS.verify_trusted(kb_jwt, header, holder_jwk,
+        alg: alg,
+        select_kid: false,
+        malformed_key: :reject_set,
         terminal_error: :invalid_key_binding,
         malformed_result: :halt,
-        malformed_error: :invalid_key_binding
+        malformed_error: :invalid_key_binding,
+        claims_map?: true
       )
     else
       _invalid -> {:error, :invalid_key_binding}

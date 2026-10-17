@@ -160,6 +160,10 @@ defmodule Attesto.ClientIdMetadata do
   """
   @spec validate_client_id(String.t()) :: {:ok, URI.t()} | {:error, url_error()}
   def validate_client_id(client_id) when is_binary(client_id) do
+    if String.valid?(client_id), do: parse_client_id(client_id), else: {:error, :not_a_url}
+  end
+
+  defp parse_client_id(client_id) do
     case URI.new(client_id) do
       {:ok, %URI{host: host} = uri} when is_binary(host) and host != "" ->
         validate_uri_grammar(uri)

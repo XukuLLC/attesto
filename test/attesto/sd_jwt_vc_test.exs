@@ -207,6 +207,48 @@ defmodule Attesto.SdJwtVcTest do
       assert {:error, :missing_vct} = SdJwtVc.verify(no_vct, jwk)
     end
 
+    test "rejects registered claims reconstructed from disclosures" do
+      {pem, jwk} = keypair()
+      now = System.system_time(:second)
+
+      for claim <- ~w(iss vct cnf status exp nbf) do
+        value =
+          case claim do
+            name when name in ["iat", "exp", "nbf"] -> now + 300
+            "cnf" -> %{"jwk" => jwk}
+            "status" -> %{"status_list" => %{"idx" => 1, "uri" => "https://issuer.example/status/1"}}
+            _ -> "registered-value"
+          end
+
+        claims = %{"iss" => "iss", "vct" => "type", claim => value}
+
+        presentation =
+          SdJwt.issue(claims,
+            pem: pem,
+            typ: "vc+sd-jwt",
+            disclosable: [claim]
+          )
+
+        assert {:error, :disclosed_registered_claim} = SdJwtVc.verify(presentation, jwk, now: now)
+      end
+    end
+
+    test "accepts sub and iat reconstructed from disclosures" do
+      {pem, jwk} = keypair()
+      now = System.system_time(:second)
+
+      presentation =
+        SdJwt.issue(
+          %{"iss" => "https://issuer.example", "vct" => "type", "sub" => "holder", "iat" => now},
+          pem: pem,
+          typ: "vc+sd-jwt",
+          disclosable: ["sub", "iat"]
+        )
+
+      assert {:ok, %{claims: %{"sub" => "holder", "iat" => ^now}}} =
+               SdJwtVc.verify(presentation, jwk, now: now)
+    end
+
     test "rejects an expired credential and one not yet valid" do
       {pem, jwk} = keypair()
       now = System.system_time(:second)

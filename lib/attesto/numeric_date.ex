@@ -10,6 +10,12 @@ defmodule Attesto.NumericDate do
   @type fetch_result :: {:ok, integer()} | :missing | {:error, :missing | :invalid}
   @type freshness_result :: :ok | :future | :stale | :invalid
 
+  @default_clock_skew_seconds 60
+
+  @doc "Default whole-second tolerance used by Attesto's signed-token profiles."
+  @spec default_clock_skew_seconds() :: pos_integer()
+  def default_clock_skew_seconds, do: @default_clock_skew_seconds
+
   @doc """
   Fetch a NumericDate claim from `claims`.
 
@@ -104,8 +110,9 @@ defmodule Attesto.NumericDate do
   Resolve a Unix-second clock from options.
 
   `default: :datetime | :system` preserves the caller's original live-clock
-  source. `invalid_override: :raise | :fallback` preserves whether an invalid
-  `:now` override raised or silently used that live clock.
+  source. `invalid_override: :raise | :fallback | :non_negative` preserves
+  whether an invalid `:now` override raises the generic clock error, silently
+  uses the live clock, or uses the state-transition non-negative error.
   """
   @spec now(keyword(), keyword()) :: integer()
   def now(opts, policy \\ []) when is_list(opts) and is_list(policy) do
@@ -137,6 +144,8 @@ defmodule Attesto.NumericDate do
   defp invalid_now(:fallback, default), do: live_now(default)
 
   defp invalid_now(:raise, _default), do: raise(ArgumentError, "invalid :now override; expected a DateTime or integer")
+
+  defp invalid_now(:non_negative, _default), do: raise(ArgumentError, ":now must be a non-negative NumericDate")
 
   defp invalid_now(other, _default), do: raise(ArgumentError, "invalid NumericDate invalid_override: #{inspect(other)}")
 

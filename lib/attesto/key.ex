@@ -78,9 +78,9 @@ defmodule Attesto.Key do
   `:require_public?` defaults to `true`, and `:minimum_rsa_bits` defaults to
   #{@default_minimum_rsa_bits}.
 
-  To retain DPoP's error semantics, explicit Edwards identifiers are checked
-  against the key curve here, while other key-type/algorithm mismatches remain
-  the signature verifier's responsibility.
+  The requested algorithm is checked against the parsed key type and curve
+  before the key reaches a signature verifier, including explicit Edwards and
+  ES256K identifiers.
   """
   @spec verification_jwk(map(), keyword()) ::
           {:ok, JOSE.JWK.t()} | {:error, verification_jwk_error()}
@@ -97,7 +97,7 @@ defmodule Attesto.Key do
          :ok <- validate_rsa_params(jwk_map),
          {:ok, jwk} <- from_verification_map(jwk_map),
          :ok <- validate_rsa_strength(alg, jwk, minimum_rsa_bits),
-         :ok <- validate_edwards_curve(alg, jwk) do
+         :ok <- validate_verification_algorithm(alg, jwk) do
       {:ok, jwk}
     end
   end
@@ -196,14 +196,12 @@ defmodule Attesto.Key do
 
   defp validate_rsa_strength(_alg, _jwk, _minimum_rsa_bits), do: :ok
 
-  defp validate_edwards_curve(alg, jwk) when alg in ["EdDSA", "Ed25519", "Ed448"] do
-    Attesto.SigningAlg.validate_for_key!(alg, jwk)
+  defp validate_verification_algorithm(alg, jwk) do
+    Attesto.SigningAlg.validate_verification_for_key!(alg, jwk)
     :ok
   rescue
     _ -> {:error, :incompatible_key}
   end
-
-  defp validate_edwards_curve(_alg, _jwk), do: :ok
 
   defp validate_verification_options!(require_public?, minimum_rsa_bits)
        when is_boolean(require_public?) and is_integer(minimum_rsa_bits) and minimum_rsa_bits > 0, do: :ok

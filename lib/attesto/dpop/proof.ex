@@ -128,7 +128,13 @@ defmodule Attesto.DPoP.Proof do
   defp normalize_htu(htu) when is_binary(htu) do
     with false <- Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, htu),
          {:ok, %Elixir.URI{} = parsed} <- Elixir.URI.new(htu),
-         normalized = Elixir.URI.to_string(%{parsed | query: nil, fragment: nil}),
+         normalized =
+           Elixir.URI.to_string(%{
+             parsed
+             | path: Attesto.URI.normalize_path(parsed.path),
+               query: nil,
+               fragment: nil
+           }),
          true <- Attesto.URI.https_identifier?(normalized) do
       {:ok, normalized}
     else

@@ -9,6 +9,7 @@ defmodule Attesto.CredentialOffer do
 
   alias Attesto.MapParams
   alias Attesto.Secret
+  alias Attesto.Store
 
   @default_scheme "openid-credential-offer"
 
@@ -102,7 +103,7 @@ defmodule Attesto.CredentialOffer do
 
     case store.put(%{id: id, offer: offer, expires_at: System.system_time(:second) + ttl}) do
       :ok -> {:ok, id}
-      _unexpected -> raise RuntimeError, "credential offer store put/1 violated its contract"
+      _unexpected -> Store.contract_violation!("credential offer store", {:put, 1})
     end
   end
 

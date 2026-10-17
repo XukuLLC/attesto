@@ -2,6 +2,7 @@ defmodule Attesto.RequestObjectOid4vpTest do
   use ExUnit.Case, async: true
 
   alias Attesto.RequestObject
+  alias Attesto.Test.JWT
 
   @now 1_700_000_000
   @client "https://verifier.example"
@@ -16,8 +17,7 @@ defmodule Attesto.RequestObjectOid4vpTest do
   defp claims, do: %{"client_id" => @client, "aud" => @audience, "iat" => @now, "exp" => @now + 60}
 
   defp sign(key, claims, header \\ %{"alg" => "ES256", "typ" => "oauth-authz-req+jwt"}) do
-    {_jws, jwt} = key |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    jwt
+    JWT.sign_compact(key, header, claims)
   end
 
   defp options, do: [profile: :oid4vp, audience: @audience, now: @now]

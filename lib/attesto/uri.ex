@@ -26,6 +26,11 @@ defmodule Attesto.URI do
 
   def https_identifier?(_value, _opts), do: false
 
+  @doc false
+  @spec normalize_path(String.t() | nil) :: String.t()
+  def normalize_path(path) when path in [nil, ""], do: "/"
+  def normalize_path(path) when is_binary(path), do: path
+
   defp valid_identifier?(value, allow_http?) do
     with {:ok, %Elixir.URI{} = uri} <- Elixir.URI.new(value),
          true <- accepted_scheme?(uri.scheme, allow_http?),

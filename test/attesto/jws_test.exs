@@ -221,6 +221,33 @@ defmodule Attesto.JWSTest do
              )
   end
 
+  test "trusted JWK candidates must be public verification keys" do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    public = public_map(key, %{"kid" => "valid", "alg" => "ES256"})
+    {_type, private} = JOSE.JWK.to_map(key)
+
+    for invalid <- [
+          Map.merge(private, %{"kid" => "private", "alg" => "ES256"}),
+          Map.put(public, "use", "enc"),
+          Map.put(public, "key_ops", ["sign"])
+        ] do
+      assert [] = JWS.verification_candidates(invalid, malformed_key: :skip)
+      assert [] = JWS.verification_candidates(invalid, malformed_key: :reject_set)
+    end
+  end
+
+  test "a fixed algorithm cannot relabel an incompatible trusted key" do
+    key = JOSE.JWK.generate_key({:ec, "P-256"})
+    public = public_map(key, %{"kid" => "p256"}) |> Map.delete("alg")
+
+    assert [] =
+             JWS.verification_candidates(public,
+               alg: "ES384",
+               accepted_algs: ["ES384"],
+               malformed_key: :skip
+             )
+  end
+
   test "minimum RSA strength and ambiguous-kid policies fail closed" do
     weak = JOSE.JWK.generate_key({:rsa, 1024})
     weak_map = public_map(weak, %{"kid" => "weak", "alg" => "RS256"})

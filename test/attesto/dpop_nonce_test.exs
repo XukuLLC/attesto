@@ -22,6 +22,7 @@ defmodule Attesto.DPoPNonceTest do
 
   alias Attesto.DPoP
   alias Attesto.DPoP.NonceStore.ETS, as: NonceStore
+  alias Attesto.Test.DPoPFixtures
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -30,27 +31,13 @@ defmodule Attesto.DPoPNonceTest do
   # proof-building helpers (mirroring dpop_header_test.exs)
   # -----------------------------------------------------------------
 
-  defp unix_now, do: System.system_time(:second)
-
-  defp gen_ec_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
-
-  defp public_map(%JOSE.JWK{} = key) do
-    {_, map} = JOSE.JWK.to_public_map(key)
-    map
-  end
-
-  defp base_header(jwk_map), do: %{"typ" => "dpop+jwt", "alg" => "ES256", "jwk" => jwk_map}
+  defp unix_now, do: DPoPFixtures.now()
+  defp gen_ec_key, do: DPoPFixtures.ec_key()
+  defp public_map(key), do: DPoPFixtures.public_map(key)
+  defp base_header(jwk_map), do: DPoPFixtures.header(jwk_map)
 
   defp claims(overrides) do
-    Map.merge(
-      %{
-        "htm" => @http_method,
-        "htu" => @http_uri,
-        "iat" => unix_now(),
-        "jti" => "jti-" <> Integer.to_string(System.unique_integer([:positive]))
-      },
-      overrides
-    )
+    DPoPFixtures.claims(@http_method, @http_uri, unix_now(), overrides)
   end
 
   # Sign a proof whose payload carries `claim_overrides` (e.g. a "nonce"
@@ -58,17 +45,16 @@ defmodule Attesto.DPoPNonceTest do
   defp signed_proof(claim_overrides) do
     key = gen_ec_key()
 
-    {_protected, compact} =
-      key
-      |> JOSE.JWT.sign(base_header(public_map(key)), claims(claim_overrides))
-      |> JOSE.JWS.compact()
-
-    compact
+    DPoPFixtures.sign(key, base_header(public_map(key)), claims(claim_overrides))
   end
 
   # Pin `now` so a slow run never drifts the proof out of the iat window.
   defp verify_opts(extra \\ []) do
-    Keyword.merge([http_method: @http_method, http_uri: @http_uri, now: unix_now()], extra)
+    DPoPFixtures.verification_options(
+      @http_method,
+      @http_uri,
+      Keyword.put_new(extra, :now, unix_now())
+    )
   end
 
   # =================================================================

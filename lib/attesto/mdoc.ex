@@ -28,10 +28,10 @@ if Code.ensure_loaded?(CBOR) do
 
     alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint}
 
-    @clock_skew_seconds 60
+    @clock_skew_seconds NumericDate.default_clock_skew_seconds()
     @digest_algorithm "SHA-256"
     @minimum_random_bytes 16
-    @max_cbor_bytes 1_048_576
+    @max_cbor_bytes 262_144
     @max_encoded_cbor_bytes div(@max_cbor_bytes * 4 + 2, 3)
 
     @type validity :: %{
@@ -620,10 +620,11 @@ if Code.ensure_loaded?(CBOR) do
     # as the FIRST step of `verify_device_response/4` and `peek_doc_type/1` -
     # ahead of any signature check - and the CBOR decoder recurses per nesting
     # byte with no depth limit, so deep-nesting input amplifies ~70x into heap
-    # before the surrounding rescue can help. Amplification is linear, so a 1 MiB
-    # ceiling bounds the worst-case footprint. (A real mDL, photo included, is a
-    # few tens of KB.) A per-nesting depth guard would be tighter but needs a
-    # vendored decoder; the size cap is the proportionate immediate bound.
+    # before the surrounding rescue can help. Amplification is linear, so a
+    # 256 KiB ceiling bounds the worst-case footprint. (A real mDL, photo
+    # included, is a few tens of KB.) A per-nesting depth guard would be tighter
+    # but needs a vendored decoder; the size cap is the proportionate immediate
+    # bound.
     defp decode_complete(encoded) when is_binary(encoded) and byte_size(encoded) > @max_cbor_bytes do
       {:error, :invalid_mdoc}
     end

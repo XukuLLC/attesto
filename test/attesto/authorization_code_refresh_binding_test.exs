@@ -213,6 +213,62 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
     assert :error = RefreshETS.get(Secret.hash(refresh_token))
   end
 
+  test "the bundled ETS stores retain the issued refresh family on code reuse", %{
+    challenge: challenge
+  } do
+    {:ok, code} =
+      AuthorizationCode.issue(
+        CodeETS,
+        %{
+          client_id: @client_id,
+          redirect_uri: @redirect_uri,
+          code_challenge: challenge,
+          subject: "usr_ets",
+          scope: ["documents.read"]
+        },
+        now: 1_000
+      )
+
+    assert {:ok, grant} =
+             AuthorizationCode.redeem(
+               CodeETS,
+               code,
+               %{
+                 client_id: @client_id,
+                 redirect_uri: @redirect_uri,
+                 code_verifier: @verifier
+               },
+               now: 1_000
+             )
+
+    assert {:ok, %{family_id: family_id}} =
+             AuthorizationCode.issue_refresh_and_finalize(
+               CodeETS,
+               code,
+               grant,
+               RefreshETS,
+               %{
+                 subject: grant.subject,
+                 client_id: grant.client_id,
+                 scope: grant.scope
+               },
+               now: 1_000,
+               family_ttl: 3_600
+             )
+
+    assert {:error, {:reuse, %{family_id: ^family_id, replay_retain_until: 4_600}}} =
+             AuthorizationCode.redeem(
+               CodeETS,
+               code,
+               %{
+                 client_id: @client_id,
+                 redirect_uri: @redirect_uri,
+                 code_verifier: @verifier
+               },
+               now: 1_000
+             )
+  end
+
   test "refresh issuance failure leaves the spent code unfinalized", %{challenge: challenge} do
     {:ok, code} =
       AuthorizationCode.issue(TrackingStore, %{

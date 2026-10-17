@@ -25,6 +25,7 @@ defmodule Attesto.DPoPHeaderTest do
   use ExUnit.Case, async: true
 
   alias Attesto.DPoP
+  alias Attesto.Test.DPoPFixtures
 
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
@@ -33,53 +34,33 @@ defmodule Attesto.DPoPHeaderTest do
   # helpers
   # -----------------------------------------------------------------
 
-  defp unix_now, do: System.system_time(:second)
-
-  defp gen_ec_key, do: JOSE.JWK.generate_key({:ec, "P-256"})
-  defp gen_rsa_key, do: JOSE.JWK.generate_key({:rsa, 2048})
-
-  defp public_map(%JOSE.JWK{} = key) do
-    {_, map} = JOSE.JWK.to_public_map(key)
-    map
-  end
+  defp unix_now, do: DPoPFixtures.now()
+  defp gen_ec_key, do: DPoPFixtures.ec_key()
+  defp gen_rsa_key, do: DPoPFixtures.rsa_key()
+  defp public_map(key), do: DPoPFixtures.public_map(key)
 
   defp claims(overrides \\ %{}) do
-    Map.merge(
-      %{
-        "htm" => @http_method,
-        "htu" => @http_uri,
-        "iat" => unix_now(),
-        "jti" => "jti-" <> Integer.to_string(System.unique_integer([:positive]))
-      },
-      overrides
-    )
+    DPoPFixtures.claims(@http_method, @http_uri, unix_now(), overrides)
   end
 
   # `now` is pinned so a slow run never drifts the proof out of the iat
   # window; every verify in this module reuses the same reference clock.
   defp verify_opts(extra \\ []) do
-    Keyword.merge([http_method: @http_method, http_uri: @http_uri, now: unix_now()], extra)
+    DPoPFixtures.verification_options(
+      @http_method,
+      @http_uri,
+      Keyword.put_new(extra, :now, unix_now())
+    )
   end
 
   # Sign a proof normally: JOSE picks the wire `alg` from `header["alg"]`,
   # so the signature is genuinely consistent with the header alg.
   defp sign(key, header) do
-    {_protected, compact} =
-      key
-      |> JOSE.JWT.sign(header, claims())
-      |> JOSE.JWS.compact()
-
-    compact
+    DPoPFixtures.sign(key, header, claims())
   end
 
   defp base_header(jwk_map, overrides \\ %{}) do
-    Map.merge(%{"typ" => "dpop+jwt", "alg" => "ES256", "jwk" => jwk_map}, overrides)
-  end
-
-  defp encode_segment(map) do
-    map
-    |> JSON.encode!()
-    |> Base.url_encode64(padding: false)
+    DPoPFixtures.header(jwk_map, overrides)
   end
 
   # Forge a compact JWS whose PROTECTED HEADER differs from the one that
@@ -89,8 +70,7 @@ defmodule Attesto.DPoPHeaderTest do
   # The point of each such test is which check fires FIRST, so a mismatched
   # signature on the swapped header is fine.
   defp reheader(signed_compact, new_header_map) do
-    [_old_header, payload, signature] = String.split(signed_compact, ".")
-    Enum.join([encode_segment(new_header_map), payload, signature], ".")
+    DPoPFixtures.reheader(signed_compact, new_header_map)
   end
 
   # =================================================================
@@ -219,29 +199,27 @@ defmodule Attesto.DPoPHeaderTest do
     end
   end
 
-  describe "key-type vs header-alg confusion is rejected by the signature check" do
-    test "an EC jwk presented under an RSA header alg is :invalid_signature" do
+  describe "key-type vs header-alg confusion is rejected before signature verification" do
+    test "an EC jwk presented under an RSA header alg is :invalid_jwk" do
       # Sign a real ES256 proof, then rewrite the protected header to claim
       # alg:RS256 while keeping the EC jwk. verify_strict pins [\"RS256\"];
-      # an EC key cannot satisfy an RS256 verification, so JOSE returns
-      # verified? == false and Attesto maps it to :invalid_signature. The
-      # alg whitelist passes (RS256 is allowed), so this is caught by the
-      # signature math, NOT by an alg/kty consistency check.
+      # the raw JWK gate rejects the alg/key mismatch before JOSE performs
+      # signature math.
       key = gen_ec_key()
       jwk_map = public_map(key)
       signed = sign(key, base_header(jwk_map, %{"alg" => "ES256"}))
       forged = reheader(signed, base_header(jwk_map, %{"alg" => "RS256"}))
 
-      assert {:error, :invalid_signature} = DPoP.verify_proof(forged, verify_opts())
+      assert {:error, :invalid_jwk} = DPoP.verify_proof(forged, verify_opts())
     end
 
-    test "an RSA jwk presented under an EC header alg is :invalid_signature" do
+    test "an RSA jwk presented under an EC header alg is :invalid_jwk" do
       key = gen_rsa_key()
       jwk_map = public_map(key)
       signed = sign(key, base_header(jwk_map, %{"alg" => "RS256"}))
       forged = reheader(signed, base_header(jwk_map, %{"alg" => "ES256"}))
 
-      assert {:error, :invalid_signature} = DPoP.verify_proof(forged, verify_opts())
+      assert {:error, :invalid_jwk} = DPoP.verify_proof(forged, verify_opts())
     end
 
     test "a genuine, consistent RSA RS256 proof verifies (control)" do

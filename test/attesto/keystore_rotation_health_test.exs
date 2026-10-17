@@ -47,6 +47,17 @@ defmodule Attesto.KeystoreRotationHealthTest do
     assert :signing_key_not_published in health.issues
   end
 
+  test "fails health when signing_alg is not published through key_algs" do
+    current = Factory.rsa_pem()
+    install(current, [current], %{}, signing_alg: "PS256")
+
+    health = Keystore.rotation_health(RotationKeystore)
+    assert health.status == :invalid
+    assert health.signing_alg == "PS256"
+    assert Enum.find(health.keys, & &1.current?).alg == "RS256"
+    assert :signing_algorithm_not_published in health.issues
+  end
+
   test "surfaces expiring and expired verification keys" do
     current = Factory.rsa_pem()
     expired = Factory.rsa_pem()
@@ -125,11 +136,12 @@ defmodule Attesto.KeystoreRotationHealthTest do
     end
   end
 
-  defp install(signing_pem, verification_pems, metadata) do
+  defp install(signing_pem, verification_pems, metadata, opts \\ []) do
     Application.put_env(:attesto, RotationKeystore,
       signing_pem: signing_pem,
       verification_pems: verification_pems,
-      metadata: metadata
+      metadata: metadata,
+      signing_alg: Keyword.get(opts, :signing_alg, "RS256")
     )
   end
 
@@ -165,6 +177,9 @@ defmodule Attesto.KeystoreRotationHealthTest do
 
     @impl true
     def verification_key_metadata, do: config() |> Keyword.fetch!(:metadata)
+
+    @impl true
+    def signing_alg, do: config() |> Keyword.fetch!(:signing_alg)
 
     defp config, do: Application.fetch_env!(:attesto, __MODULE__)
   end

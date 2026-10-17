@@ -26,8 +26,7 @@ defmodule Attesto.AuthorizationCodeReuseTest do
   # Implements the OPTIONAL reuse-tracking pair: take/1 returns
   # {:error, :consumed, meta} for a hash already marked, and mark_consumed/2
   # records the meta. This is the store-side half code-reuse detection needs;
-  # the ETS reference store deliberately does NOT implement it, so both paths
-  # are covered (ETS in authorization_code_test.exs, this here).
+  # the separate ETS integration test exercises the bundled implementation.
   defmodule TrackingStore do
     @moduledoc false
     @behaviour Attesto.CodeStore
