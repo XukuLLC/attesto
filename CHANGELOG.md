@@ -33,7 +33,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proof construction with key-bound algorithms and identifiers, bounded input,
   public embedded JWKs, access-token hashes, nonce support, and exact PSS
   signing.
-- Add `Attesto.JWS.protected_header/2`, `verification_candidates/2`,
+- Add shared JWS protected-header construction, `verification_candidates/2`,
   `verify_trusted/4`, and `verify_strict/3` as shared verification boundaries,
   plus `Attesto.SigningAlg.compatible_algs/1` for trusted key inspection.
 - Add `Attesto.URI.https_identifier?/2` and
