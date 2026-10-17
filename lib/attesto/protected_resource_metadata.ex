@@ -99,6 +99,7 @@ defmodule Attesto.ProtectedResourceMetadata do
   enumeration above is illustrative. Any other opt key is ignored.
   """
   @spec metadata(Config.t(), keyword()) :: %{required(String.t()) => term()}
+  @spec metadata(Config.t()) :: %{required(String.t()) => term()}
   @spec metadata(keyword()) :: %{required(String.t()) => term()}
   def metadata(config_or_opts, opts \\ [])
 
