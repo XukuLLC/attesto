@@ -6,7 +6,7 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
-## [2.6.0] - 2026-10-17
+## [2.6.0] - 2026-10-18
 
 ### Breaking
 
