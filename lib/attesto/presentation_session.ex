@@ -471,6 +471,7 @@ defmodule Attesto.PresentationSession do
     end
   end
 
+  @spec store_contract_error(atom()) :: no_return()
   defp store_contract_error(:put), do: Store.contract_violation!("presentation session store", {:put, 1})
   defp store_contract_error(:get), do: Store.contract_violation!("presentation session store", {:get, 1})
   defp store_contract_error(:take), do: Store.contract_violation!("presentation session store", {:take, 1})

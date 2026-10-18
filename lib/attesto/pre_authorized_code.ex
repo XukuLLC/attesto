@@ -204,6 +204,7 @@ defmodule Attesto.PreAuthorizedCode do
     end
   end
 
+  @spec store_contract_error(atom()) :: no_return()
   defp store_contract_error(:put), do: Store.contract_violation!("pre-authorized code store", {:put, 1})
   defp store_contract_error(:take), do: Store.contract_violation!("pre-authorized code store", {:take, 1})
 end

@@ -150,6 +150,7 @@ defmodule Attesto.Revocation do
     Options.boolean!(opts, :allow_missing_client_id?, false)
   end
 
+  @spec store_contract_error(atom()) :: no_return()
   defp store_contract_error(:get), do: Store.contract_violation!("refresh store", {:get, 1})
   defp store_contract_error(:revoke_family), do: Store.contract_violation!("refresh store", {:revoke_family, 1})
 end

@@ -657,6 +657,7 @@ defmodule Attesto.DeviceCode do
   defp valid_optional_json_object?(value), do: Claims.portable_json_object?(value)
   defp valid_optional_non_negative_integer?(value), do: Record.optional_non_negative_integer?(value)
 
+  @spec device_store_contract_error(atom()) :: no_return()
   defp device_store_contract_error(:put), do: Store.contract_violation!("device code store", {:put, 1})
 
   defp device_store_contract_error(:lookup_user_code),

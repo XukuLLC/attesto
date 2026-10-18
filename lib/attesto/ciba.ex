@@ -659,6 +659,7 @@ defmodule Attesto.CIBA do
     end
   end
 
+  @spec ciba_store_contract_error(atom()) :: no_return()
   defp ciba_store_contract_error(:put), do: Store.contract_violation!("CIBA store", {:put, 1})
   defp ciba_store_contract_error(:lookup), do: Store.contract_violation!("CIBA store", {:lookup, 1})
   defp ciba_store_contract_error(:approve), do: Store.contract_violation!("CIBA store", {:approve, 3})

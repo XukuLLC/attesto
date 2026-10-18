@@ -682,6 +682,7 @@ defmodule Attesto.AuthorizationCode do
   # The authorization-code grant context is canonical. Host-specific values
   # belong inside `:claims`, so extra sibling keys make a persisted record
   # malformed rather than being silently ignored.
+  @spec code_store_contract_error(atom()) :: no_return()
   defp code_store_contract_error(:put), do: Store.contract_violation!("authorization code store", {:put, 1})
   defp code_store_contract_error(:take), do: Store.contract_violation!("authorization code store", {:take, 1})
   defp code_store_contract_error(:get), do: Store.contract_violation!("authorization code store", {:get, 1})

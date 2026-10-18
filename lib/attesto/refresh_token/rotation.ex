@@ -60,6 +60,7 @@ defmodule Attesto.RefreshToken.Rotation do
       else: fail_initial_lookup(store, record, token_hash)
   end
 
+  @spec fail_initial_lookup(module(), term(), binary()) :: no_return()
   defp fail_initial_lookup(store, record, token_hash) do
     metadata = %{
       operation: :lookup,
