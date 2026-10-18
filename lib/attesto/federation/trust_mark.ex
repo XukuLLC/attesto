@@ -22,6 +22,7 @@ defmodule Attesto.Federation.TrustMark do
   alias Attesto.{JWS, NumericDate, SigningAlg}
 
   @typ "trust-mark+jwt"
+  @max_trust_mark_bytes 64 * 1_024
 
   @type verify_error ::
           :invalid_trust_mark
@@ -65,7 +66,8 @@ defmodule Attesto.Federation.TrustMark do
          {:ok, header} <-
            JWS.protected_header(trust_mark_jwt,
              error: :invalid_trust_mark,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_trust_mark_bytes
            ),
          :ok <- check_typ(header),
          :ok <- check_alg(header, opts),

@@ -98,6 +98,9 @@ defmodule Attesto.IDToken do
   # Modest tolerance for a verifier clock running slightly ahead of the
   # issuer's, applied to the future-`iat` check, mirroring `Attesto.Token`.
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  # An ID Token hint is read at the end-session endpoint before any
+  # authentication.
+  @max_token_bytes 64 * 1_024
 
   @type mint_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -363,7 +366,8 @@ defmodule Attesto.IDToken do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_token,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_token_bytes
            ),
          :ok <- check_header_typ(header) do
       verify_against_trusted(config, jwt, header)

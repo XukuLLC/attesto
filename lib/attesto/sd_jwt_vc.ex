@@ -35,6 +35,7 @@ defmodule Attesto.SdJwtVc do
   @typ "vc+sd-jwt"
   @accepted_typ ["vc+sd-jwt", "dc+sd-jwt"]
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_issuer_segment_bytes 256 * 1_024
 
   # Registered SD-JWT VC claims MUST always be visible: a holder must not be
   # able to strip `cnf` (defeats holder-binding) or `status` (defeats
@@ -231,7 +232,7 @@ defmodule Attesto.SdJwtVc do
   # ── claim rules ──────────────────────────────────────────────────────────
 
   defp check_registered_claim_visibility(base) do
-    case JWS.peek_json(base.issuer_jwt, :payload) do
+    case JWS.peek_json(base.issuer_jwt, :payload, max_compact_bytes: @max_issuer_segment_bytes) do
       {:ok, signed_claims} ->
         disclosed_registered? =
           Enum.any?(@verification_visible_claim_names, fn claim ->
@@ -259,7 +260,8 @@ defmodule Attesto.SdJwtVc do
   end
 
   defp certificate_issuer(base) do
-    with {:ok, header} <- JWS.peek_json(base.issuer_jwt, :protected),
+    with {:ok, header} <-
+           JWS.peek_json(base.issuer_jwt, :protected, max_compact_bytes: @max_issuer_segment_bytes),
          [_ | _] <- Map.get(header, "x5c") do
       if Map.has_key?(base.claims, "iss"),
         do: require_string(base.claims, "iss", :missing_iss),

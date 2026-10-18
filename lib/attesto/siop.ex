@@ -48,6 +48,8 @@ defmodule Attesto.Siop do
   @self_issued_issuer "https://self-issued.me/v2"
   @header_typ "JWT"
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  # A Self-Issued ID Token is read at the RP before any authentication.
+  @max_id_token_bytes 64 * 1_024
 
   @type verified :: %{subject: String.t(), jwk: map()}
 
@@ -108,7 +110,8 @@ defmodule Attesto.Siop do
          {:ok, header} <-
            JWS.protected_header(id_token,
              error: :invalid_token,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_id_token_bytes
            ),
          :ok <- check_typ(header),
          {:ok, alg} <- check_alg(header, opts),
@@ -138,7 +141,7 @@ defmodule Attesto.Siop do
   # ── JOSE header and embedded key ─────────────────────────────────────────
 
   defp peek_json(id_token, segment) do
-    case JWS.peek_json(id_token, segment) do
+    case JWS.peek_json(id_token, segment, max_compact_bytes: @max_id_token_bytes) do
       {:ok, map} -> {:ok, map}
       {:error, _reason} -> {:error, :invalid_token}
     end

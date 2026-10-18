@@ -23,6 +23,10 @@ defmodule Attesto.JWSTest do
 
   defp protected_header(jwt), do: jwt |> JOSE.JWS.peek_protected() |> JSON.decode!()
 
+  defp nested_json_array(depth) do
+    ~s({"nested":) <> String.duplicate("[", depth) <> "0" <> String.duplicate("]", depth) <> "}"
+  end
+
   describe "sign_current/3" do
     test "derives the correct alg and kid for EC and RSA keys" do
       for {pem, alg} <- [{Factory.ec_pem(), "ES256"}, {Factory.rsa_pem(), "RS256"}] do
@@ -531,6 +535,45 @@ defmodule Attesto.JWSTest do
 
       assert {:error, :invalid_json} = JWS.peek_json(header_jwt, :protected)
       assert {:error, :invalid_json} = JWS.peek_json(payload_jwt, :payload)
+    end
+
+    test "bounds nested containers before materializing an attacker-controlled claim tree" do
+      header = b64(JSON.encode!(%{"alg" => "none"}))
+      within_limit = "#{header}.#{b64(nested_json_array(31))}."
+      beyond_limit = "#{header}.#{b64(nested_json_array(32))}."
+
+      assert {:ok, %{"nested" => _value}} = JWS.peek_json(within_limit, :payload)
+      assert {:error, :invalid_json} = JWS.peek_json(beyond_limit, :payload)
+
+      assert {:ok, %{"nested" => _value}} =
+               JWS.peek_json(beyond_limit, :payload, max_json_depth: 33)
+    end
+
+    test "rejects a deeply nested near-limit compact value without building the nested value" do
+      header = b64(JSON.encode!(%{"alg" => "none"}))
+      payload = nested_json_array(380_000)
+      jwt = "#{header}.#{b64(payload)}."
+
+      assert byte_size(jwt) < 1_048_576
+      assert {:error, :invalid_json} = JWS.peek_json(jwt, :payload)
+    end
+
+    test "applies the JSON depth bound before strict signature verification" do
+      header = b64(JSON.encode!(%{"alg" => "ES256"}))
+      jwt = "#{header}.#{b64(nested_json_array(32))}.#{b64("signature")}"
+
+      assert {:error, :malformed} =
+               JWS.verify_strict(jwt, [],
+                 terminal_error: :no_candidates,
+                 malformed_error: :malformed
+               )
+
+      assert {:error, :no_candidates} =
+               JWS.verify_strict(jwt, [],
+                 max_json_depth: 33,
+                 terminal_error: :no_candidates,
+                 malformed_error: :malformed
+               )
     end
 
     test "peeks an alg=none header (empty signature) by default" do

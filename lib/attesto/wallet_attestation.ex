@@ -57,6 +57,8 @@ defmodule Attesto.WalletAttestation do
   @pop_typ "oauth-client-attestation-pop+jwt"
   @default_pop_max_age_seconds 300
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_attestation_bytes 256 * 1_024
+  @max_pop_bytes 16 * 1_024
   # No normative limit in the draft; bounded so a replay store keying on
   # `jti` cannot be forced to retain unbounded-size identifiers.
   @max_jti_length 256
@@ -202,7 +204,8 @@ defmodule Attesto.WalletAttestation do
     with {:ok, header} <-
            JWS.protected_header(attestation,
              error: :invalid_attestation,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_attestation_bytes
            ),
          :ok <- check_typ(header, @attestation_typ, :invalid_typ),
          {:ok, claims} <- verify_attestation_signature(attestation, header, opts),
@@ -292,7 +295,8 @@ defmodule Attesto.WalletAttestation do
     with {:ok, header} <-
            JWS.protected_header(pop,
              error: :invalid_pop,
-             crit_error: :unsupported_pop_critical_header
+             crit_error: :unsupported_pop_critical_header,
+             max_compact_bytes: @max_pop_bytes
            ),
          :ok <- check_typ(header, @pop_typ, :invalid_pop_typ),
          {:ok, alg} <- check_pop_alg(header, opts),

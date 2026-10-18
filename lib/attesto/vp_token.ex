@@ -41,6 +41,7 @@ defmodule Attesto.VpToken do
   @separator "~"
   @base64url ~r/\A[A-Za-z0-9_-]+\z/
   @known_formats %{"dc+sd-jwt" => :sd_jwt_vc, "mso_mdoc" => :mso_mdoc}
+  @max_jwt_peek_segment_bytes 256 * 1_024
 
   @type safe_result :: %{
           vct: String.t(),
@@ -514,7 +515,8 @@ defmodule Attesto.VpToken do
 
   defp resolve_issuer_jwks(presentation, resolver) do
     with {:ok, issuer_jwt} <- issuer_jwt(presentation),
-         {:ok, payload} <- JWS.peek_json(issuer_jwt, :payload),
+         {:ok, payload} <-
+           JWS.peek_json(issuer_jwt, :payload, max_compact_bytes: @max_jwt_peek_segment_bytes),
          {:ok, iss} <- issuer(payload) do
       case resolver.(iss) do
         {:ok, jwks} -> {:ok, jwks}

@@ -14,6 +14,7 @@ defmodule Attesto.RequestObject do
   alias Attesto.SigningAlg
 
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_request_object_bytes 64 * 1_024
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -128,7 +129,8 @@ defmodule Attesto.RequestObject do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_request_object,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_request_object_bytes
            ),
          :ok <- check_supported_alg(header),
          :ok <- check_profile_typ(header, opts),

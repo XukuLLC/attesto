@@ -10,6 +10,11 @@ defmodule Attesto.JWS do
   # the total ceiling also bounds the payload and may be raised explicitly by
   # a trusted caller with an unusually large signed artifact.
   @default_max_compact_bytes 1_048_576
+  # Registered claim sets and headers nest a handful of levels; OpenID
+  # Federation metadata, DCQL queries, and authorization details stay under
+  # ten. Bounding nesting keeps an unverified segment from turning a bounded
+  # input into a disproportionate claim tree before any signature check.
+  @default_max_json_depth 32
   @max_protected_segment_bytes 256 * 1_024
   @max_signature_segment_bytes 256 * 1_024
 
@@ -128,7 +133,7 @@ defmodule Attesto.JWS do
            ),
          encoded = Map.fetch!(compact, segment_key(segment)),
          {:ok, bytes} <- decode64(encoded, canonical: Keyword.get(opts, :canonical, true)),
-         {:ok, map} <- decode_json_map(bytes) do
+         {:ok, map} <- decode_json_map(bytes, opts) do
       {:ok, map}
     else
       {:error, _reason} = error -> error
@@ -173,8 +178,11 @@ defmodule Attesto.JWS do
   rejected `crit` member is mapped to `:crit_error` (default
   `:unsupported_critical_header`). `:supported_crit` lists the critical
   parameters understood by the caller. The compact-parser options
-  `:canonical`, `:allow_empty_signature`, and `:max_compact_bytes` are passed
-  through to `peek_json/3`.
+  `:canonical`, `:allow_empty_signature`, `:max_compact_bytes`, and
+  `:max_json_depth` are passed through to `peek_json/3`. A decoded header or
+  claim set may nest at most `:max_json_depth` containers (default 32), and
+  `:max_compact_bytes` defaults to 1 MiB; a verifier that runs before any
+  authentication should pass the smallest bound its protocol permits.
   """
   @spec protected_header(binary(), keyword()) :: {:ok, map()} | {:error, atom()}
   def protected_header(jwt, opts \\ [])
@@ -186,7 +194,8 @@ defmodule Attesto.JWS do
 
     validate_protected_header_options!(error, crit_error, supported_crit)
 
-    peek_opts = Keyword.take(opts, [:canonical, :allow_empty_signature, :max_compact_bytes])
+    peek_opts =
+      Keyword.take(opts, [:canonical, :allow_empty_signature, :max_compact_bytes, :max_json_depth])
 
     with {:ok, header} <- peek_json(jwt, :protected, peek_opts),
          :ok <- reject_unsupported_crit(header, supported: supported_crit) do
@@ -380,29 +389,72 @@ defmodule Attesto.JWS do
     end
   end
 
-  defp decode_json_map(bytes) do
+  defp decode_json_map(bytes, opts) do
     # RFC 8259 says object member names SHOULD be unique and explicitly warns
     # that implementations disagree when they are not. Reject duplicates at the
     # raw JSON boundary so a signed header or claim set cannot mean one thing to
     # Attesto and another thing to an intermediary or downstream verifier.
-    decoders = [
-      object_start: fn _old_acc -> %{} end,
-      object_push: fn key, value, object ->
-        if Map.has_key?(object, key),
-          do: throw(:duplicate_json_member),
-          else: Map.put(object, key, value)
-      end,
-      object_finish: fn object, old_acc -> {object, old_acc} end
-    ]
+    with {:ok, max_depth} <- max_json_depth(opts) do
+      decoders = [
+        array_start: &json_container_start(:array, &1, max_depth),
+        array_push: &json_array_push/2,
+        array_finish: &json_array_finish/2,
+        object_start: &json_container_start(:object, &1, max_depth),
+        object_push: &json_object_push/3,
+        object_finish: &json_object_finish/2
+      ]
 
-    case JSON.decode(bytes, nil, decoders) do
-      {%{} = map, nil, ""} -> {:ok, map}
-      _ -> {:error, :invalid_json}
+      case JSON.decode(bytes, nil, decoders) do
+        {%{} = map, nil, ""} -> {:ok, map}
+        _ -> {:error, :invalid_json}
+      end
     end
   rescue
     _ -> {:error, :invalid_json}
   catch
-    :duplicate_json_member -> {:error, :invalid_json}
+    _kind, _reason -> {:error, :invalid_json}
+  end
+
+  defp max_json_depth(opts) do
+    case Keyword.get(opts, :max_json_depth, @default_max_json_depth) do
+      value when is_integer(value) and value > 0 -> {:ok, value}
+      _invalid -> {:error, :invalid_json}
+    end
+  end
+
+  defp json_container_start(kind, old_acc, max_depth) do
+    depth = json_container_depth(old_acc) + 1
+
+    if depth > max_depth do
+      throw(:json_depth_limit)
+    end
+
+    value = if kind == :object, do: %{}, else: []
+    {:attesto_json_container, depth, kind, value}
+  end
+
+  defp json_container_depth(nil), do: 0
+  defp json_container_depth({:attesto_json_container, depth, _kind, _value}), do: depth
+  defp json_container_depth(_invalid), do: throw(:invalid_json_accumulator)
+
+  defp json_array_push(value, {:attesto_json_container, depth, :array, values}) do
+    {:attesto_json_container, depth, :array, [value | values]}
+  end
+
+  defp json_array_finish({:attesto_json_container, _depth, :array, values}, old_acc) do
+    {Enum.reverse(values), old_acc}
+  end
+
+  defp json_object_push(key, value, {:attesto_json_container, depth, :object, object}) do
+    if Map.has_key?(object, key) do
+      throw(:duplicate_json_member)
+    end
+
+    {:attesto_json_container, depth, :object, Map.put(object, key, value)}
+  end
+
+  defp json_object_finish({:attesto_json_container, _depth, :object, object}, old_acc) do
+    {object, old_acc}
   end
 
   defp decode_and_validate_jwt(jwt, opts) do
@@ -415,9 +467,9 @@ defmodule Attesto.JWS do
 
     with {:ok, compact} <- decode_compact(jwt, opts),
          {:ok, protected} <- decode64(compact.protected_segment, decode_opts),
-         {:ok, _header} <- decode_json_map(protected),
+         {:ok, _header} <- decode_json_map(protected, opts),
          {:ok, payload} <- decode64(compact.payload_segment, decode_opts),
-         {:ok, _claims} <- decode_json_map(payload) do
+         {:ok, _claims} <- decode_json_map(payload, opts) do
       :ok
     end
   end

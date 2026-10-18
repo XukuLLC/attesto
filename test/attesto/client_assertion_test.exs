@@ -35,6 +35,16 @@ defmodule Attesto.ClientAssertionTest do
     JWT.sign_compact(jwk, header, claims)
   end
 
+  test "rejects an assertion larger than 16 KiB before reading any claim" do
+    key = ec_key()
+    jwt = assertion(key, %{"padding" => String.duplicate("x", 16 * 1_024)})
+    trusted = %{"keys" => [public_jwk(key)]}
+
+    assert byte_size(jwt) > 16 * 1_024
+    assert {:error, :invalid_assertion} = ClientAssertion.verify(jwt, @client_id, @audience, trusted)
+    assert {:error, :invalid_assertion} = ClientAssertion.peek_client_id(jwt)
+  end
+
   test "verifies a valid private_key_jwt assertion against a trusted JWK" do
     key = ec_key()
     jwt = assertion(key)

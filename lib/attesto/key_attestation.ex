@@ -52,6 +52,7 @@ defmodule Attesto.KeyAttestation do
 
   @typ "key-attestation+jwt"
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_attestation_bytes 256 * 1_024
 
   @type verified :: %{
           attested_keys: [map()],
@@ -127,7 +128,8 @@ defmodule Attesto.KeyAttestation do
     with {:ok, header} <-
            JWS.protected_header(attestation,
              error: :invalid_attestation,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_attestation_bytes
            ),
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(attestation, header, opts),

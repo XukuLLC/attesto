@@ -52,6 +52,9 @@ defmodule Attesto.IdentityAssertion do
   @typ "oauth-id-jag+jwt"
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_jti_bytes 256
+  # Read at the token endpoint before client authentication; an identity
+  # assertion is ID-Token-sized at most.
+  @max_assertion_bytes 64 * 1_024
   @required_claims ~w(iss sub aud client_id jti exp iat)
 
   @typedoc "The validated, string-keyed ID-JAG claim set."
@@ -134,7 +137,8 @@ defmodule Attesto.IdentityAssertion do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :malformed,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_assertion_bytes
            ),
          :ok <- check_supported_alg(header, opts),
          :ok <- check_typ(header),
@@ -175,7 +179,7 @@ defmodule Attesto.IdentityAssertion do
   # ── Header checks ─────────────────────────────────────────────────────────
 
   defp peek_json(jwt, segment) do
-    case JWS.peek_json(jwt, segment) do
+    case JWS.peek_json(jwt, segment, max_compact_bytes: @max_assertion_bytes) do
       {:ok, map} -> {:ok, map}
       {:error, _reason} -> {:error, :malformed}
     end

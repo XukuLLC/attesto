@@ -48,6 +48,7 @@ defmodule Attesto.JwtVc do
   @header_typ "JWT"
   @default_lifetime_seconds 3600
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_credential_bytes 256 * 1_024
   @confirmation_methods ~w(jwk jwe jku kid)
   @private_jwk_members ~w(d p q dp dq qi oth k)
 
@@ -183,7 +184,8 @@ defmodule Attesto.JwtVc do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_credential,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_credential_bytes
            ),
          :ok <- check_typ(header),
          :ok <- check_alg(header, opts),

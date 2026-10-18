@@ -2,8 +2,7 @@ defmodule Attesto.TokenNegativeCorpusTest do
   @moduledoc false
   # Replays the frozen negative-JWT corpus in test/fixtures/jwt_corpus/
   # against Attesto.Token.verify/3 and asserts each token produces exactly
-  # the error atom its companion `.json` records (or `{:ok, _}` for the lone
-  # resource-exhaustion fixture that must verify rather than crash).
+  # the error atom its companion `.json` records.
   #
   # Where the surrounding suite round-trips through Token.mint/3, these
   # fixtures are *frozen bytes* a mint helper can never emit - non-URL-safe

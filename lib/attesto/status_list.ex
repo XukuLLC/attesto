@@ -15,6 +15,7 @@ defmodule Attesto.StatusList do
   @header_typ "statuslist+jwt"
   @valid_bits [1, 2, 4, 8]
   @expiry_leeway_seconds 60
+  @max_status_list_token_bytes 1_048_576
 
   @type bits :: 1 | 2 | 4 | 8
   @type verified :: %{
@@ -110,7 +111,8 @@ defmodule Attesto.StatusList do
     with {:ok, header} <-
            JWS.protected_header(token,
              error: :invalid_signature,
-             crit_error: :invalid_signature
+             crit_error: :invalid_signature,
+             max_compact_bytes: @max_status_list_token_bytes
            ),
          :ok <- check_typ(header),
          {:ok, alg} <- accepted_alg(header, opts),

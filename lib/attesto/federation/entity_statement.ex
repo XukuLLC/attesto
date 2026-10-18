@@ -23,6 +23,7 @@ defmodule Attesto.Federation.EntityStatement do
 
   @typ "entity-statement+jwt"
   @default_lifetime_seconds 3600
+  @max_entity_statement_bytes 256 * 1_024
   @private_jwk_members ~w(d p q dp dq qi oth k)
   @minimum_rsa_bits 2048
 
@@ -107,7 +108,8 @@ defmodule Attesto.Federation.EntityStatement do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_entity_statement,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_entity_statement_bytes
            ),
          :ok <- check_header(header, opts),
          :ok <- validate_trusted_keys(jwks),
@@ -228,7 +230,7 @@ defmodule Attesto.Federation.EntityStatement do
   end
 
   defp peek_claims(jwt) do
-    case JWS.peek_json(jwt, :payload) do
+    case JWS.peek_json(jwt, :payload, max_compact_bytes: @max_entity_statement_bytes) do
       {:ok, claims} -> {:ok, claims}
       {:error, _reason} -> {:error, :invalid_entity_statement}
     end

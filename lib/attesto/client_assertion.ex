@@ -29,6 +29,9 @@ defmodule Attesto.ClientAssertion do
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @default_max_lifetime_seconds 300
   @max_jti_bytes 256
+  # A client assertion carries a handful of registered claims; it is read at
+  # the token endpoint before any client authentication.
+  @max_assertion_bytes 16 * 1_024
   @accepted_typ [nil, "JWT", "client-authentication+jwt"]
   @authorization_request_claims ~w(response_type redirect_uri code_challenge request request_uri)
 
@@ -97,7 +100,8 @@ defmodule Attesto.ClientAssertion do
     with {:ok, header} <-
            JWS.protected_header(assertion,
              error: :invalid_assertion,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_assertion_bytes
            ),
          :ok <- check_typ(header),
          {:ok, claims} <- verify_signature(assertion, header, trusted_jwks, opts),
@@ -234,7 +238,7 @@ defmodule Attesto.ClientAssertion do
   defp peek_payload(jwt), do: peek_json(jwt, :payload)
 
   defp peek_json(jwt, segment) do
-    case JWS.peek_json(jwt, segment) do
+    case JWS.peek_json(jwt, segment, max_compact_bytes: @max_assertion_bytes) do
       {:ok, map} -> {:ok, map}
       {:error, _reason} -> {:error, :invalid_assertion}
     end

@@ -40,6 +40,7 @@ defmodule Attesto.CredentialProof do
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
+  @max_proof_bytes 256 * 1_024
 
   @type verified :: %{jwk: map(), jkt: String.t(), key_attestation: KeyAttestation.verified() | nil}
 
@@ -99,7 +100,8 @@ defmodule Attesto.CredentialProof do
     with {:ok, header} <-
            JWS.protected_header(proof,
              error: :invalid_proof,
-             crit_error: :invalid_proof
+             crit_error: :invalid_proof,
+             max_compact_bytes: @max_proof_bytes
            ),
          :ok <- check_typ(header),
          {:ok, alg} <- check_alg(header, opts),

@@ -57,6 +57,7 @@ defmodule Attesto.SdJwt do
   # Issuer-signed JWT, its Disclosures, and an optional KB-JWT are typically a
   # few KB); 1000 Disclosures is far beyond any real credential's claim count.
   @max_presentation_bytes 256 * 1_024
+  @max_key_binding_bytes 16 * 1_024
   @max_disclosures 1_000
 
   @typedoc "A parsed, verified SD-JWT presentation."
@@ -260,7 +261,8 @@ defmodule Attesto.SdJwt do
     with {:ok, header} <-
            JWS.protected_header(verified.key_binding_jwt,
              error: :malformed,
-             crit_error: :invalid_key_binding
+             crit_error: :invalid_key_binding,
+             max_compact_bytes: @max_key_binding_bytes
            ),
          :ok <- check_kb_typ(header),
          {:ok, claims} <- verify_kb_signature(verified.key_binding_jwt, header, holder_jwk, opts),
@@ -479,7 +481,8 @@ defmodule Attesto.SdJwt do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :malformed,
-             crit_error: :malformed
+             crit_error: :malformed,
+             max_compact_bytes: @max_presentation_bytes
            ),
          :ok <- check_typ(header, Keyword.get(opts, :accepted_typ)),
          alg when is_binary(alg) <- Map.get(header, "alg", :missing),
@@ -592,7 +595,8 @@ defmodule Attesto.SdJwt do
 
   # `sd_hash` binds the KB-JWT to the exact Issuer-JWT + presented Disclosures.
   defp check_kb_sd_hash(%{"sd_hash" => presented}, verified) when is_binary(presented) do
-    with {:ok, payload} <- JWS.peek_json(verified.issuer_jwt, :payload),
+    with {:ok, payload} <-
+           JWS.peek_json(verified.issuer_jwt, :payload, max_compact_bytes: @max_presentation_bytes),
          {:ok, sd_alg} <- sd_alg(payload) do
       expected = presentation_hash(verified, sd_alg)
       if SecureCompare.equal?(presented, expected), do: :ok, else: {:error, :invalid_key_binding}

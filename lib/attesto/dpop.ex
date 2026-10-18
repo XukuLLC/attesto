@@ -106,6 +106,9 @@ defmodule Attesto.DPoP do
   # bytes (a UUID is 36, a 256-bit b64url id is 43, so the cap is
   # generous for any legitimate scheme).
   @max_jti_length 256
+  # A proof holds one public JWK plus a few registered claims and is read
+  # before any authentication.
+  @max_proof_bytes 16 * 1_024
 
   @type replay_check_fun :: (String.t(), pos_integer() -> :ok | {:error, :replay})
   @type nonce_check_fun :: (String.t() | nil -> :ok | {:error, :use_dpop_nonce})
@@ -221,7 +224,8 @@ defmodule Attesto.DPoP do
     with {:ok, header} <-
            JWS.protected_header(proof,
              error: :invalid_proof,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_proof_bytes
            ),
          :ok <- check_typ(header),
          :ok <- check_alg(header),

@@ -94,6 +94,9 @@ defmodule Attesto.Token do
   # Modest tolerance for a verifier clock running slightly ahead of the
   # issuer's, applied to the `nbf` (not-before) and future-`iat` checks.
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
+  # A bearer token is read at a resource server before any authentication;
+  # 64 KiB leaves room for rich authorization details.
+  @max_token_bytes 64 * 1_024
 
   @type principal :: %{
           required(:kind) => String.t(),
@@ -630,7 +633,8 @@ defmodule Attesto.Token do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_token,
-             crit_error: :unsupported_critical_header
+             crit_error: :unsupported_critical_header,
+             max_compact_bytes: @max_token_bytes
            ) do
       verify_against_trusted(config, jwt, header)
     end

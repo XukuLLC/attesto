@@ -1,1 +1,1 @@
-{"attack_vector":"an extra claim nested 5000 arrays deep","expected_error":"ok","name":"29_deeply_nested_claim","notes":"the verifier must return a tuple, not blow the stack; this token is otherwise valid"}
+{"attack_vector":"an extra claim nested 5000 arrays deep","expected_error":"invalid_token","name":"29_deeply_nested_claim","notes":"the verifier must reject excessive JSON nesting before signature verification without blowing the stack"}

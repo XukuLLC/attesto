@@ -6,6 +6,24 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.6.1] - 2026-10-18
+
+### Security
+
+- Bound JSON nesting to 32 containers when decoding compact JWS headers and
+  claim sets, in unverified peeks and in strict verification alike, so a
+  deeply nested segment cannot turn one bounded request into disproportionate
+  scheduler time and process heap before any signature check. A trusted
+  caller may raise the bound with `:max_json_depth`.
+- Cap the compact size each verifier reads before authentication, instead of
+  the shared 1 MiB default: client assertions, DPoP proofs, Key Binding JWTs,
+  and client attestation proofs of possession at 16 KiB; identity assertions,
+  Self-Issued ID Tokens, access tokens, ID Tokens, Trust Marks, and Request
+  Objects at 64 KiB; JWT VCs, credential proofs, key and wallet attestations,
+  and Entity Statements at 256 KiB, matching SD-JWT presentations. Status List
+  Tokens keep 1 MiB. `JWS.peek_json/3` and `JWS.protected_header/2` keep
+  their 1 MiB default for callers that pass no bound.
+
 ## [2.6.0] - 2026-10-18
 
 ### Breaking

@@ -185,6 +185,16 @@ defmodule Attesto.DPoPTest do
   # header validation: typ
   # -----------------------------------------------------------------
 
+  describe "verify_proof/2 size bound" do
+    test "rejects a proof larger than 16 KiB before reading its header" do
+      {proof, _key, _claims, _header} =
+        valid_proof(claim_overrides: %{"padding" => String.duplicate("x", 16 * 1_024)})
+
+      assert byte_size(proof) > 16 * 1_024
+      assert {:error, :invalid_proof} = DPoP.verify_proof(proof, base_opts())
+    end
+  end
+
   describe "verify_proof/2 typ validation" do
     test "rejects proof with typ != dpop+jwt" do
       key = gen_ec_key()
