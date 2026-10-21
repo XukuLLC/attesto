@@ -77,6 +77,7 @@ defmodule Attesto.MixProject do
       {:nodejs, "~> 3.1", only: :test},
       # test - property-based and mutation-fuzz testing.
       {:stream_data, "~> 1.1", only: :test},
+      {:meck, "~> 1.2", only: :test, runtime: false},
 
       # dev / quality
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

@@ -880,13 +880,52 @@ defmodule Attesto.DPoPTest do
     end
   end
 
+  for primed? <- [false, true] do
+    @primed_fixture primed?
+    test "the Ed448 on_exit callback restores a #{if primed?, do: "primed", else: "unprimed"} snapshot" do
+      key = {DPoP, :jws_capabilities, 1}
+      original = :persistent_term.get(key, :uncached)
+      original_fallback = JOSE.crypto_fallback()
+      DPoP.clear_allowed_algs_cache()
+      if @primed_fixture, do: :ok = DPoP.prime_allowed_algs()
+      snapshot = :persistent_term.get(key, :uncached)
+
+      # Registered first, so this observes the fixture's real on_exit cleanup.
+      on_exit(fn ->
+        restored_snapshot = :persistent_term.get(key, :uncached)
+        restored_fallback = JOSE.crypto_fallback()
+        DPoP.clear_allowed_algs_cache()
+        JOSE.crypto_fallback(original_fallback)
+        if original != :uncached, do: :persistent_term.put(key, original)
+        assert restored_snapshot == snapshot
+        assert restored_fallback == original_fallback
+      end)
+
+      enable_ed448_support()
+      assert JOSE.crypto_fallback()
+      current = :persistent_term.get(key, :uncached)
+      assert current != :uncached == @primed_fixture
+    end
+  end
+
   defp enable_ed448_support do
+    on_exit(install_ed448_backend())
+  end
+
+  defp install_ed448_backend do
     previous = JOSE.crypto_fallback()
-    primed? = System.get_env("ATTESTO_TEST_PRIME_DPOP_ALGS") == "1"
-    if primed?, do: DPoP.clear_allowed_algs_cache()
+    snapshot = :persistent_term.get({DPoP, :jws_capabilities, 1}, :uncached)
+    :ok = DPoP.clear_allowed_algs_cache()
     JOSE.crypto_fallback(true)
-    if primed?, do: DPoP.prime_allowed_algs()
-    on_exit(fn -> JOSE.crypto_fallback(previous) end)
+    if snapshot != :uncached, do: :ok = DPoP.prime_allowed_algs()
+
+    fn ->
+      DPoP.clear_allowed_algs_cache()
+      JOSE.crypto_fallback(previous)
+
+      if snapshot != :uncached,
+        do: :persistent_term.put({DPoP, :jws_capabilities, 1}, snapshot)
+    end
   end
 end
 
