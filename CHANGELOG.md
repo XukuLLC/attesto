@@ -6,6 +6,17 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Added
+
+- Opt-in VM-wide DPoP capability snapshots through `prime_allowed_algs/0`
+  and `clear_allowed_algs_cache/0`. Hosts with a fixed crypto backend can
+  discover signing support once before serving. Unprimed callers retain
+  per-call discovery; priming with no supported asymmetric algorithm clears
+  any previous snapshot and returns an error. Signature, key, claim, target,
+  freshness, and replay verification still run for every proof.
+
 ## [2.6.1] - 2026-10-18
 
 ### Security
