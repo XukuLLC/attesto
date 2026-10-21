@@ -107,6 +107,11 @@ jobs:
       - name: Run tests
         run: mix test --trace
 
+      - name: Run DPoP tests with primed capabilities
+        env:
+          ATTESTO_TEST_PRIME_DPOP_ALGS: "1"
+        run: mix test test/attesto/dpop_test.exs
+
       - name: Check formatting
         if: ${{ matrix.lint }}
         run: mix format --check-formatted
