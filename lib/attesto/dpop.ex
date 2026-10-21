@@ -299,12 +299,53 @@ defmodule Attesto.DPoP do
 
   @doc """
   The list of JOSE `alg` values accepted on a DPoP proof's protected
-  header, filtered by the configured JOSE backend's current capabilities.
+  header, filtered by the configured JOSE backend's capabilities. By default
+  these are discovered per call; `prime_allowed_algs/0` opts into a VM snapshot.
   """
   @spec allowed_algs() :: [String.t()]
+  @capabilities_cache_key {__MODULE__, :jws_capabilities, 1}
+
   def allowed_algs do
-    supported = jose_jws_algs()
+    supported =
+      case :persistent_term.get(@capabilities_cache_key, :uncached) do
+        :uncached -> jose_jws_algs()
+        algorithms -> algorithms
+      end
+
     Enum.filter(@allowed_algs, &(&1 in supported))
+  end
+
+  @doc """
+  Snapshot the current JOSE signing capabilities for this VM.
+
+  Opt in only when the application owns the node's crypto configuration and
+  keeps it immutable until restart. Call `clear_allowed_algs_cache/0` before
+  changing JOSE backends, then prime again after the change. Without priming,
+  `allowed_algs/0` continues to discover the current capabilities on every call.
+
+  This caches capability data only. Every proof still verifies its header,
+  public key, signature, claims, target, freshness and replay policy. The fixed
+  asymmetric algorithm whitelist is intersected with the snapshot on every call;
+  callers cannot supply or widen it.
+  """
+  @spec prime_allowed_algs() :: :ok | {:error, :no_supported_algorithms}
+  def prime_allowed_algs do
+    supported = jose_jws_algs()
+
+    if Enum.any?(@allowed_algs, &(&1 in supported)) do
+      :persistent_term.put(@capabilities_cache_key, supported)
+      :ok
+    else
+      clear_allowed_algs_cache()
+      {:error, :no_supported_algorithms}
+    end
+  end
+
+  @doc "Resume per-call JOSE capability discovery, including after backend changes."
+  @spec clear_allowed_algs_cache() :: :ok
+  def clear_allowed_algs_cache do
+    :persistent_term.erase(@capabilities_cache_key)
+    :ok
   end
 
   # ----- internal: header parsing -----

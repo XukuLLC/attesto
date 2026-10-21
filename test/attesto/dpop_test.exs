@@ -5,6 +5,15 @@ defmodule Attesto.DPoPTest do
   alias Attesto.DPoP
   alias Attesto.Test.Factory
 
+  setup do
+    if System.get_env("ATTESTO_TEST_PRIME_DPOP_ALGS") == "1" do
+      :ok = DPoP.prime_allowed_algs()
+      on_exit(fn -> DPoP.clear_allowed_algs_cache() end)
+    end
+
+    :ok
+  end
+
   @http_method "POST"
   @http_uri "https://api.example.com/oauth/token"
 
@@ -873,7 +882,10 @@ defmodule Attesto.DPoPTest do
 
   defp enable_ed448_support do
     previous = JOSE.crypto_fallback()
+    primed? = System.get_env("ATTESTO_TEST_PRIME_DPOP_ALGS") == "1"
+    if primed?, do: DPoP.clear_allowed_algs_cache()
     JOSE.crypto_fallback(true)
+    if primed?, do: DPoP.prime_allowed_algs()
     on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
 end
