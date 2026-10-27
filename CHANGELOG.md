@@ -31,6 +31,14 @@ defaults in a minor release.
   any previous snapshot and returns an error. Signature, key, claim, target,
   freshness, and replay verification still run for every proof.
 
+### Changed
+
+- JOSE 1.11.13 detects native Ed448 support and no longer enables its
+  pure-Erlang `crypto_fallback` by default. `Attesto.DPoP.allowed_algs/0`, and
+  the `dpop_signing_alg_values_supported` metadata derived from it, now
+  include `Ed448` where the crypto backend provides it, and omit any algorithm
+  that only the fallback supplied.
+
 ## [2.6.1] - 2026-10-18
 
 ### Security
