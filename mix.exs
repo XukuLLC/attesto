@@ -14,7 +14,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "2.6.1"
+  @version "2.7.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -55,7 +55,7 @@ defmodule Attesto.MixProject do
 
   defp deps do
     [
-      {:jose, ">= 1.11.12 and < 2.0.0"},
+      {:jose, ">= 1.11.13 and < 2.0.0"},
       # Optional: ISO 18013-5 mdoc / mso_mdoc issuance and verification.
       # Consumers that use Attesto without mdoc support do not pull in CBOR.
       {:cbor, "~> 1.0", optional: true},

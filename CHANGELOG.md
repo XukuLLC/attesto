@@ -6,7 +6,21 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
-## [Unreleased]
+## [2.7.0] - 2026-10-27
+
+### Security
+
+- Require JOSE 1.11.13 or later. It fixes CVE-2026-65625 through
+  CVE-2026-65632, among them unbounded recursion when an ECDH-ES ephemeral
+  key's type differs from the recipient key's, prime recovery from an RSA
+  private JWK without CRT members, and acceptance of zero-padded ECDSA
+  signatures. `Attesto.JWE` already rejected compressed payloads, short GCM
+  tags, and ephemeral keys other than public P-256 keys before calling JOSE.
+- `Attesto.JWS.verify_strict/3` accepts an ES256, ES256K, ES384, or ES512
+  signature only in the fixed-length R || S encoding of RFC 7518 §3.4,
+  whatever the JOSE version. Earlier JOSE releases also accepted R and S
+  padded with leading zero bytes, giving one signature many accepted
+  encodings.
 
 ### Added
 

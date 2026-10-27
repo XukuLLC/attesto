@@ -554,7 +554,26 @@ defmodule Attesto.JWS do
     _kind, _reason -> false
   end
 
+  # JOSE before 1.11.13 splits an ECDSA signature at half its actual length,
+  # so R and S halves padded with leading zero bytes still verify.
+  # RFC 7518 §3.4 fixes the R || S length for each ES* name; accept only that.
+  defp signature_parameters_valid?(jwt, {_kid, alg, _jwk}, opts) when alg in ["ES256", "ES256K", "ES384", "ES512"] do
+    decode_opts = [canonical: Keyword.get(opts, :canonical, true)]
+
+    with {:ok, compact} <- decode_compact(jwt, opts),
+         {:ok, signature} <- decode64(compact.signature_segment, decode_opts) do
+      byte_size(signature) == ecdsa_signature_bytes(alg)
+    else
+      _invalid -> false
+    end
+  end
+
   defp signature_parameters_valid?(_jwt, _candidate, _opts), do: true
+
+  defp ecdsa_signature_bytes("ES256"), do: 64
+  defp ecdsa_signature_bytes("ES256K"), do: 64
+  defp ecdsa_signature_bytes("ES384"), do: 96
+  defp ecdsa_signature_bytes("ES512"), do: 132
 
   defp verified_candidate_result(claims, candidate, acc, opts) do
     claims_map? = Keyword.get(opts, :claims_map?, false)
