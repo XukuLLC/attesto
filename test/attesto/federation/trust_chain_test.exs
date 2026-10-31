@@ -149,6 +149,38 @@ defmodule Attesto.Federation.TrustChainTest do
              TrustChain.validate(apex_is_not_a_subdomain.chain, apex_is_not_a_subdomain.anchor_jwks, now: @now)
   end
 
+  test "a trailing-dot host cannot step around naming constraints" do
+    # DNS treats `intermediate.example.` and `intermediate.example` as one name;
+    # the constraint check must too, or an `excluded` entry is one byte away
+    # from useless.
+    dotted_entity =
+      chain_fixture(
+        intermediate_entity: "https://intermediate.example.",
+        authority_hints: ["https://intermediate.example."],
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{
+            "permitted" => [".example"],
+            "excluded" => ["intermediate.example"]
+          }
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(dotted_entity.chain, dotted_entity.anchor_jwks, now: @now)
+
+    dotted_constraint =
+      chain_fixture(
+        anchor_constraints: %{
+          "max_path_length" => 1,
+          "naming_constraints" => %{"permitted" => [".example"], "excluded" => ["leaf.example."]}
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(dotted_constraint.chain, dotted_constraint.anchor_jwks, now: @now)
+  end
+
   test "applies an intermediate statement's naming constraints to its leaf subject" do
     fixture =
       chain_fixture(

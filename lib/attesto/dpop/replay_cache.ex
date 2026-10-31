@@ -90,30 +90,15 @@ defmodule Attesto.DPoP.ReplayCache do
       )
   """
 
-  use GenServer
+  use Attesto.Store.ETS,
+    default_sweep_interval_ms: 30_000,
+    sweep_time: :monotonic_ms,
+    reset_doc: "Clear every entry from the cache. Test-facing."
+
+  alias Attesto.Store.ETS
 
   @table __MODULE__
   @default_ttl_seconds 60
-  @default_sweep_interval_ms 30_000
-
-  @doc """
-  Start the cache. Registered under `__MODULE__`.
-  """
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  @doc false
-  def child_spec(opts) do
-    %{
-      id: __MODULE__,
-      restart: :permanent,
-      shutdown: 5_000,
-      start: {__MODULE__, :start_link, [opts]},
-      type: :worker
-    }
-  end
 
   @doc """
   Record `jti` and report whether it has already been seen within the TTL
@@ -131,89 +116,16 @@ defmodule Attesto.DPoP.ReplayCache do
   @spec check_and_record(String.t(), pos_integer()) :: :ok | {:error, :replay}
   def check_and_record(jti, ttl_seconds \\ @default_ttl_seconds)
       when is_binary(jti) and is_integer(ttl_seconds) and ttl_seconds > 0 do
-    expires_at_ms = monotonic_ms() + ttl_seconds * 1_000
-
-    case :ets.insert_new(@table, {jti, expires_at_ms}) do
-      true ->
-        :ok
-
-      false ->
-        now_ms = monotonic_ms()
-
-        replace_expired(jti, now_ms, expires_at_ms)
-    end
-  end
-
-  defp replace_expired(jti, now_ms, expires_at_ms) do
-    case :ets.select_delete(@table, [{{jti, :"$1"}, [{:<, :"$1", now_ms}], [true]}]) do
-      1 ->
-        case :ets.insert_new(@table, {jti, expires_at_ms}) do
-          true -> :ok
-          false -> {:error, :replay}
-        end
-
-      0 ->
-        {:error, :replay}
-    end
-  end
-
-  @doc """
-  Clear every entry from the cache. Test-facing.
-  """
-  @spec reset() :: :ok
-  def reset do
-    if :ets.whereis(@table) != :undefined do
-      :ets.delete_all_objects(@table)
-    end
-
-    :ok
+    ETS.check_and_record(@table, jti, ttl_seconds)
   end
 
   @doc """
   Return the number of entries currently held. Test/diagnostic-facing.
   """
   @spec size() :: non_neg_integer()
-  def size do
-    case :ets.whereis(@table) do
-      :undefined -> 0
-      _ -> :ets.info(@table, :size)
-    end
+  def size, do: ETS.size(@table)
+
+  defp delete_expired(now_ms) do
+    ETS.delete_expired_entries(@table, now_ms)
   end
-
-  @impl true
-  def init(opts) do
-    Attesto.ClusterGuard.assert_single_node!(
-      __MODULE__,
-      Keyword.get(opts, :multi_node_acknowledged?, false)
-    )
-
-    sweep_interval_ms = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
-
-    table =
-      :ets.new(@table, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
-
-    schedule_sweep(sweep_interval_ms)
-    {:ok, %{sweep_interval_ms: sweep_interval_ms, table: table}}
-  end
-
-  @impl true
-  def handle_info(:sweep, state) do
-    now_ms = monotonic_ms()
-    # Delete every entry whose expiry is strictly in the past.
-    :ets.select_delete(state.table, [{{:"$1", :"$2"}, [{:<, :"$2", now_ms}], [true]}])
-    schedule_sweep(state.sweep_interval_ms)
-    {:noreply, state}
-  end
-
-  defp schedule_sweep(interval_ms) do
-    Process.send_after(self(), :sweep, interval_ms)
-  end
-
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

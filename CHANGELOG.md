@@ -6,6 +6,64 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.8.0] - 2026-10-31
+
+### Security
+
+- Validate arguments inside `Attesto.SessionState.mint_browser_state/2` and
+  `browser_state_valid?/3`, `Attesto.JWS.sign_compact/3` and
+  `sign_compact_jwk/3`, `Attesto.Key.jwk/1` and `signing_jwk/1`, and
+  `Attesto.JwtVc.issue/2` instead of in function-head guards. A caller's type
+  error now raises an `ArgumentError` that names the bad argument rather than
+  a `FunctionClauseError` whose logged arguments include the OP browser-state
+  secret or the private signing key. `JwtVc.issue/2` also stops interpolating
+  the PEM it was given into its own error message. Same class as Plug.Crypto
+  CVE-2026-105963.
+- Reject an OpenID Federation Entity Identifier that carries userinfo.
+  `https://entity.example:secret@evil.example` names `evil.example` to a
+  fetcher and `entity.example` to a reader, and hands `secret` out as a
+  Basic credential; identifiers now pass `Attesto.URI.https_identifier?/1`.
+  Surfaced by mining the class behind go-openid-federation's October 2026
+  Entity Identifier fix.
+- Compare naming-constraint hosts without a trailing dot, so
+  `https://le.bad.test.` can no longer step around an `excluded` entry for
+  `.bad.test`. Same class as the FAPIgo trust-chain fix of 2026-10-04.
+
+### Added
+
+- `Attesto.StrictJSON.decode/2` decodes JSON with duplicate object member names
+  rejected at every nesting level and container depth bounded to 32 levels by
+  default (`:max_depth`). `Attesto.JWS` and `Attesto.JWE` now delegate their
+  strict JSON decoding to it.
+- `Attesto.OutboundTarget.screen/2` validates an outbound `https` URL (or
+  loopback `http` when `allow_loopback: true`), refuses userinfo, fragments,
+  malformed percent-encoding, IP literals, localhost, `.local`, and
+  single-label hosts, resolves both `A` and `AAAA` records, screens every
+  returned address through `Attesto.IPAddress.public_fetch_destination?/1`
+  (loopback is admitted only with `allow_loopback: true`), and returns a
+  `%Attesto.OutboundTarget{}` pinning the first verified address.
+- `Attesto.Plug.OAuthError.missing_credentials/2` renders the RFC 6750 §3.1
+  bare `Bearer` challenge (`401` with `WWW-Authenticate: Bearer` and `{}` JSON
+  body) when credentials are absent.
+- `Attesto.Plug.Authenticate` accepts `:missing_credentials_challenge`
+  (`:invalid_token` default or `:bare_bearer`), `:include_error_description`,
+  `:dpop_max_age_seconds`, `:now`, and `:allow_ambient_mtls`. It also
+  distinguishes a malformed `Authorization` header from a missing one, fails
+  closed when `:nonce_issue` returns a non-binary or `:cert_der` returns a
+  non-nil non-binary, and maps `{:certificate_error, reason}` to
+  `invalid_token`.
+- `Attesto.Token.check_confirmation/2` accepts `allow_ambient_mtls: true`
+  (default `false`) for resource-server callers that permit unprompted client
+  certificates on tokens without `cnf["x5t#S256"]`.
+
+### Changed
+
+- `Attesto.CNonceStore.ETS`, `Attesto.DPoP.NonceStore.ETS`, and
+  `Attesto.DPoP.ReplayCache` now share one internal ETS store implementation,
+  preserving their public contracts, table options, and atomic replay claims
+  (`insert_new` plus compare-and-swap replacement of expired rows, swept on
+  monotonic time).
+
 ## [2.7.0] - 2026-10-27
 
 ### Security

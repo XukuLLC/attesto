@@ -1,6 +1,8 @@
 defmodule Attesto.Store.ETS do
   @moduledoc false
 
+  alias Attesto.Secret
+
   @default_table_options [
     :set,
     :public,
@@ -21,6 +23,7 @@ defmodule Attesto.Store.ETS do
 
     tables = [{table, table_options} | extra_tables]
     sweep? = Keyword.get(opts, :sweep?, true)
+    sweep_time = Keyword.get(opts, :sweep_time, :second)
     default_sweep_interval_ms = Keyword.get(opts, :default_sweep_interval_ms)
     cluster_guard? = Keyword.get(opts, :cluster_guard?, true)
     interval_before_tables? = Keyword.get(opts, :interval_before_tables?, true)
@@ -28,6 +31,7 @@ defmodule Attesto.Store.ETS do
     reset_doc = Keyword.get(opts, :reset_doc, "Clear every entry. Test-facing.")
     reset_spec? = Keyword.get(opts, :reset_spec?, true)
     reset_match? = Keyword.get(opts, :reset_match?, false)
+    nonce_store = Keyword.get(opts, :nonce_store)
 
     table_initializers =
       Enum.map(tables, fn {name, options} ->
@@ -70,21 +74,8 @@ defmodule Attesto.Store.ETS do
       |> Enum.reject(&is_nil/1)
 
     {reset_function, reset_handler} = reset_ast(reset, table, tables, reset_match?)
-
-    sweep =
-      if sweep? do
-        quote do
-          @impl GenServer
-          def handle_info(:sweep, state) do
-            now = System.system_time(:second)
-            delete_expired(now)
-            schedule_sweep(state.sweep_interval_ms)
-            {:noreply, state}
-          end
-
-          defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
-        end
-      end
+    sweep = sweep_ast(sweep?, sweep_time)
+    nonce_store_functions = nonce_store_ast(nonce_store, table, caller)
 
     quote do
       use GenServer
@@ -101,9 +92,166 @@ defmodule Attesto.Store.ETS do
 
       unquote_splicing(reset_annotations)
       unquote(reset_function)
+      unquote(nonce_store_functions)
       unquote(init)
       unquote(sweep)
       unquote(reset_handler)
+    end
+  end
+
+  @spec issue_nonce(:ets.tid() | atom(), pos_integer(), pos_integer(), pos_integer()) ::
+          String.t()
+  def issue_nonce(table, ttl_seconds, nonce_bytes, max_entries) when is_integer(ttl_seconds) and ttl_seconds > 0 do
+    evict_one_if_full(table, max_entries)
+    nonce = Secret.generate(nonce_bytes)
+    true = :ets.insert(table, {nonce, System.system_time(:second) + ttl_seconds})
+    nonce
+  end
+
+  @spec valid_nonce?(:ets.tid() | atom(), term()) :: boolean()
+  def valid_nonce?(table, nonce) when is_binary(nonce) do
+    case :ets.lookup(table, nonce) do
+      [{^nonce, expires_at}] -> expires_at > System.system_time(:second)
+      [] -> false
+    end
+  end
+
+  def valid_nonce?(_table, _nonce), do: false
+
+  @spec consume_nonce(:ets.tid() | atom(), term()) :: :ok | {:error, :expired | :unknown}
+  def consume_nonce(table, nonce) when is_binary(nonce) do
+    now = System.system_time(:second)
+
+    case :ets.take(table, nonce) do
+      [{^nonce, expires_at}] when expires_at > now -> :ok
+      [{^nonce, _expired}] -> {:error, :expired}
+      [] -> {:error, :unknown}
+    end
+  end
+
+  def consume_nonce(_table, _nonce), do: {:error, :unknown}
+
+  @spec check_and_record(:ets.tid() | atom(), String.t(), pos_integer()) ::
+          :ok | {:error, :replay}
+  def check_and_record(table, key, ttl_seconds) when is_binary(key) and is_integer(ttl_seconds) and ttl_seconds > 0 do
+    expires_at_ms = System.monotonic_time(:millisecond) + ttl_seconds * 1_000
+
+    case :ets.insert_new(table, {key, expires_at_ms}) do
+      true ->
+        :ok
+
+      false ->
+        now_ms = System.monotonic_time(:millisecond)
+        replace_expired(table, key, now_ms, expires_at_ms)
+    end
+  end
+
+  @spec size(:ets.tid() | atom()) :: non_neg_integer()
+  def size(table) do
+    case :ets.whereis(table) do
+      :undefined -> 0
+      _ -> :ets.info(table, :size)
+    end
+  end
+
+  @spec delete_expired_entries(:ets.tid() | atom(), integer()) :: non_neg_integer()
+  def delete_expired_entries(table, now) do
+    :ets.select_delete(table, [{{:_, :"$1"}, [{:<, :"$1", now}], [true]}])
+  end
+
+  defp evict_one_if_full(table, max_entries) do
+    if :ets.info(table, :size) >= max_entries do
+      case :ets.first(table) do
+        :"$end_of_table" -> :ok
+        key -> :ets.delete(table, key)
+      end
+    end
+  end
+
+  defp replace_expired(table, key, now_ms, expires_at_ms) do
+    case :ets.select_delete(table, [{{key, :"$1"}, [{:<, :"$1", now_ms}], [true]}]) do
+      1 ->
+        case :ets.insert_new(table, {key, expires_at_ms}) do
+          true -> :ok
+          false -> {:error, :replay}
+        end
+
+      0 ->
+        {:error, :replay}
+    end
+  end
+
+  defp sweep_ast(false, _sweep_time), do: nil
+
+  defp sweep_ast(true, :monotonic_ms) do
+    quote do
+      @impl GenServer
+      def handle_info(:sweep, state) do
+        now_ms = System.monotonic_time(:millisecond)
+        delete_expired(now_ms)
+        schedule_sweep(state.sweep_interval_ms)
+        {:noreply, state}
+      end
+
+      defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
+    end
+  end
+
+  defp sweep_ast(true, :second) do
+    quote do
+      @impl GenServer
+      def handle_info(:sweep, state) do
+        now = System.system_time(:second)
+        delete_expired(now)
+        schedule_sweep(state.sweep_interval_ms)
+        {:noreply, state}
+      end
+
+      defp schedule_sweep(interval_ms), do: Process.send_after(self(), :sweep, interval_ms)
+    end
+  end
+
+  defp nonce_store_ast(nil, _table, _caller), do: nil
+
+  defp nonce_store_ast(opts, table, caller) when is_list(opts) do
+    behaviour = opts |> Keyword.fetch!(:behaviour) |> Macro.expand(caller)
+    default_ttl_seconds = Keyword.get(opts, :default_ttl_seconds, 300)
+    nonce_bytes = Keyword.get(opts, :nonce_bytes, 16)
+    max_entries = Keyword.get(opts, :max_entries, 1_000_000)
+    consume? = Keyword.get(opts, :consume?, false)
+
+    consume_fn =
+      if consume? do
+        quote do
+          @impl unquote(behaviour)
+          def consume(nonce) do
+            unquote(__MODULE__).consume_nonce(unquote(table), nonce)
+          end
+        end
+      end
+
+    quote do
+      @impl unquote(behaviour)
+      def issue(ttl_seconds \\ unquote(default_ttl_seconds))
+          when is_integer(ttl_seconds) and ttl_seconds > 0 do
+        unquote(__MODULE__).issue_nonce(
+          unquote(table),
+          ttl_seconds,
+          unquote(nonce_bytes),
+          unquote(max_entries)
+        )
+      end
+
+      @impl unquote(behaviour)
+      def valid?(nonce) do
+        unquote(__MODULE__).valid_nonce?(unquote(table), nonce)
+      end
+
+      unquote(consume_fn)
+
+      defp delete_expired(now) do
+        unquote(__MODULE__).delete_expired_entries(unquote(table), now)
+      end
     end
   end
 

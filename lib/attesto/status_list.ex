@@ -181,6 +181,12 @@ defmodule Attesto.StatusList do
   `resolver` fetches the Status List Token for a URI and returns
   `{:ok, token}`. The third argument may be trusted JWKS directly or a
   function that resolves the trusted JWKS for that URI.
+
+  A Status List Token without an `exp` claim is treated as non-expiring by
+  `verify/3` (matching `draft-ietf-oauth-status-list` §11.5). The host's
+  `resolver` must therefore bound how long a fetched token is cached: honor the
+  verified token's `ttl` claim when present, and enforce a fixed maximum cache
+  age when `ttl` is absent.
   """
   @spec resolve(map(), (String.t() -> {:ok, String.t()} | {:error, term()}), term(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}

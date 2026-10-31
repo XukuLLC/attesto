@@ -125,7 +125,11 @@ defmodule Attesto.Key do
   metadata, not from a presented token header.
   """
   @spec jwk(String.t()) :: JOSE.JWK.t()
-  def jwk(pem) when is_binary(pem) do
+  def jwk(pem) do
+    # Checked in the body, not a head guard, so a mistyped key (a charlist PEM,
+    # for example) is never echoed through a FunctionClauseError's arguments.
+    if !is_binary(pem), do: raise(ArgumentError, "expected a PEM-encoded key as a binary")
+
     case safe_from_pem(pem) do
       %JOSE.JWK{} = jwk ->
         ensure_supported!(jwk)
@@ -231,7 +235,7 @@ defmodule Attesto.Key do
   verification material, but cannot sign tokens.
   """
   @spec signing_jwk(String.t()) :: JOSE.JWK.t()
-  def signing_jwk(pem) when is_binary(pem) do
+  def signing_jwk(pem) do
     jwk = jwk(pem)
 
     if private_jwk?(jwk) do

@@ -487,11 +487,14 @@ defmodule Attesto.Federation.EntityStatement do
   defp self_issued?(%{"iss" => entity, "sub" => entity}), do: true
   defp self_issued?(_claims), do: false
 
+  # OpenID Federation 1.0 §1.2: an Entity Identifier is an https URL with no
+  # query or fragment. Userinfo is refused as well: `https://a.example:x@b.example`
+  # names `b.example` to a fetcher and `a.example` to a reader, and would carry
+  # `x` out as a Basic credential (the class behind go-openid-federation's
+  # 2026-10 Entity Identifier fix).
   defp entity_identifier?(value) when is_binary(value) and value != "" do
-    case URI.parse(value) do
-      %URI{scheme: "https", host: host, query: nil, fragment: nil} when is_binary(host) and host != "" -> true
-      _other -> false
-    end
+    Attesto.URI.https_identifier?(value) and
+      match?({:ok, %URI{query: nil}}, URI.new(value))
   end
 
   defp entity_identifier?(_value), do: false

@@ -1,7 +1,7 @@
 defmodule Attesto.JWS do
   @moduledoc false
 
-  alias Attesto.{Key, Signer, SigningAlg, Thumbprint}
+  alias Attesto.{Key, Signer, SigningAlg, StrictJSON, Thumbprint}
 
   # Compact JOSE values arrive before authentication at several protocol
   # endpoints. Bound the encoded input before splitting or decoding it so one
@@ -10,11 +10,6 @@ defmodule Attesto.JWS do
   # the total ceiling also bounds the payload and may be raised explicitly by
   # a trusted caller with an unusually large signed artifact.
   @default_max_compact_bytes 1_048_576
-  # Registered claim sets and headers nest a handful of levels; OpenID
-  # Federation metadata, DCQL queries, and authorization details stay under
-  # ten. Bounding nesting keeps an unverified segment from turning a bounded
-  # input into a disproportionate claim tree before any signature check.
-  @default_max_json_depth 32
   @max_protected_segment_bytes 256 * 1_024
   @max_signature_segment_bytes 256 * 1_024
 
@@ -389,73 +384,7 @@ defmodule Attesto.JWS do
     end
   end
 
-  defp decode_json_map(bytes, opts) do
-    # RFC 8259 says object member names SHOULD be unique and explicitly warns
-    # that implementations disagree when they are not. Reject duplicates at the
-    # raw JSON boundary so a signed header or claim set cannot mean one thing to
-    # Attesto and another thing to an intermediary or downstream verifier.
-    with {:ok, max_depth} <- max_json_depth(opts) do
-      decoders = [
-        array_start: &json_container_start(:array, &1, max_depth),
-        array_push: &json_array_push/2,
-        array_finish: &json_array_finish/2,
-        object_start: &json_container_start(:object, &1, max_depth),
-        object_push: &json_object_push/3,
-        object_finish: &json_object_finish/2
-      ]
-
-      case JSON.decode(bytes, nil, decoders) do
-        {%{} = map, nil, ""} -> {:ok, map}
-        _ -> {:error, :invalid_json}
-      end
-    end
-  rescue
-    _ -> {:error, :invalid_json}
-  catch
-    _kind, _reason -> {:error, :invalid_json}
-  end
-
-  defp max_json_depth(opts) do
-    case Keyword.get(opts, :max_json_depth, @default_max_json_depth) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
-      _invalid -> {:error, :invalid_json}
-    end
-  end
-
-  defp json_container_start(kind, old_acc, max_depth) do
-    depth = json_container_depth(old_acc) + 1
-
-    if depth > max_depth do
-      throw(:json_depth_limit)
-    end
-
-    value = if kind == :object, do: %{}, else: []
-    {:attesto_json_container, depth, kind, value}
-  end
-
-  defp json_container_depth(nil), do: 0
-  defp json_container_depth({:attesto_json_container, depth, _kind, _value}), do: depth
-  defp json_container_depth(_invalid), do: throw(:invalid_json_accumulator)
-
-  defp json_array_push(value, {:attesto_json_container, depth, :array, values}) do
-    {:attesto_json_container, depth, :array, [value | values]}
-  end
-
-  defp json_array_finish({:attesto_json_container, _depth, :array, values}, old_acc) do
-    {Enum.reverse(values), old_acc}
-  end
-
-  defp json_object_push(key, value, {:attesto_json_container, depth, :object, object}) do
-    if Map.has_key?(object, key) do
-      throw(:duplicate_json_member)
-    end
-
-    {:attesto_json_container, depth, :object, Map.put(object, key, value)}
-  end
-
-  defp json_object_finish({:attesto_json_container, _depth, :object, object}, old_acc) do
-    {object, old_acc}
-  end
+  defp decode_json_map(bytes, opts), do: StrictJSON.decode(bytes, opts)
 
   defp decode_and_validate_jwt(jwt, opts) do
     # Keep an empty signature structurally parseable at the verification
@@ -810,9 +739,16 @@ defmodule Attesto.JWS do
   defp reserved_header_key?(key) when key in ["alg", "kid", "typ", :alg, :kid, :typ], do: true
   defp reserved_header_key?(_key), do: false
 
+  # No function-head guards on the signing entry points: a caller's type error
+  # must raise an ArgumentError, not a FunctionClauseError whose logged
+  # arguments include the private key.
   @doc false
   @spec sign_compact(String.t(), map(), map()) :: String.t()
-  def sign_compact(pem, header, claims) when is_binary(pem) and is_map(header) and is_map(claims) do
+  def sign_compact(pem, header, claims) do
+    if !(is_map(header) and is_map(claims)) do
+      raise ArgumentError, "sign_compact/3 expects a header map and a claims map"
+    end
+
     header |> Map.fetch!("alg") |> SigningAlg.validate!()
     pem |> Key.signing_jwk() |> sign_compact_with_jwk(header, claims)
   end
@@ -828,6 +764,10 @@ defmodule Attesto.JWS do
 
   def sign_compact_jwk(%JOSE.JWK{} = jwk, header, claims) when is_map(header) and is_map(claims) do
     sign_compact_with_jwk(jwk, header, claims)
+  end
+
+  def sign_compact_jwk(_jwk, _header, _claims) do
+    raise ArgumentError, "sign_compact_jwk/3 expects a JOSE.JWK struct, a header map, and a claims map"
   end
 
   defp sign_compact_with_jwk(jwk, header, claims) do

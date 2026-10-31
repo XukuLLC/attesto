@@ -150,10 +150,11 @@ defmodule Attesto.JwtVc do
     |> issue_from_opts()
   end
 
-  def issue(source, opts) do
+  # Catch-all that names the expected shapes only: the earlier version
+  # interpolated `inspect(source)`, the private-key PEM, into the message.
+  def issue(_source, _opts) do
     raise ArgumentError,
-          "issue/2 expects a keyword list, keystore module, or private PEM and keyword options; " <>
-            "got #{inspect(source)} and #{inspect(opts)}"
+          "JwtVc.issue/2 expects a keyword list, a keystore module, or a private-key PEM, and keyword options"
   end
 
   @doc """

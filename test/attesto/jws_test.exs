@@ -27,6 +27,36 @@ defmodule Attesto.JWSTest do
     ~s({"nested":) <> String.duplicate("[", depth) <> "0" <> String.duplicate("]", depth) <> "}"
   end
 
+  describe "sign_compact/3 argument errors" do
+    test "a caller type error raises without the PEM or JWK in any stack frame" do
+      pem = Factory.rsa_pem()
+      # Dynamic on purpose, so the type checker does not flag the deliberate misuse.
+      not_a_map = Process.get(:never_set, "not a map")
+
+      for call <- [
+            fn -> JWS.sign_compact(pem, not_a_map, %{}) end,
+            fn -> JWS.sign_compact(pem, %{"alg" => "RS256"}, not_a_map) end,
+            fn -> JWS.sign_compact_jwk(Key.signing_jwk(pem), %{"alg" => "RS256"}, not_a_map) end
+          ] do
+        {error, stack} =
+          try do
+            call.()
+          rescue
+            error in ArgumentError -> {error, __STACKTRACE__}
+          end
+
+        refute error.message =~ pem
+
+        refute Enum.any?(stack, fn {_module, _function, args, _location} ->
+                 is_list(args) and (pem in args or Enum.any?(args, &match?(%JOSE.JWK{}, &1)))
+               end)
+      end
+
+      charlist_pem = Process.get(:never_set, String.to_charlist(pem))
+      assert_raise ArgumentError, ~r/PEM-encoded key as a binary/, fn -> Key.jwk(charlist_pem) end
+    end
+  end
+
   describe "sign_current/3" do
     test "derives the correct alg and kid for EC and RSA keys" do
       for {pem, alg} <- [{Factory.ec_pem(), "ES256"}, {Factory.rsa_pem(), "RS256"}] do

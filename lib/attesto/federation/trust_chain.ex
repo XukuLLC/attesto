@@ -246,7 +246,7 @@ defmodule Attesto.Federation.TrustChain do
 
       {:ok, [_ | _] = values} ->
         if Enum.all?(values, &valid_domain_constraint?/1),
-          do: {:ok, Enum.map(values, &String.downcase/1)},
+          do: {:ok, Enum.map(values, &(&1 |> String.downcase() |> String.trim_trailing(".")))},
           else: {:error, :constraint_violation}
 
       {:ok, _invalid} ->
@@ -275,10 +275,13 @@ defmodule Attesto.Federation.TrustChain do
 
   defp valid_domain_label?(_label), do: false
 
+  # The host is compared case-folded and without a trailing dot, so
+  # `https://le.bad.test.` cannot step around an `excluded` entry for
+  # `.bad.test` (DNS treats the two names as one).
   defp entity_identifier_permitted?(entity_id, permitted, excluded) do
     case URI.parse(entity_id) do
       %URI{host: host} when is_binary(host) and host != "" ->
-        host = String.downcase(host)
+        host = host |> String.downcase() |> String.trim_trailing(".")
         permitted? = is_nil(permitted) or Enum.any?(permitted, &domain_constraint_matches?(host, &1))
         excluded? = not is_nil(excluded) and Enum.any?(excluded, &domain_constraint_matches?(host, &1))
         permitted? and not excluded?

@@ -689,9 +689,10 @@ defmodule Attesto.Token do
     bound = get_in(claims, ["cnf", "jkt"])
     presented = Keyword.get(opts, :dpop_jkt)
     cross = Keyword.get(opts, :mtls_cert_thumbprint)
+    allow_ambient_mtls? = Keyword.get(opts, :allow_ambient_mtls, false) == true
 
     cond do
-      cross != nil -> {:error, :mtls_cert_unexpected}
+      cross != nil and not allow_ambient_mtls? -> {:error, :mtls_cert_unexpected}
       presented == nil -> {:error, :dpop_proof_required}
       presented == bound -> :ok
       true -> sender_constraint_mismatch(:dpop, :dpop_binding_mismatch, claims)
@@ -720,9 +721,11 @@ defmodule Attesto.Token do
   end
 
   defp check_unbound(opts) do
+    allow_ambient_mtls? = Keyword.get(opts, :allow_ambient_mtls, false) == true
+
     cond do
       Keyword.get(opts, :dpop_jkt) != nil -> {:error, :dpop_proof_unexpected}
-      Keyword.get(opts, :mtls_cert_thumbprint) != nil -> {:error, :mtls_cert_unexpected}
+      Keyword.get(opts, :mtls_cert_thumbprint) != nil and not allow_ambient_mtls? -> {:error, :mtls_cert_unexpected}
       true -> :ok
     end
   end

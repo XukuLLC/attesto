@@ -105,6 +105,30 @@ defmodule Attesto.SessionStateTest do
 
   describe "mint_browser_state/2 + browser_state_valid?/3 (OP-owned, login-bound)" do
     @secret :crypto.strong_rand_bytes(32)
+
+    test "a caller type error raises without the secret in any stack frame" do
+      # Read through the process dictionary so the type checker sees a dynamic
+      # value rather than an atom passed where the spec says binary.
+      bad = Process.get(:never_set, :not_a_binary)
+
+      {error, stack} =
+        try do
+          SessionState.mint_browser_state(@secret, bad)
+        rescue
+          error in ArgumentError -> {error, __STACKTRACE__}
+        end
+
+      assert error.message =~ "login binding must be a binary"
+      refute error.message =~ inspect(@secret)
+      refute Enum.any?(stack, fn {_module, _function, args, _location} -> is_list(args) and @secret in args end)
+
+      assert SessionState.browser_state_valid?(@secret, bad, "login") == false
+
+      assert_raise ArgumentError, ~r/must be a binary/, fn ->
+        SessionState.browser_state_valid?(@secret, "a.b.c", bad)
+      end
+    end
+
     @binding "user-42\n1700000000\nsid-1"
 
     test "a freshly minted value verifies for its own secret and login binding" do

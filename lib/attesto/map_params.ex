@@ -36,11 +36,7 @@ defmodule Attesto.MapParams do
 
   @doc "Return a non-empty binary or raise an `ArgumentError`."
   @spec optional_string!(term(), term()) :: String.t()
-  def optional_string!(value, _key) when is_binary(value) and value != "", do: value
-
-  def optional_string!(value, key) do
-    raise ArgumentError, ":#{key} must be a non-empty string; got #{inspect(value)}"
-  end
+  def optional_string!(value, key), do: required_string!(value, key)
 
   @doc "Return a list of binaries or raise an `ArgumentError`."
   @spec string_list!(term(), term()) :: [String.t()]

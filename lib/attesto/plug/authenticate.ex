@@ -169,22 +169,28 @@ if Code.ensure_loaded?(Plug.Conn) do
         end
       else
         :missing ->
-          OAuthError.unauthorized(
-            conn,
-            :bearer,
-            "invalid_token",
-            error_opts(opts, description: "missing or malformed Authorization header")
-          )
+          missing_authorization(conn, opts)
+
+        :malformed ->
+          malformed_authorization(conn, opts)
 
         {:dpop_error, :use_dpop_nonce} ->
-          OAuthError.unauthorized(conn, :dpop, "use_dpop_nonce", error_opts(opts, dpop_nonce: issue_nonce(opts)))
+          dpop_nonce_challenge(conn, opts)
 
         {:dpop_error, reason} ->
           OAuthError.unauthorized(
             conn,
             :dpop,
             "invalid_dpop_proof",
-            error_opts(opts, description: safe_error_description(reason, "DPoP proof verification failed"))
+            error_opts(opts, maybe_description(opts, reason, "DPoP proof verification failed"))
+          )
+
+        {:certificate_error, reason} ->
+          OAuthError.unauthorized(
+            conn,
+            :bearer,
+            "invalid_token",
+            error_opts(opts, maybe_description(opts, reason, "token verification failed"))
           )
 
         {:token_error, reason} ->
@@ -192,7 +198,7 @@ if Code.ensure_loaded?(Plug.Conn) do
             conn,
             token_error_scheme(conn, reason),
             "invalid_token",
-            error_opts(opts, description: safe_error_description(reason, "token verification failed"))
+            error_opts(opts, maybe_description(opts, reason, "token verification failed"))
           )
 
         {:scope_error, required} ->
@@ -214,7 +220,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       case get_req_header(conn, "authorization") do
         [value] -> parse_authorization(value, opts)
         [] -> fallback_authorization(conn, opts)
-        _ -> :missing
+        _ -> :malformed
       end
     end
 
@@ -224,21 +230,21 @@ if Code.ensure_loaded?(Plug.Conn) do
           case String.downcase(scheme) do
             "bearer" -> bearer_header_authorization(token, opts)
             "dpop" -> authorization_token(:dpop, token)
-            _ -> :missing
+            _ -> :malformed
           end
 
         _ ->
-          :missing
+          :malformed
       end
     end
 
     defp bearer_header_authorization(token, opts) do
-      if bearer_method?(opts, :header), do: authorization_token(:bearer, token), else: :missing
+      if bearer_method?(opts, :header), do: authorization_token(:bearer, token), else: :malformed
     end
 
     defp authorization_token(scheme, token) do
       case String.trim(token) do
-        "" -> :missing
+        "" -> :malformed
         token -> {:ok, scheme, token}
       end
     end
@@ -394,23 +400,35 @@ if Code.ensure_loaded?(Plug.Conn) do
     # against a valid token and must not be replayable.
     defp verify_dpop_proof(conn, proof, token, opts) do
       if replay_protected?(opts) do
-        verify_opts =
-          [http_method: conn.method, http_uri: htu(conn, opts), access_token: token]
-          |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
-
-        case DPoP.verify_proof(proof, verify_opts) do
-          # Record the namespaced, opaque `replay_key`, not the raw `jti` - see
-          # `Attesto.DPoP`'s replay-identity note. `jkt` still flows out for the
-          # token `cnf.jkt` comparison; the raw `jti` flows out for replay
-          # telemetry only (correlation with the client's proof).
-          {:ok, %{jkt: jkt, replay_key: replay_key, jti: jti, replay_ttl: ttl}} ->
-            {:ok, jkt, replay_key, jti, ttl}
+        case htu(conn, opts) do
+          {:ok, http_uri} ->
+            verify_dpop_signature(conn, proof, token, http_uri, opts)
 
           {:error, reason} ->
             {:dpop_error, reason}
         end
       else
         {:dpop_error, :replay_check_unconfigured}
+      end
+    end
+
+    defp verify_dpop_signature(conn, proof, token, http_uri, opts) do
+      verify_opts =
+        [http_method: conn.method, http_uri: http_uri, access_token: token]
+        |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
+        |> put_opt(:now, Keyword.get(opts, :now))
+        |> put_opt(:max_age_seconds, Keyword.get(opts, :dpop_max_age_seconds))
+
+      case DPoP.verify_proof(proof, verify_opts) do
+        # Record the namespaced, opaque `replay_key`, not the raw `jti` - see
+        # `Attesto.DPoP`'s replay-identity note. `jkt` still flows out for the
+        # token `cnf.jkt` comparison; the raw `jti` flows out for replay
+        # telemetry only (correlation with the client's proof).
+        {:ok, %{jkt: jkt, replay_key: replay_key, jti: jti, replay_ttl: ttl}} ->
+          {:ok, jkt, replay_key, jti, ttl}
+
+        {:error, reason} ->
+          {:dpop_error, reason}
       end
     end
 
@@ -467,7 +485,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp verify_token(config, token, dpop_jkt, mtls_thumb, opts) do
       verify_opts =
         [dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb] ++
-          Keyword.take(opts, [:trusted_audiences])
+          Keyword.take(opts, [:trusted_audiences, :allow_ambient_mtls])
 
       opts
       |> Keyword.get(:verify)
@@ -542,6 +560,56 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp safe_error_description(_reason, fallback), do: fallback
 
+    defp maybe_description(opts, reason, fallback) do
+      if Keyword.get(opts, :include_error_description, true) do
+        [description: safe_error_description(reason, fallback)]
+      else
+        []
+      end
+    end
+
+    defp missing_authorization(conn, opts) do
+      if Keyword.get(opts, :missing_credentials_challenge) == :bare_bearer do
+        OAuthError.missing_credentials(conn, error_opts(opts, []))
+      else
+        OAuthError.unauthorized(
+          conn,
+          :bearer,
+          "invalid_token",
+          error_opts(opts, description: "missing or malformed Authorization header")
+        )
+      end
+    end
+
+    defp malformed_authorization(conn, opts) do
+      description =
+        if Keyword.get(opts, :missing_credentials_challenge) == :bare_bearer,
+          do: "malformed Authorization header",
+          else: "missing or malformed Authorization header"
+
+      OAuthError.unauthorized(
+        conn,
+        :bearer,
+        "invalid_token",
+        error_opts(opts, description: description)
+      )
+    end
+
+    defp dpop_nonce_challenge(conn, opts) do
+      case issue_nonce(opts) do
+        {:ok, nonce} ->
+          OAuthError.unauthorized(conn, :dpop, "use_dpop_nonce", error_opts(opts, dpop_nonce: nonce))
+
+        :error ->
+          OAuthError.unauthorized(
+            conn,
+            :dpop,
+            "invalid_dpop_proof",
+            error_opts(opts, maybe_description(opts, :invalid_nonce, "DPoP proof verification failed"))
+          )
+      end
+    end
+
     # ----- mTLS thumbprint -----
 
     defp cert_thumbprint(conn, opts) do
@@ -551,14 +619,16 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
+    defp thumbprint_of(nil), do: {:ok, nil}
+
     defp thumbprint_of(der) when is_binary(der) and byte_size(der) > 0 do
       case MTLS.compute_thumbprint(der) do
         {:ok, thumb} -> {:ok, thumb}
-        {:error, _} -> {:token_error, :invalid_certificate}
+        {:error, _} -> {:certificate_error, :invalid_certificate}
       end
     end
 
-    defp thumbprint_of(_), do: {:ok, nil}
+    defp thumbprint_of(_invalid), do: {:certificate_error, :invalid_certificate}
 
     # ----- helpers -----
 
@@ -582,11 +652,14 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp htu(conn, opts) do
       case Keyword.get(opts, :htu) do
         fun when is_function(fun, 1) ->
-          fun.(conn)
+          case fun.(conn) do
+            value when is_binary(value) and value != "" -> {:ok, value}
+            _invalid -> {:error, :invalid_http_uri}
+          end
 
         _ ->
           scheme = Atom.to_string(conn.scheme)
-          scheme <> "://" <> uri_host(conn.host) <> port_suffix(scheme, conn.port) <> conn.request_path
+          {:ok, scheme <> "://" <> uri_host(conn.host) <> port_suffix(scheme, conn.port) <> conn.request_path}
       end
     end
 
@@ -599,8 +672,14 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp issue_nonce(opts) do
       case Keyword.get(opts, :nonce_issue) do
-        fun when is_function(fun, 0) -> fun.()
-        _ -> nil
+        fun when is_function(fun, 0) ->
+          case fun.() do
+            nonce when is_binary(nonce) and nonce != "" -> {:ok, nonce}
+            _invalid -> :error
+          end
+
+        _ ->
+          :error
       end
     end
 

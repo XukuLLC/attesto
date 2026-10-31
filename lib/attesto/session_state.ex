@@ -177,8 +177,9 @@ defmodule Attesto.SessionState do
   `browser_state_valid?/3` enforces the same floor.
   """
   @spec mint_browser_state(binary(), binary()) :: String.t()
-  def mint_browser_state(secret, login_binding) when is_binary(secret) and is_binary(login_binding) do
+  def mint_browser_state(secret, login_binding) do
     validate_secret!(secret)
+    validate_login_binding!(login_binding)
     payload = generate_browser_state() <> "." <> login_tag(secret, login_binding)
     payload <> "." <> mac(secret, payload)
   end
@@ -207,11 +208,13 @@ defmodule Attesto.SessionState do
   `mint_browser_state/2` enforces (RFC 2104 §3).
   """
   @spec browser_state_valid?(binary(), binary(), binary()) :: boolean()
-  def browser_state_valid?(secret, value, login_binding)
-      when is_binary(secret) and is_binary(value) and is_binary(login_binding) do
+  def browser_state_valid?(secret, value, login_binding) do
     validate_secret!(secret)
+    validate_login_binding!(login_binding)
 
-    case String.split(value, ".", parts: 3) do
+    segments = if is_binary(value), do: String.split(value, ".", parts: 3), else: []
+
+    case segments do
       [random, login_tag, mac] ->
         # Compute both comparisons before combining, so the result does not
         # depend on which one failed first. (The `mac` check already gates on a
@@ -248,13 +251,29 @@ defmodule Attesto.SessionState do
   # key-length policy: the secret is OP configuration, not attacker input, so a
   # key below the floor is a misconfiguration to surface loudly, not tolerate.
   @min_secret_bytes 32
-  defp validate_secret!(secret) do
+  #
+  # Argument types are checked here, inside the function bodies, rather than
+  # in the public function heads: a caller's type error must raise an
+  # ArgumentError that names the bad argument, not a FunctionClauseError whose
+  # logged arguments include the secret (the class behind Plug.Crypto
+  # CVE-2026-105963).
+  defp validate_secret!(secret) when is_binary(secret) do
     if byte_size(secret) < @min_secret_bytes do
       raise ArgumentError,
             "OP browser-state secret must be at least #{@min_secret_bytes} bytes " <>
               "(RFC 2104: an HMAC-SHA256 key shorter than the 32-byte output is weak); " <>
               "got #{byte_size(secret)} bytes"
     end
+  end
+
+  defp validate_secret!(_secret) do
+    raise ArgumentError, "OP browser-state secret must be a binary"
+  end
+
+  defp validate_login_binding!(login_binding) when is_binary(login_binding), do: :ok
+
+  defp validate_login_binding!(login_binding) do
+    raise ArgumentError, "login binding must be a binary; got #{inspect(login_binding)}"
   end
 
   # A default port is omitted from a browser origin; any other port is kept.

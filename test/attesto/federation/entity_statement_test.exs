@@ -215,6 +215,39 @@ defmodule Attesto.Federation.EntityStatementTest do
              EntityStatement.verify(invalid, jwks(issuer_pem), now: @now)
   end
 
+  test "rejects an Entity Identifier that carries userinfo" do
+    issuer_pem = Factory.ec_pem()
+    subject_pem = Factory.ec_pem()
+
+    valid =
+      EntityStatement.build(
+        issuer_pem,
+        %{"iss" => @superior, "sub" => @entity, "jwks" => jwks(subject_pem)},
+        now: @now
+      )
+
+    {:ok, claims} = JWS.peek_json(valid, :payload)
+
+    # `https://entity.example:secret@evil.example` names evil.example to a
+    # fetcher and entity.example to a reader, and would send `secret` out as a
+    # Basic credential (OpenID Federation 1.0 §1.2 permits no userinfo).
+    for spoofed <- [
+          "https://entity.example:secret@evil.example",
+          "https://entity.example@evil.example",
+          "https://entity.example/path#fragment"
+        ] do
+      invalid =
+        JWS.sign_compact(
+          issuer_pem,
+          %{"alg" => "ES256", "kid" => Key.kid(issuer_pem), "typ" => "entity-statement+jwt"},
+          Map.put(claims, "sub", spoofed)
+        )
+
+      assert {:error, :invalid_entity_statement} =
+               EntityStatement.verify(invalid, jwks(issuer_pem), now: @now)
+    end
+  end
+
   test "rejects oversized raw RSA parameters before algorithm inference" do
     signer = Factory.ec_pem()
     subject_pem = Factory.ec_pem()

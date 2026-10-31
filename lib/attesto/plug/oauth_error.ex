@@ -32,6 +32,23 @@ if Code.ensure_loaded?(Plug.Conn) do
     @type scheme :: :bearer | :dpop
 
     @doc """
+    Respond 401 with a bare `Bearer` challenge (and optional RFC 9728
+    `resource_metadata` auth-param) and an empty JSON object body `{}` when a
+    request omits credentials (RFC 6750 §3.1). Honors `:send_error`,
+    `:www_authenticate`, and `:no_store`. Halts.
+    """
+    @spec missing_credentials(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+    def missing_credentials(conn, opts \\ []) do
+      params = resource_metadata_param(conn, opts)
+      challenge_str = if params == [], do: "Bearer", else: challenge(:bearer, params)
+
+      conn
+      |> put_no_store(opts)
+      |> put_www_authenticate(challenge_str, opts)
+      |> send_error_body(401, %{}, opts)
+    end
+
+    @doc """
     Respond 401 with a `WWW-Authenticate` challenge for `scheme` carrying
     `error` (an OAuth error code string). Options: `:description`
     (`error_description`), `:dpop_nonce` (sets the `DPoP-Nonce` header, for
@@ -203,6 +220,10 @@ if Code.ensure_loaded?(Plug.Conn) do
         %{"error" => error}
         |> maybe_put("error_description", Keyword.get(opts, :description))
 
+      send_error_body(conn, status, body, opts)
+    end
+
+    defp send_error_body(conn, status, body, opts) do
       case Keyword.get(opts, :send_error) do
         fun when is_function(fun, 3) ->
           fun.(conn, status, body)
@@ -273,6 +294,7 @@ else
     @dep_error "Attesto.Plug.OAuthError requires the optional :plug dependency. " <>
                  "Add {:plug, \"~> 1.16\"} to your deps."
 
+    def missing_credentials(_conn, _opts \\ []), do: raise(@dep_error)
     def unauthorized(_conn, _scheme, _error, _opts \\ []), do: raise(@dep_error)
 
     def insufficient_user_authentication(_conn, _scheme, _challenge, _opts \\ []), do: raise(@dep_error)

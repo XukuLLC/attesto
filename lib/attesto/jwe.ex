@@ -229,22 +229,10 @@ defmodule Attesto.JWE do
   end
 
   defp strict_json_map(bytes) do
-    decoders = [
-      object_start: fn _acc -> %{} end,
-      object_push: fn key, value, object ->
-        if Map.has_key?(object, key), do: throw(:duplicate_json_member), else: Map.put(object, key, value)
-      end,
-      object_finish: fn object, acc -> {object, acc} end
-    ]
-
-    case JSON.decode(bytes, nil, decoders) do
-      {%{} = header, nil, ""} -> {:ok, header}
-      _other -> {:error, :invalid_header}
+    case Attesto.StrictJSON.decode(bytes) do
+      {:ok, header} -> {:ok, header}
+      {:error, :invalid_json} -> {:error, :invalid_header}
     end
-  rescue
-    _error -> {:error, :invalid_header}
-  catch
-    :duplicate_json_member -> {:error, :invalid_header}
   end
 
   defp validate_ephemeral(%{"epk" => %{} = epk}) do
