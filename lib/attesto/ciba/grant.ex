@@ -32,17 +32,10 @@ defmodule Attesto.CIBA.Grant do
   @doc false
   @spec from_record(map()) :: t()
   def from_record(record) when is_map(record) do
-    data = Map.get(record, :data, %{})
-
-    %__MODULE__{
-      acr: Map.get(record, :acr),
-      auth_time: Map.get(record, :auth_time),
-      claims: Map.get(record, :granted_claims) || %{},
-      client_id: Map.get(data, :client_id),
-      dpop_jkt: Map.get(data, :dpop_jkt),
-      resource: Map.get(data, :resource, []),
-      scope: Map.get(record, :granted_scope) || Map.get(data, :scope, []),
-      subject: Map.get(record, :subject)
-    }
+    struct!(
+      __MODULE__,
+      [acr: Map.get(record, :acr), auth_time: Map.get(record, :auth_time)] ++
+        Attesto.PollingGrant.grant_fields(record)
+    )
   end
 end

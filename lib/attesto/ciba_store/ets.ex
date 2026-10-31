@@ -33,6 +33,8 @@ defmodule Attesto.CIBAStore.ETS do
     reset_doc: false,
     reset_spec?: false
 
+  alias Attesto.PollingGrant.ETSTable
+
   @table __MODULE__
 
   @impl Attesto.CIBAStore
@@ -41,12 +43,7 @@ defmodule Attesto.CIBAStore.ETS do
   end
 
   @impl Attesto.CIBAStore
-  def lookup(hash) when is_binary(hash) do
-    case :ets.lookup(@table, hash) do
-      [{^hash, _expires_at, record}] -> {:ok, record}
-      [] -> :error
-    end
-  end
+  def lookup(hash) when is_binary(hash), do: ETSTable.lookup(@table, hash)
 
   @impl Attesto.CIBAStore
   def approve(hash, approval, opts) when is_binary(hash) and is_map(approval) and is_map(opts) do
@@ -80,73 +77,23 @@ defmodule Attesto.CIBAStore.ETS do
     now = Map.get(opts, :now, System.system_time(:second))
 
     reply =
-      case :ets.lookup(@table, hash) do
-        # Guard the decision on BOTH pendingness and unexpiry: a decision on an
-        # expired request must not land (its poll outcome is expired_token).
-        [{^hash, expires_at, %{status: :pending} = record}] when expires_at > now ->
-          updated =
-            record
-            |> Map.put(:status, new_status)
-            |> Map.merge(approval_fields(new_status, approval))
-
-          :ets.insert(@table, {hash, record.expires_at, updated})
-          {:ok, updated}
-
-        [{^hash, _expires_at, %{status: :pending}}] ->
-          {:error, :expired}
-
-        [{^hash, _expires_at, _record}] ->
-          {:error, :already_decided}
-
-        [] ->
-          {:error, :not_found}
+      case ETSTable.lookup(@table, hash) do
+        {:ok, record} -> ETSTable.decide(@table, hash, record, now, new_status, approval_fields(new_status, approval))
+        :error -> {:error, :not_found}
       end
 
     {:reply, reply, state}
   end
 
   def handle_call({:poll, hash, opts}, _from, state) do
-    reply =
-      case :ets.lookup(@table, hash) do
-        [{^hash, _expires_at, record}] ->
-          if poll_allowed?(record, opts) do
-            updated = Map.put(record, :last_polled_at, opts.now)
-            :ets.insert(@table, {hash, record.expires_at, updated})
-            {:ok, updated}
-          else
-            {:error, :slow_down}
-          end
-
-        [] ->
-          :error
-      end
-
-    {:reply, reply, state}
+    {:reply, ETSTable.poll(@table, hash, opts.now, &poll_interval/1), state}
   end
 
   def handle_call({:consume, hash, opts}, _from, state) do
-    now = Map.get(opts, :now, System.system_time(:second))
-
-    reply =
-      case :ets.lookup(@table, hash) do
-        # Guard the consume on BOTH approval and unexpiry, so a request that
-        # expires between the core's poll-time check and this transition
-        # cannot mint.
-        [{^hash, expires_at, %{status: :approved} = record}] when expires_at > now ->
-          consumed = Map.put(record, :status, :consumed)
-          :ets.insert(@table, {hash, record.expires_at, consumed})
-          {:ok, consumed}
-
-        _ ->
-          :error
-      end
-
-    {:reply, reply, state}
+    {:reply, ETSTable.consume(@table, hash, Map.get(opts, :now, System.system_time(:second))), state}
   end
 
-  defp delete_expired(now) do
-    :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [true]}])
-  end
+  defp delete_expired(now), do: :ets.select_delete(@table, ETSTable.expired_match_spec(now, :key))
 
   # ----- helpers -----
 
@@ -162,11 +109,8 @@ defmodule Attesto.CIBAStore.ETS do
 
   defp approval_fields(_status, _approval), do: %{}
 
-  # CIBA Core §7.3: enforce the record's minimum token-request interval. The
-  # first poll (last_polled_at nil) is always allowed; interval 0 disables
-  # enforcement.
-  defp poll_allowed?(%{status: status}, _opts) when status != :pending, do: true
-  defp poll_allowed?(%{last_polled_at: nil}, _opts), do: true
-  defp poll_allowed?(%{interval: 0}, _opts), do: true
-  defp poll_allowed?(%{interval: interval, last_polled_at: last}, %{now: now}), do: last <= now - interval
+  # CIBA Core §7.3: the minimum token-request interval is the record's own
+  # (the value the client was told at issue); interval 0 disables enforcement.
+  defp poll_interval(%{interval: 0}), do: :disabled
+  defp poll_interval(%{interval: interval}), do: interval
 end

@@ -476,4 +476,39 @@ defmodule Attesto.SdJwtTest do
                )
     end
   end
+
+  describe "decode_disclosures/2" do
+    test "indexes valid object and array Disclosures by digest" do
+      object = SdJwt.object_disclosure("salt-1", "given_name", "Jane")
+      array = SdJwt.array_disclosure("salt-2", "DE")
+
+      assert {:ok, indexed} = SdJwt.decode_disclosures([object, array])
+
+      assert indexed == %{
+               SdJwt.digest(object) => ["salt-1", "given_name", "Jane"],
+               SdJwt.digest(array) => ["salt-2", "DE"]
+             }
+
+      assert {:ok, %{} = by_sha384} = SdJwt.decode_disclosures([object], "sha-384")
+      assert Map.keys(by_sha384) == [SdJwt.digest(object, "sha-384")]
+    end
+
+    test "rejects duplicates, reserved names, malformed shapes, and unsupported algorithms" do
+      object = SdJwt.object_disclosure("salt-1", "given_name", "Jane")
+
+      assert {:error, :duplicate_digest} = SdJwt.decode_disclosures([object, object])
+
+      for reserved <- ["_sd", "_sd_alg", "..."] do
+        assert {:error, :reserved_claim_name} =
+                 SdJwt.decode_disclosures([SdJwt.object_disclosure("salt", reserved, "x")])
+      end
+
+      for malformed <- [b64(~s(["salt"])), b64(~s([1, "name", "v"])), b64("not json"), "not base64!"] do
+        assert {:error, :invalid_disclosure} = SdJwt.decode_disclosures([malformed])
+      end
+
+      assert {:error, :invalid_disclosure} = SdJwt.decode_disclosures([Process.get(:never_set, 42)])
+      assert {:error, :unsupported_sd_alg} = SdJwt.decode_disclosures([object], "md5")
+    end
+  end
 end

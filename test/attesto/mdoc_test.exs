@@ -454,6 +454,46 @@ defmodule Attesto.MdocTest do
                )
     end
 
+    test "session_transcript/1 and device_authentication_bytes/3 match an independent construction", ctx do
+      {_verifier_pem, verifier_jwk} = keypair()
+      {:ok, encoded_thumbprint} = Thumbprint.of_jwk(verifier_jwk)
+      jwk_thumbprint = encoded_thumbprint |> Base.url_decode64!(padding: false) |> bytes()
+      device_namespaces = tagged(%{@mdl_namespace => %{"age_over_21" => true}})
+
+      assert {:ok, plain} = Mdoc.session_transcript(context(ctx))
+      assert plain == session_transcript(ctx.client_id, ctx.nonce, ctx.response_uri, nil)
+
+      assert {:ok, encrypted} = Mdoc.session_transcript(context(ctx, response_encryption_jwk: verifier_jwk))
+      assert encrypted == session_transcript(ctx.client_id, ctx.nonce, ctx.response_uri, jwk_thumbprint)
+
+      assert Mdoc.device_authentication_bytes(encrypted, @doc_type, device_namespaces) ==
+               device_authentication_bytes(encrypted, @doc_type, device_namespaces)
+    end
+
+    test "a response signed over the public session transcript verifies", ctx do
+      {:ok, transcript} = Mdoc.session_transcript(context(ctx))
+      device_namespaces = tagged(%{})
+      signed = Mdoc.device_authentication_bytes(transcript, @doc_type, device_namespaces)
+
+      device_response =
+        build_device_response(ctx, device_auth: {"deviceSignature", sign_device_auth(ctx.holder_pem, signed)})
+
+      assert {:ok, [_verified]} =
+               Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now)
+    end
+
+    test "session_transcript/1 rejects a missing value and an unusable encryption key", ctx do
+      for key <- [:client_id, :nonce, :response_uri] do
+        assert {:error, :invalid_context} = Mdoc.session_transcript(Keyword.delete(context(ctx), key))
+        assert {:error, :invalid_context} = Mdoc.session_transcript(Keyword.put(context(ctx), key, ""))
+      end
+
+      assert {:error, :invalid_context} = Mdoc.session_transcript(Process.get(:never_set, %{}))
+
+      assert {:error, :invalid_key} =
+               Mdoc.session_transcript(context(ctx, response_encryption_jwk: %{"kty" => "EC"}))
+    end
+
     test "missing required context values are rejected", ctx do
       device_response = build_device_response(ctx)
       incomplete_context = Keyword.delete(context(ctx), :nonce)

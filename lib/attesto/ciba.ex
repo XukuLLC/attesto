@@ -46,7 +46,7 @@ defmodule Attesto.CIBA do
   alias Attesto.CIBA.Grant
   alias Attesto.CIBA.Record, as: CIBARecord
   alias Attesto.CIBA.Request
-  alias Attesto.{Claims, NumericDate, Options, Secret, Store}
+  alias Attesto.{Claims, NumericDate, Options, PollingGrant, Secret, Store}
 
   @grant_type "urn:openid:params:grant-type:ciba"
 
@@ -72,7 +72,6 @@ defmodule Attesto.CIBA do
   # whole-second clock tolerance as signed-token validation; timestamps farther
   # ahead still indicate impossible persisted state or a badly skewed deploy.
   @decision_clock_skew_seconds NumericDate.default_clock_skew_seconds()
-  @decision_errors [:not_found, :already_decided, :expired]
 
   @typedoc "What `issue/4` hands back: the §7.3 authentication request acknowledgement."
   @type issued :: %{
@@ -252,86 +251,36 @@ defmodule Attesto.CIBA do
          {:ok, record} <- read_record(store, hash),
          :ok <- check_not_expired(record, opts),
          :ok <- check_decision_time(record, opts),
-         :ok <- check_client(record, params),
-         :ok <- check_dpop(record, params),
+         :ok <- PollingGrant.check_client(record, params),
+         :ok <- PollingGrant.check_dpop(record, params),
          :ok <- check_not_push(record) do
-      resolve_status(store, hash, record, opts)
+      PollingGrant.resolve(record, redemption(store, hash, now))
     end
+  end
+
+  # The §11 status outcome runs only after expiry, the binding checks and the
+  # push-mode guard, so an unauthorized caller can neither burn the single-use
+  # auth_req_id nor touch another client's throttle state. The poll transition
+  # predicate pins the polled record to the trusted one, so its bindings need
+  # no second check.
+  defp redemption(store, hash, now) do
+    %{
+      store: store,
+      key: hash,
+      now: now,
+      poll_args: %{now: now},
+      poll_transition?: &CIBARecord.poll_transition?(&1, &2, hash, now),
+      consume_transition?: &CIBARecord.consume_transition?(&1, &2, hash),
+      after_poll: fn _polled -> :ok end,
+      to_grant: &Grant.from_record/1,
+      contract_error: &ciba_store_contract_error/1
+    }
   end
 
   defp read_record(store, hash) do
     case lookup_record(store, hash) do
       {:ok, record} -> {:ok, record}
       :error -> {:error, :invalid_grant}
-    end
-  end
-
-  # Apply the §11 status outcome to a record that has already passed expiry, the
-  # binding checks, and the push-mode guard. Only a genuinely-pending request
-  # reaches `poll/2`, so the poll-interval throttle (which mutates
-  # `last_polled_at` and can yield `slow_down`) can never fire for an expired,
-  # denied, approved, consumed, wrong-client, wrong-DPoP, or push-mode request.
-  # An approved request goes to the atomic `consume/2`; a wrong-client/DPoP
-  # request never gets here, so the single-use auth_req_id is never burned by an
-  # unauthorized caller.
-  defp resolve_status(store, hash, record, opts) do
-    case record.status do
-      :approved -> consume(store, hash, record, opts)
-      :denied -> {:error, :access_denied}
-      :pending -> throttle_pending(store, hash, record, opts)
-      :consumed -> {:error, :invalid_grant}
-    end
-  end
-
-  # The request is still pending: NOW apply the §7.3 poll-interval throttle.
-  # A poll accepted at the interval is `authorization_pending`; one inside the
-  # interval is its `slow_down` variant. `poll/2` re-reads inside the store's
-  # serialized transition, so a concurrent approval is not clobbered (its
-  # status is preserved; terminal status is resolved by this same call).
-  defp throttle_pending(store, hash, trusted_record, opts) do
-    now = NumericDate.non_negative_now!(opts, default: :system)
-
-    case store.poll(hash, %{now: now}) do
-      {:ok, polled_record} ->
-        if CIBARecord.poll_transition?(trusted_record, polled_record, hash, now) do
-          resolve_polled_status(store, hash, polled_record, opts)
-        else
-          ciba_store_contract_error(:poll)
-        end
-
-      {:error, :slow_down} ->
-        {:error, :slow_down}
-
-      # Vanished between the read and the poll (e.g. swept): treat as unknown.
-      :error ->
-        {:error, :invalid_grant}
-
-      _unexpected ->
-        ciba_store_contract_error(:poll)
-    end
-  end
-
-  defp resolve_polled_status(_store, _hash, %{status: :pending}, _opts), do: {:error, :authorization_pending}
-  defp resolve_polled_status(store, hash, %{status: :approved} = record, opts), do: consume(store, hash, record, opts)
-  defp resolve_polled_status(_store, _hash, %{status: :denied}, _opts), do: {:error, :access_denied}
-  defp resolve_polled_status(_store, _hash, %{status: :consumed}, _opts), do: {:error, :invalid_grant}
-
-  defp consume(store, hash, trusted_record, opts) do
-    case store.consume(hash, %{now: Keyword.fetch!(opts, :now)}) do
-      {:ok, consumed_record} ->
-        if CIBARecord.consume_transition?(trusted_record, consumed_record, hash) do
-          {:ok, Grant.from_record(consumed_record)}
-        else
-          ciba_store_contract_error(:consume)
-        end
-
-      # Lost the consume race (a concurrent token request consumed it), or the
-      # status/expiry moved out from under us between poll and consume.
-      :error ->
-        {:error, :invalid_grant}
-
-      _unexpected ->
-        ciba_store_contract_error(:consume)
     end
   end
 
@@ -374,24 +323,18 @@ defmodule Attesto.CIBA do
 
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id),
          :ok <- require_subject(approval),
-         {:ok, trusted_record} <- check_subject_matches(store, hash, approval) do
-      with {:ok, fields} <- approval_fields(approval, trusted_record, now) do
-        store.approve(hash, fields, %{now: now})
-        |> validate_approve_result(trusted_record, fields, hash)
-      end
+         {:ok, trusted_record} <- check_subject_matches(store, hash, approval),
+         {:ok, fields} <- approval_fields(approval, trusted_record, now) do
+      hash
+      |> store.approve(fields, %{now: now})
+      |> PollingGrant.decision_result(
+        &CIBARecord.approve_transition?(trusted_record, &1, fields, hash),
+        &{:ok, decision_view(&1)},
+        &ciba_store_contract_error/1,
+        :approve
+      )
     end
   end
-
-  defp validate_approve_result({:ok, record}, trusted_record, fields, hash) do
-    if CIBARecord.approve_transition?(trusted_record, record, fields, hash),
-      do: {:ok, decision_view(record)},
-      else: ciba_store_contract_error(:approve)
-  end
-
-  defp validate_approve_result({:error, reason} = error, _trusted_record, _fields, _hash)
-       when reason in @decision_errors, do: error
-
-  defp validate_approve_result(_unexpected, _trusted_record, _fields, _hash), do: ciba_store_contract_error(:approve)
 
   @doc """
   Record a denial (the user refused, failed authentication, or the OP denied)
@@ -408,20 +351,16 @@ defmodule Attesto.CIBA do
 
     with {:ok, hash} <- presented_hash(auth_req_id, :invalid_auth_req_id),
          {:ok, trusted_record} <- decision_record(store, hash) do
-      store.deny(hash, %{now: now})
-      |> validate_deny_result(trusted_record, hash)
+      hash
+      |> store.deny(%{now: now})
+      |> PollingGrant.decision_result(
+        &CIBARecord.deny_transition?(trusted_record, &1, hash),
+        &{:ok, decision_view(&1)},
+        &ciba_store_contract_error/1,
+        :deny
+      )
     end
   end
-
-  defp validate_deny_result({:ok, %{status: :denied} = record}, trusted_record, hash) do
-    if CIBARecord.deny_transition?(trusted_record, record, hash),
-      do: {:ok, decision_view(record)},
-      else: ciba_store_contract_error(:deny)
-  end
-
-  defp validate_deny_result({:error, reason} = error, _trusted_record, _hash) when reason in @decision_errors, do: error
-
-  defp validate_deny_result(_unexpected, _trusted_record, _hash), do: ciba_store_contract_error(:deny)
 
   @doc """
   Non-consuming lookup of an authentication request, for the
@@ -594,13 +533,6 @@ defmodule Attesto.CIBA do
 
   defp check_decision_time(_record, _opts), do: :ok
 
-  # §11: an auth_req_id "issued to another Client" is invalid_grant.
-  defp check_client(%{data: %{client_id: bound}}, %{client_id: presented}) do
-    if is_binary(bound) and bound == presented, do: :ok, else: {:error, :invalid_grant}
-  end
-
-  defp check_client(_record, _params), do: {:error, :invalid_grant}
-
   # CIBA Core §11: a push-mode client MUST NOT redeem the CIBA grant at the
   # token endpoint - the token is delivered over the host's push transport - so
   # a push-mode record fails closed with `unauthorized_client`. Checked after
@@ -609,15 +541,6 @@ defmodule Attesto.CIBA do
   # consumes the request nor mutates throttle state.
   defp check_not_push(%{data: %{delivery_mode: :push}}), do: {:error, :unauthorized_client}
   defp check_not_push(_record), do: :ok
-
-  # RFC 9449 §10 holder-of-key: a request pre-bound to a DPoP key may be
-  # redeemed only with a matching proof. An unbound request accepts any (or
-  # no) presented key, which the caller may use to mint a DPoP-bound token.
-  defp check_dpop(%{data: %{dpop_jkt: bound}}, params) when is_binary(bound) and bound != "" do
-    if Map.get(params, :dpop_jkt) == bound, do: :ok, else: {:error, :invalid_grant}
-  end
-
-  defp check_dpop(_record, _params), do: :ok
 
   defp decision_view(record) do
     data = Map.get(record, :data, %{})

@@ -28,16 +28,5 @@ defmodule Attesto.DeviceCode.Grant do
 
   @doc false
   @spec from_record(map()) :: t()
-  def from_record(record) when is_map(record) do
-    data = Map.get(record, :data, %{})
-
-    %__MODULE__{
-      client_id: Map.get(data, :client_id),
-      subject: Map.get(record, :subject),
-      scope: Map.get(record, :granted_scope) || Map.get(data, :scope, []),
-      resource: Map.get(data, :resource, []),
-      dpop_jkt: Map.get(data, :dpop_jkt),
-      claims: Map.get(record, :granted_claims, %{})
-    }
-  end
+  def from_record(record) when is_map(record), do: struct!(__MODULE__, Attesto.PollingGrant.grant_fields(record))
 end

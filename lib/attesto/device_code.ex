@@ -27,7 +27,7 @@ defmodule Attesto.DeviceCode do
   same fail-closed discipline `Attesto.ResourceIndicator.validate/1` applies.
   """
 
-  alias Attesto.{Claims, NumericDate, Options, Record, Scope, Secret, Store}
+  alias Attesto.{Claims, NumericDate, Options, PollingGrant, Record, Scope, Secret, Store}
   alias Attesto.DeviceCode.Grant
 
   # RFC 8628 §6.1: a base-20 alphabet with no vowels (no accidental words) and no
@@ -39,7 +39,6 @@ defmodule Attesto.DeviceCode do
   @default_ttl_seconds 600
   @default_interval_seconds 5
   @statuses [:pending, :approved, :denied, :consumed]
-  @decision_errors [:not_found, :already_decided, :expired]
   @canonical_data_keys [:client_id, :dpop_jkt, :resource, :scope]
   @consume_bound_fields [
     :device_code_hash,
@@ -169,10 +168,28 @@ defmodule Attesto.DeviceCode do
 
     with {:ok, record} <- read_record(store, hash),
          :ok <- check_not_expired(record, now),
-         :ok <- check_client(record, params),
-         :ok <- check_dpop(record, params) do
-      resolve_status(store, hash, record, params, %{now: now, interval: interval})
+         :ok <- PollingGrant.check_client(record, params),
+         :ok <- PollingGrant.check_dpop(record, params) do
+      PollingGrant.resolve(record, %{
+        store: store,
+        key: hash,
+        now: now,
+        poll_args: %{now: now, interval: interval},
+        poll_transition?: &valid_poll_transition?(&1, &2, hash, now),
+        consume_transition?: &valid_consume_transition?(&1, &2, hash),
+        after_poll: &check_polled(&1, now, params),
+        to_grant: &Grant.from_record/1,
+        contract_error: &device_store_contract_error/1
+      })
     end
+  end
+
+  # The polled record is re-checked for expiry and bindings before its status
+  # is acted on.
+  defp check_polled(record, now, params) do
+    with :ok <- check_not_expired(record, now),
+         :ok <- PollingGrant.check_client(record, params),
+         do: PollingGrant.check_dpop(record, params)
   end
 
   defp read_record(store, hash) do
@@ -185,60 +202,6 @@ defmodule Attesto.DeviceCode do
 
       _unexpected ->
         device_store_contract_error(:get)
-    end
-  end
-
-  defp resolve_status(store, hash, %{status: :pending} = record, params, poll_opts) do
-    store.poll(hash, poll_opts)
-    |> handle_poll_result(store, hash, record, params, poll_opts)
-  end
-
-  defp resolve_status(store, hash, %{status: :approved} = record, _params, poll_opts),
-    do: consume(store, hash, record, poll_opts.now)
-
-  defp resolve_status(_store, _hash, %{status: :denied}, _params, _poll_opts), do: {:error, :access_denied}
-  defp resolve_status(_store, _hash, %{status: :consumed}, _params, _poll_opts), do: {:error, :invalid_grant}
-
-  defp handle_poll_result({:ok, record}, store, hash, trusted_record, params, poll_opts) do
-    if valid_poll_transition?(trusted_record, record, hash, poll_opts.now) do
-      with :ok <- check_not_expired(record, poll_opts.now),
-           :ok <- check_client(record, params),
-           :ok <- check_dpop(record, params) do
-        resolve_polled_status(store, hash, record, poll_opts.now)
-      end
-    else
-      device_store_contract_error(:poll)
-    end
-  end
-
-  defp handle_poll_result({:error, :slow_down}, _store, _hash, _trusted, _params, _poll_opts), do: {:error, :slow_down}
-
-  defp handle_poll_result(:error, _store, _hash, _trusted, _params, _poll_opts), do: {:error, :invalid_grant}
-
-  defp handle_poll_result(_unexpected, _store, _hash, _trusted, _params, _poll_opts),
-    do: device_store_contract_error(:poll)
-
-  defp resolve_polled_status(_store, _hash, %{status: :pending}, _now), do: {:error, :authorization_pending}
-  defp resolve_polled_status(store, hash, %{status: :approved} = record, now), do: consume(store, hash, record, now)
-  defp resolve_polled_status(_store, _hash, %{status: :denied}, _now), do: {:error, :access_denied}
-  defp resolve_polled_status(_store, _hash, %{status: :consumed}, _now), do: {:error, :invalid_grant}
-
-  defp consume(store, hash, trusted_record, now) do
-    case store.consume(hash, %{now: now}) do
-      {:ok, consumed_record} ->
-        if valid_consume_transition?(trusted_record, consumed_record, hash) do
-          {:ok, Grant.from_record(consumed_record)}
-        else
-          device_store_contract_error(:consume)
-        end
-
-      # Lost the consume race (a concurrent poll consumed it), or the status
-      # moved out from under us between poll and consume.
-      :error ->
-        {:error, :invalid_grant}
-
-      _unexpected ->
-        device_store_contract_error(:consume)
     end
   end
 
@@ -273,8 +236,14 @@ defmodule Attesto.DeviceCode do
          {:ok, trusted_record} <- read_user_record(store, normalized),
          :ok <- decision_available?(trusted_record, now),
          :ok <- require_scope_subset(trusted_record, fields.granted_scope) do
-      store.approve(normalized, fields, %{now: now})
-      |> validate_approve_result(trusted_record, fields, normalized)
+      normalized
+      |> store.approve(fields, %{now: now})
+      |> PollingGrant.decision_result(
+        &valid_approve_transition?(trusted_record, &1, fields, normalized),
+        fn _record -> :ok end,
+        &device_store_contract_error/1,
+        :approve
+      )
     end
   end
 
@@ -290,8 +259,14 @@ defmodule Attesto.DeviceCode do
     with {:ok, normalized} <- normalize_user_code(user_code, opts),
          {:ok, trusted_record} <- read_user_record(store, normalized),
          :ok <- decision_available?(trusted_record, now) do
-      store.deny(normalized, %{now: now})
-      |> validate_deny_result(trusted_record, normalized)
+      normalized
+      |> store.deny(%{now: now})
+      |> PollingGrant.decision_result(
+        &valid_deny_transition?(trusted_record, &1, normalized),
+        fn _record -> :ok end,
+        &device_store_contract_error/1,
+        :deny
+      )
     end
   end
 
@@ -467,22 +442,6 @@ defmodule Attesto.DeviceCode do
     if expires_at > now, do: :ok, else: {:error, :expired_token}
   end
 
-  # RFC 8628 §3.4: the polling client must be the one the code was issued to.
-  defp check_client(%{data: %{client_id: bound}}, %{client_id: presented}) do
-    if is_binary(bound) and bound == presented, do: :ok, else: {:error, :invalid_grant}
-  end
-
-  defp check_client(_record, _params), do: {:error, :invalid_grant}
-
-  # RFC 9449 §10 holder-of-key: a code pre-bound to a DPoP key may be redeemed
-  # only with a matching proof. An unbound code accepts any (or no) presented
-  # key, which the caller may use to mint a DPoP-bound token.
-  defp check_dpop(%{data: %{dpop_jkt: bound}}, params) when is_binary(bound) and bound != "" do
-    if Map.get(params, :dpop_jkt) == bound, do: :ok, else: {:error, :invalid_grant}
-  end
-
-  defp check_dpop(_record, _params), do: :ok
-
   defp normalize!(user_code, length) do
     {:ok, normalized} = normalize_user_code(user_code, user_code_length: length)
     normalized
@@ -621,27 +580,6 @@ defmodule Attesto.DeviceCode do
       expires_at: record.expires_at
     }
   end
-
-  defp validate_approve_result({:ok, record}, trusted_record, fields, user_code) do
-    if valid_approve_transition?(trusted_record, record, fields, user_code),
-      do: :ok,
-      else: device_store_contract_error(:approve)
-  end
-
-  defp validate_approve_result({:error, reason} = error, _trusted, _fields, _user_code) when reason in @decision_errors,
-    do: error
-
-  defp validate_approve_result(_unexpected, _trusted, _fields, _user_code), do: device_store_contract_error(:approve)
-
-  defp validate_deny_result({:ok, record}, trusted_record, user_code) do
-    if valid_deny_transition?(trusted_record, record, user_code),
-      do: :ok,
-      else: device_store_contract_error(:deny)
-  end
-
-  defp validate_deny_result({:error, reason} = error, _trusted, _user_code) when reason in @decision_errors, do: error
-
-  defp validate_deny_result(_unexpected, _trusted, _user_code), do: device_store_contract_error(:deny)
 
   defp valid_optional_field?(record, field, validator), do: Record.optional_field?(record, field, validator)
 

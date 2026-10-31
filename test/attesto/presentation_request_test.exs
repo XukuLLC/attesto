@@ -237,4 +237,32 @@ defmodule Attesto.PresentationRequestTest do
     assert JSON.decode!(params["dcql_query"]) == request["dcql_query"]
     assert JSON.decode!(params["client_metadata"]) == request["client_metadata"]
   end
+
+  describe "claim_path?/2" do
+    test "accepts key, index, and wildcard elements, and exactly two non-empty strings for mso_mdoc" do
+      assert PresentationRequest.claim_path?(["address", "street_address"], "dc+sd-jwt")
+      assert PresentationRequest.claim_path?(["nationalities", nil], "dc+sd-jwt")
+      assert PresentationRequest.claim_path?(["degrees", 0, "type"], "dc+sd-jwt")
+      assert PresentationRequest.claim_path?(["org.iso.18013.5.1", "family_name"], "mso_mdoc")
+
+      refute PresentationRequest.claim_path?([], "dc+sd-jwt")
+      refute PresentationRequest.claim_path?(["degrees", -1], "dc+sd-jwt")
+      refute PresentationRequest.claim_path?(["degrees", 1.0], "dc+sd-jwt")
+      refute PresentationRequest.claim_path?(Process.get(:never_set, "given_name"), "dc+sd-jwt")
+      refute PresentationRequest.claim_path?(["org.iso.18013.5.1"], "mso_mdoc")
+      refute PresentationRequest.claim_path?(["org.iso.18013.5.1", ""], "mso_mdoc")
+      refute PresentationRequest.claim_path?(["", "family_name"], "mso_mdoc")
+      refute PresentationRequest.claim_path?(["org.iso.18013.5.1", "family_name", 0], "mso_mdoc")
+    end
+
+    test "dcql_query/1 refuses an mso_mdoc claim path with an empty element" do
+      assert_raise ArgumentError, ~r/two non-empty strings/, fn ->
+        PresentationRequest.dcql_query(
+          credentials: [
+            %{id: "mdl", format: "mso_mdoc", claims: [%{path: ["org.iso.18013.5.1", ""]}]}
+          ]
+        )
+      end
+    end
+  end
 end

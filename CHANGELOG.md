@@ -6,6 +6,32 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.9.0] - 2026-10-31
+
+### Added
+
+- `Attesto.Mdoc.session_transcript/1` returns the OID4VP 1.0 redirect-flow
+  `SessionTranscript` for an `mso_mdoc` presentation, and
+  `Attesto.Mdoc.device_authentication_bytes/3` the ISO/IEC 18013-5
+  `DeviceAuthenticationBytes` a Wallet signs. `verify_device_response/4`
+  rebuilds both with the same functions, so a Wallet built on them derives
+  byte-identical structures.
+- `Attesto.SdJwt.decode_disclosures/2` decodes and indexes Disclosures by
+  digest with the rules `verify/3` applies (shape, reserved names, duplicate
+  digests), for a Holder choosing which Disclosures to present.
+- `Attesto.PresentationRequest.claim_path?/2` checks a DCQL claims path
+  pointer for a credential format.
+
+### Changed
+
+- `Attesto.PresentationRequest.dcql_query/1` requires both elements of an
+  `mso_mdoc` claim path to be non-empty strings; it accepted empty strings
+  before.
+- `Attesto.CIBA` and `Attesto.DeviceCode` redeem, approve, and deny through
+  one internal polling-grant engine, and their ETS reference stores share
+  their poll, consume, and decision transitions. Outcomes, error values, and
+  store contracts are unchanged.
+
 ## [2.8.0] - 2026-10-31
 
 ### Security

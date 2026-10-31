@@ -41,6 +41,26 @@ defmodule Attesto.PresentationRequest do
     raise ArgumentError, "expects a keyword list; got #{inspect(opts)}"
   end
 
+  @doc """
+  Whether `path` is a valid DCQL claims path pointer for a credential of
+  `format` (OpenID4VP 1.0 "Claims Path Pointer").
+
+  A pointer is a non-empty list whose elements are strings (object keys),
+  non-negative integers (array indices), or `nil` (every element of an array).
+  An `"mso_mdoc"` pointer is exactly a namespace and a data element
+  identifier, both non-empty strings. `dcql_query/1` applies this rule to every
+  claim it builds; a Wallet applies the same rule to a query it receives.
+  """
+  @spec claim_path?(term(), String.t()) :: boolean()
+  def claim_path?([namespace, element], "mso_mdoc"),
+    do: is_binary(namespace) and namespace != "" and is_binary(element) and element != ""
+
+  def claim_path?(_path, "mso_mdoc"), do: false
+  def claim_path?([_ | _] = path, format) when is_binary(format), do: Enum.all?(path, &path_element?/1)
+  def claim_path?(_path, _format), do: false
+
+  defp path_element?(element), do: is_binary(element) or (is_integer(element) and element >= 0) or is_nil(element)
+
   @doc "Build a DCQL query object."
   @spec dcql_query(keyword() | map()) :: %{required(String.t()) => term()}
   def dcql_query(opts) when is_list(opts) do
@@ -186,7 +206,7 @@ defmodule Attesto.PresentationRequest do
   end
 
   defp path!(value, key) when is_list(value) and value != [] do
-    if Enum.all?(value, &(is_binary(&1) or (is_integer(&1) and &1 >= 0) or is_nil(&1))) do
+    if Enum.all?(value, &path_element?/1) do
       value
     else
       raise ArgumentError,
@@ -282,10 +302,10 @@ defmodule Attesto.PresentationRequest do
   end
 
   defp validate_claim_paths!(claims, "mso_mdoc") do
-    if Enum.all?(claims, fn %{"path" => path} -> length(path) == 2 and Enum.all?(path, &is_binary/1) end) do
+    if Enum.all?(claims, fn %{"path" => path} -> claim_path?(path, "mso_mdoc") end) do
       :ok
     else
-      raise ArgumentError, "Attesto.PresentationRequest mso_mdoc claim paths must contain exactly two strings"
+      raise ArgumentError, "Attesto.PresentationRequest mso_mdoc claim paths must contain exactly two non-empty strings"
     end
   end
 

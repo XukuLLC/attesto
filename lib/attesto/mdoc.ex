@@ -128,7 +128,7 @@ if Code.ensure_loaded?(CBOR) do
     def verify_device_response(device_response, context, trusted, opts)
         when is_binary(device_response) and is_list(context) and is_list(opts) do
       safe(:invalid_mdoc, fn ->
-        with {:ok, session_transcript} <- session_transcript(context),
+        with {:ok, session_transcript} <- verifier_session_transcript(context),
              {:ok, response_bytes} <- issuer_signed_bytes(device_response),
              {:ok, response} <- decode_complete(response_bytes),
              {:ok, documents} <- device_response_documents(response) do
@@ -267,19 +267,45 @@ if Code.ensure_loaded?(CBOR) do
     defp device_signature_bytes(%{"deviceAuth" => %{"deviceMac" => _mac}}), do: {:error, :unsupported_algorithm}
     defp device_signature_bytes(_device_signed), do: {:error, :invalid_mdoc}
 
-    defp device_authentication_bytes(session_transcript, doc_type, device_namespaces_bytes) do
-      ["DeviceAuthentication", session_transcript, doc_type, device_namespaces_bytes]
+    @doc """
+    The ISO/IEC 18013-5 `DeviceAuthenticationBytes` that a Wallet signs as the
+    detached payload of `DeviceSigned.deviceAuth.deviceSignature`, and that
+    `verify_device_response/4` checks the signature against:
+    `#6.24(bstr .cbor ["DeviceAuthentication", SessionTranscript, DocType,
+    DeviceNameSpacesBytes])`, CBOR-encoded.
+
+    `session_transcript` is the data item returned by `session_transcript/1`.
+    `device_namespaces` is the `DeviceNameSpacesBytes` data item exactly as it
+    appears in `DeviceSigned.nameSpaces`: a tag-24 `%CBOR.Tag{}` wrapping the
+    encoded `DeviceNameSpaces` map.
+    """
+    @spec device_authentication_bytes(list(), String.t(), struct()) :: binary()
+    def device_authentication_bytes(session_transcript, doc_type, %CBOR.Tag{tag: 24} = device_namespaces)
+        when is_list(session_transcript) and is_binary(doc_type) and doc_type != "" do
+      ["DeviceAuthentication", session_transcript, doc_type, device_namespaces]
       |> embedded_cbor()
       |> CBOR.encode()
     end
 
-    # OID4VP 1.0 "Handover and SessionTranscript Definitions" (redirect flow):
-    # SessionTranscript = [null, null, OpenID4VPHandover], where
-    # OpenID4VPHandover = ["OpenID4VPHandover", sha256(OpenID4VPHandoverInfo)]
-    # and OpenID4VPHandoverInfo = [client_id, nonce, jwkThumbprint, response_uri].
-    # `jwkThumbprint` is the JWK SHA-256 thumbprint of the Verifier's response-
-    # encryption key for `direct_post.jwt`, or `null` for unencrypted `direct_post`.
-    defp session_transcript(context) do
+    @doc """
+    The OID4VP 1.0 `SessionTranscript` for an `mso_mdoc` presentation in the
+    redirect flow ("Handover and SessionTranscript Definitions"):
+    `[null, null, ["OpenID4VPHandover", SHA-256(OpenID4VPHandoverInfo)]]`, where
+    `OpenID4VPHandoverInfo` is `[client_id, nonce, jwkThumbprint, response_uri]`.
+
+    `context` takes `:client_id`, `:nonce`, and `:response_uri` (non-empty
+    strings). For the `direct_post.jwt` Response Mode it also takes the
+    Verifier's public `:response_encryption_jwk`, whose JWK SHA-256 thumbprint
+    becomes `jwkThumbprint`; without it `jwkThumbprint` is `null`.
+
+    Returns the CBOR data item to pass to `device_authentication_bytes/3`. A
+    Wallet signs over it and `verify_device_response/4` rebuilds it from the
+    same request values, so both sides derive identical bytes. Errors are
+    `:invalid_context` for a missing or empty value and `:invalid_key` for a
+    response-encryption key whose thumbprint cannot be computed.
+    """
+    @spec session_transcript(keyword()) :: {:ok, list()} | {:error, :invalid_context | :invalid_key}
+    def session_transcript(context) when is_list(context) do
       with {:ok, client_id} <- required_context_value(context, :client_id),
            {:ok, nonce} <- required_context_value(context, :nonce),
            {:ok, response_uri} <- required_context_value(context, :response_uri),
@@ -294,10 +320,21 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
+    def session_transcript(_context), do: {:error, :invalid_context}
+
+    # The verifier's error vocabulary predates the public function: a request
+    # context it cannot rebuild the transcript from is an invalid presentation.
+    defp verifier_session_transcript(context) do
+      case session_transcript(context) do
+        {:error, :invalid_context} -> {:error, :invalid_mdoc}
+        result -> result
+      end
+    end
+
     defp required_context_value(context, key) do
       case Keyword.get(context, key) do
         value when is_binary(value) and value != "" -> {:ok, value}
-        _other -> {:error, :invalid_mdoc}
+        _other -> {:error, :invalid_context}
       end
     end
 
@@ -658,5 +695,7 @@ else
     def verify(_input, _trusted, _opts \\ []), do: raise(@dep_error)
     def verify_device_response(_device_response, _context, _trusted, _opts \\ []), do: raise(@dep_error)
     def peek_doc_type(_device_response), do: raise(@dep_error)
+    def session_transcript(_context), do: raise(@dep_error)
+    def device_authentication_bytes(_session_transcript, _doc_type, _device_namespaces), do: raise(@dep_error)
   end
 end

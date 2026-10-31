@@ -34,6 +34,8 @@ defmodule Attesto.DeviceCodeStore.ETS do
     reset_doc: false,
     reset_spec?: false
 
+  alias Attesto.PollingGrant.ETSTable
+
   @table __MODULE__
   @user_index __MODULE__.UserIndex
 
@@ -45,24 +47,13 @@ defmodule Attesto.DeviceCodeStore.ETS do
   @impl Attesto.DeviceCodeStore
   def lookup_user_code(user_code) when is_binary(user_code) do
     case :ets.lookup(@user_index, user_code) do
-      [{^user_code, hash}] ->
-        case :ets.lookup(@table, hash) do
-          [{^hash, _expires_at, record}] -> {:ok, record}
-          [] -> :error
-        end
-
-      [] ->
-        :error
+      [{^user_code, hash}] -> ETSTable.lookup(@table, hash)
+      [] -> :error
     end
   end
 
   @impl Attesto.DeviceCodeStore
-  def get(hash) when is_binary(hash) do
-    case :ets.lookup(@table, hash) do
-      [{^hash, _expires_at, record}] -> {:ok, record}
-      [] -> :error
-    end
-  end
+  def get(hash) when is_binary(hash), do: ETSTable.lookup(@table, hash)
 
   @impl Attesto.DeviceCodeStore
   def approve(user_code, approval, opts) when is_binary(user_code) and is_map(approval) and is_map(opts) do
@@ -103,60 +94,24 @@ defmodule Attesto.DeviceCodeStore.ETS do
     now = Map.get(opts, :now, System.system_time(:second))
 
     reply =
-      with {:ok, hash, record} <- fetch_by_user_code(user_code),
-           :ok <- require_pending(record, now) do
-        updated =
-          record
-          |> Map.put(:status, new_status)
-          |> Map.merge(approval_fields(new_status, approval))
-
-        :ets.insert(@table, {hash, record.expires_at, updated})
-        {:ok, updated}
+      with {:ok, hash, record} <- fetch_by_user_code(user_code) do
+        ETSTable.decide(@table, hash, record, now, new_status, approval_fields(new_status, approval))
       end
 
     {:reply, reply, state}
   end
 
+  # RFC 8628 §3.5: the minimum poll interval is the one the core passes in.
   def handle_call({:poll, hash, opts}, _from, state) do
-    reply =
-      case :ets.lookup(@table, hash) do
-        [{^hash, _expires_at, record}] ->
-          if poll_allowed?(record, opts) do
-            updated = Map.put(record, :last_polled_at, opts.now)
-            :ets.insert(@table, {hash, record.expires_at, updated})
-            {:ok, updated}
-          else
-            {:error, :slow_down}
-          end
-
-        [] ->
-          :error
-      end
-
-    {:reply, reply, state}
+    {:reply, ETSTable.poll(@table, hash, opts.now, fn _record -> opts.interval end), state}
   end
 
   def handle_call({:consume, hash, opts}, _from, state) do
-    now = Map.get(opts, :now, System.system_time(:second))
-
-    reply =
-      case :ets.lookup(@table, hash) do
-        # Guard the consume on BOTH approval and unexpiry, so a code that expires
-        # between the core's poll-time check and this transition cannot mint.
-        [{^hash, expires_at, %{status: :approved} = record}] when expires_at > now ->
-          consumed = Map.put(record, :status, :consumed)
-          :ets.insert(@table, {hash, record.expires_at, consumed})
-          {:ok, consumed}
-
-        _ ->
-          :error
-      end
-
-    {:reply, reply, state}
+    {:reply, ETSTable.consume(@table, hash, Map.get(opts, :now, System.system_time(:second))), state}
   end
 
   defp delete_expired(now) do
-    expired = :ets.select(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [:"$3"]}])
+    expired = :ets.select(@table, ETSTable.expired_match_spec(now, :record))
     Enum.each(expired, fn record -> drop(record.device_code_hash, record.user_code) end)
   end
 
@@ -165,19 +120,15 @@ defmodule Attesto.DeviceCodeStore.ETS do
   defp fetch_by_user_code(user_code) do
     case :ets.lookup(@user_index, user_code) do
       [{^user_code, hash}] ->
-        case :ets.lookup(@table, hash) do
-          [{^hash, _expires_at, record}] -> {:ok, hash, record}
-          [] -> {:error, :not_found}
+        case ETSTable.lookup(@table, hash) do
+          {:ok, record} -> {:ok, hash, record}
+          :error -> {:error, :not_found}
         end
 
       [] ->
         {:error, :not_found}
     end
   end
-
-  defp require_pending(%{status: :pending, expires_at: expires_at}, now) when expires_at > now, do: :ok
-  defp require_pending(%{status: :pending}, _now), do: {:error, :expired}
-  defp require_pending(_record, _now), do: {:error, :already_decided}
 
   defp approval_fields(:approved, approval) do
     %{
@@ -188,12 +139,6 @@ defmodule Attesto.DeviceCodeStore.ETS do
   end
 
   defp approval_fields(_status, _approval), do: %{}
-
-  # RFC 8628 §3.5: enforce the minimum poll interval. The first poll
-  # (last_polled_at nil) is always allowed.
-  defp poll_allowed?(%{status: status}, _opts) when status != :pending, do: true
-  defp poll_allowed?(%{last_polled_at: nil}, _opts), do: true
-  defp poll_allowed?(%{last_polled_at: last}, %{now: now, interval: interval}), do: last <= now - interval
 
   defp drop(hash, user_code) do
     :ets.delete(@table, hash)

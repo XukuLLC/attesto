@@ -49,6 +49,7 @@ defmodule Attesto.SdJwt do
   # Reserved keys that MUST NOT appear as a Disclosure claim name (spec §5.2.2),
   # nor be produced by resolving one.
   @reserved_claim_names ~w(_sd _sd_alg ...)
+  @supported_sd_algs ~w(sha-256 sha-384 sha-512)
 
   # DoS ceiling on a presentation, enforced in `split/1` before any base64/JSON
   # decode work: an authenticated holder could otherwise pad the `~`-joined
@@ -120,6 +121,38 @@ defmodule Attesto.SdJwt do
   def digest(disclosure, sd_alg \\ @default_sd_alg) when is_binary(disclosure) do
     :crypto.hash(hash_algorithm(sd_alg), disclosure) |> JWS.encode64()
   end
+
+  @doc """
+  Decode presented Disclosures and index them by their digest under `sd_alg`
+  (default `#{@default_sd_alg}`), the decoding step `verify/3` performs before
+  resolving digests.
+
+  Each Disclosure must be base64url-encoded JSON shaped `[salt, name, value]`
+  (an object property) or `[salt, value]` (an array element), with a string
+  salt and name. A Disclosure may not name `_sd`, `_sd_alg`, or `...`, and a
+  digest presented twice is rejected rather than resolved to either copy. A
+  Holder can use this to decide which Disclosures to present without
+  re-implementing those rules.
+
+  Returns `{:ok, %{digest => decoded_array}}`.
+  """
+  @spec decode_disclosures([String.t()], String.t()) ::
+          {:ok, %{String.t() => list()}}
+          | {:error, :invalid_disclosure | :reserved_claim_name | :duplicate_digest | :unsupported_sd_alg}
+  def decode_disclosures(disclosures, sd_alg \\ @default_sd_alg) when is_list(disclosures) and is_binary(sd_alg) do
+    cond do
+      sd_alg not in @supported_sd_algs ->
+        {:error, :unsupported_sd_alg}
+
+      not Enum.all?(disclosures, &is_binary/1) ->
+        {:error, :invalid_disclosure}
+
+      true ->
+        with {:ok, indexed} <- index_disclosures(disclosures, sd_alg), do: {:ok, Map.new(indexed, &decoded_value/1)}
+    end
+  end
+
+  defp decoded_value({digest, %{value: value}}), do: {digest, value}
 
   # ── Issuance ───────────────────────────────────────────────────────────────
 
