@@ -166,7 +166,7 @@ defmodule Attesto.ClientIdMetadata do
   defp parse_client_id(client_id) do
     case URI.new(client_id) do
       {:ok, %URI{host: host} = uri} when is_binary(host) and host != "" ->
-        validate_uri_grammar(uri)
+        validate_uri_grammar(client_id, uri)
 
       _ ->
         {:error, :not_a_url}
@@ -176,9 +176,10 @@ defmodule Attesto.ClientIdMetadata do
   # draft §2: the grammar checks, ordered so the returned reason is the first
   # rule the URL fails (scheme, then path, then fragment, then userinfo, then
   # the dot-segment ban).
-  defp validate_uri_grammar(%URI{} = uri) do
+  defp validate_uri_grammar(client_id, %URI{} = uri) do
     cond do
       uri.scheme != @https_scheme -> {:error, :not_https}
+      not Attesto.URI.valid_port?(client_id, uri.port) -> {:error, :not_a_url}
       not has_path?(uri.path) -> {:error, :no_path}
       not is_nil(uri.fragment) -> {:error, :has_fragment}
       not is_nil(uri.userinfo) -> {:error, :has_userinfo}
@@ -325,7 +326,7 @@ defmodule Attesto.ClientIdMetadata do
   defp validate_redirect_uris(doc) do
     case Map.get(doc, "redirect_uris") do
       [_ | _] = uris ->
-        if Enum.all?(uris, &Attesto.RedirectURI.unambiguous?/1) do
+        if Enum.all?(uris, &valid_redirect_uri?/1) do
           {:ok, uris}
         else
           {:error, :invalid_redirect_uris}
@@ -339,6 +340,29 @@ defmodule Attesto.ClientIdMetadata do
       _ ->
         {:error, :invalid_redirect_uris}
     end
+  end
+
+  # RFC 6749 §3.1.2: each redirection URI MUST be an absolute URI (RFC 3986
+  # §4.3: non-empty scheme, no fragment) with a valid port when an authority is
+  # present, and unambiguous across RFC 3986 and WHATWG URL parsers.
+  defp valid_redirect_uri?(uri) when is_binary(uri) do
+    with true <- Attesto.RedirectURI.unambiguous?(uri),
+         {:ok, %URI{scheme: scheme, fragment: nil} = parsed}
+         when is_binary(scheme) and scheme != "" <- URI.new(uri) do
+      valid_redirect_port?(uri, parsed.port)
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_redirect_uri?(_uri), do: false
+
+  defp valid_redirect_port?(uri, nil) do
+    not String.ends_with?(URI.parse(uri).authority || "", ":")
+  end
+
+  defp valid_redirect_port?(uri, port) when is_integer(port) do
+    port in 0..65_535 and not String.ends_with?(URI.parse(uri).authority || "", ":")
   end
 
   # Missing grant_types defaults to authorization_code (RFC 7591 §2). Only an

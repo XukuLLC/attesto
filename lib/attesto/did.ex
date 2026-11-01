@@ -110,12 +110,10 @@ defmodule Attesto.Did do
   end
 
   defp decode_jwk(json) do
-    safe(:invalid_jwk, fn ->
-      case JSON.decode(json) do
-        {:ok, %{} = jwk} -> {:ok, jwk}
-        _other -> {:error, :invalid_jwk}
-      end
-    end)
+    case Attesto.StrictJSON.decode(json) do
+      {:ok, %{} = jwk} -> {:ok, jwk}
+      _other -> {:error, :invalid_jwk}
+    end
   end
 
   defp validate_public_jwk(jwk) do

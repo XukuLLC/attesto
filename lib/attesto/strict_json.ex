@@ -23,9 +23,22 @@ defmodule Attesto.StrictJSON do
   duplicate keys in any nested object, or `{:error, :invalid_json}` otherwise.
   """
   @spec decode(term(), keyword()) :: {:ok, map()} | {:error, :invalid_json}
-  def decode(bytes, opts \\ [])
+  def decode(bytes, opts \\ []) do
+    case decode_value(bytes, opts) do
+      {:ok, %{} = map} -> {:ok, map}
+      _other -> {:error, :invalid_json}
+    end
+  end
 
-  def decode(bytes, opts) when is_binary(bytes) and is_list(opts) do
+  @doc """
+  Decode a JSON binary into any JSON value (object, array, or scalar),
+  rejecting duplicate object member names and inputs that exceed
+  `:max_json_depth` (default `32`) at any nesting level.
+  """
+  @spec decode_value(term(), keyword()) :: {:ok, term()} | {:error, :invalid_json}
+  def decode_value(bytes, opts \\ [])
+
+  def decode_value(bytes, opts) when is_binary(bytes) and is_list(opts) do
     with {:ok, max_depth} <- max_json_depth(opts) do
       decoders = [
         array_start: &json_container_start(:array, &1, max_depth),
@@ -37,7 +50,7 @@ defmodule Attesto.StrictJSON do
       ]
 
       case JSON.decode(bytes, nil, decoders) do
-        {%{} = map, nil, ""} -> {:ok, map}
+        {value, nil, ""} -> {:ok, value}
         _other -> {:error, :invalid_json}
       end
     end
@@ -47,7 +60,7 @@ defmodule Attesto.StrictJSON do
     _kind, _reason -> {:error, :invalid_json}
   end
 
-  def decode(_bytes, _opts), do: {:error, :invalid_json}
+  def decode_value(_bytes, _opts), do: {:error, :invalid_json}
 
   defp max_json_depth(opts) do
     depth =

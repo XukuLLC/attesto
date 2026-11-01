@@ -274,6 +274,19 @@ defmodule Attesto.AuthorizationRequestTest do
       assert req.authorization_details == []
     end
 
+    test "rejects duplicate JSON members in claims or authorization_details parameters" do
+      dup_claims = ~s({"id_token":{"sub":null},"id_token":{}})
+      assert {:error, {:redirect, err1}} = validate(base_params(%{"claims" => dup_claims}))
+      assert err1.error == "invalid_request"
+
+      dup_details = ~s([{"type":"payment_initiation","type":"other"}])
+
+      assert {:error, {:redirect, err2}} =
+               validate(base_params(%{"authorization_details" => dup_details}))
+
+      assert err2.error == "invalid_authorization_details"
+    end
+
     test "response_mode is nil when absent (transport applies the default)" do
       assert {:ok, req} = validate(base_params())
       assert is_nil(req.response_mode)

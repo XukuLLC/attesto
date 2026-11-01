@@ -53,6 +53,12 @@ defmodule Attesto.DidTest do
       assert {:error, :invalid_jwk} = Did.resolve("did:jwk:" <> encode_json(["not", "a", "jwk"]))
       assert {:error, :invalid_jwk} = Did.resolve("did:jwk:" <> encode_json(%{"kty" => "EC"}))
       assert {:error, :invalid_base64url} = Did.resolve("did:jwk:")
+
+      dup_jwk_json =
+        ~s({"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","use":"sig","use":"enc"})
+
+      assert {:error, :invalid_jwk} =
+               Did.resolve("did:jwk:" <> Base.url_encode64(dup_jwk_json, padding: false))
     end
   end
 

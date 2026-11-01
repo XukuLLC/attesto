@@ -433,20 +433,22 @@ defmodule Attesto.DPoP do
   # RFC 9449 §4.3: compare the effective target URI without query/fragment.
   # URI scheme and host are case-insensitive, and an explicit HTTPS default
   # port is equivalent to an omitted port.
-  defp normalize_htu(uri) do
-    parsed = URI.parse(uri)
-    scheme = parsed.scheme && String.downcase(parsed.scheme)
-    host = parsed.host && String.downcase(parsed.host)
-
-    cond do
-      scheme != "https" -> {:error, :invalid_htu}
-      is_nil(host) or host == "" -> {:error, :invalid_htu}
-      not is_nil(parsed.userinfo) -> {:error, :invalid_htu}
-      true -> {:ok, {scheme, host, normalize_htu_port(parsed.port), Attesto.URI.normalize_path(parsed.path)}}
+  defp normalize_htu(uri) when is_binary(uri) and uri != "" do
+    with true <- String.valid?(uri),
+         {:ok, %Elixir.URI{} = parsed} <- Elixir.URI.new(uri),
+         "https" <- parsed.scheme && String.downcase(parsed.scheme),
+         host when is_binary(host) and host != "" <- parsed.host && String.downcase(parsed.host),
+         nil <- parsed.userinfo,
+         true <- Attesto.URI.valid_port?(uri, parsed.port) do
+      {:ok, {"https", host, normalize_htu_port(parsed.port), Attesto.URI.normalize_path(parsed.path)}}
+    else
+      _ -> {:error, :invalid_htu}
     end
   rescue
     _ -> {:error, :invalid_htu}
   end
+
+  defp normalize_htu(_uri), do: {:error, :invalid_htu}
 
   defp normalize_htu_port(443), do: nil
   defp normalize_htu_port(port), do: port

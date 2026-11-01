@@ -192,7 +192,7 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
-    defp device_response_documents(%{"documents" => documents, "status" => 0})
+    defp device_response_documents(%{"documents" => documents, "status" => 0, "version" => "1.0"})
          when is_list(documents) and documents != [] do
       {:ok, documents}
     end
@@ -253,11 +253,26 @@ if Code.ensure_loaded?(CBOR) do
     defp decode_device_namespaces(tagged) do
       with {:ok, bytes} <- embedded_bytes(tagged),
            {:ok, namespaces} <- decode_complete(bytes),
-           true <- plain_map?(namespaces) do
+           true <- valid_device_namespaces?(namespaces) do
         {:ok, namespaces}
       else
         _other -> {:error, :invalid_mdoc}
       end
+    end
+
+    defp valid_device_namespaces?(namespaces) do
+      plain_map?(namespaces) and
+        Enum.all?(namespaces, fn
+          {namespace, elements} when is_binary(namespace) and namespace != "" ->
+            plain_map?(elements) and
+              Enum.all?(elements, fn
+                {element_id, _value} when is_binary(element_id) and element_id != "" -> true
+                _other -> false
+              end)
+
+          _other ->
+            false
+        end)
     end
 
     defp device_signature_bytes(%{"deviceAuth" => %{"deviceSignature" => parts}}) when is_list(parts) do

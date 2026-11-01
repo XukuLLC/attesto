@@ -326,6 +326,41 @@ defmodule Attesto.MdocTest do
                Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now)
     end
 
+    test "rejects DeviceNameSpaces with non-map DeviceSignedItems or non-string identifiers", ctx do
+      for invalid_device_ns <- [
+            %{@mdl_namespace => 123},
+            %{@mdl_namespace => ["not", "a", "map"]},
+            %{@mdl_namespace => %CBOR.Tag{tag: 24, value: bytes(CBOR.encode(%{}))}},
+            %{"" => %{"age_over_21" => true}},
+            %{123 => %{"age_over_21" => true}},
+            %{@mdl_namespace => %{"" => true}},
+            %{@mdl_namespace => %{123 => true}}
+          ] do
+        device_response = build_device_response(ctx, device_namespaces: invalid_device_ns)
+
+        assert {:error, :invalid_mdoc} =
+                 Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now),
+               "expected :invalid_mdoc for device_namespaces=#{inspect(invalid_device_ns)}"
+      end
+    end
+
+    test "rejects a DeviceResponse with a missing or unsupported version", ctx do
+      raw = ctx |> build_device_response() |> Base.url_decode64!(padding: false) |> decode!()
+
+      for bad_response <- [
+            Map.delete(raw, "version"),
+            Map.put(raw, "version", "0.9"),
+            Map.put(raw, "version", "2.0"),
+            Map.put(raw, "version", 1)
+          ] do
+        encoded = bad_response |> CBOR.encode() |> Base.url_encode64(padding: false)
+
+        assert {:error, :invalid_mdoc} =
+                 Mdoc.verify_device_response(encoded, context(ctx), ctx.issuer_public, now: ctx.now),
+               "expected :invalid_mdoc for version=#{inspect(Map.get(bad_response, "version"))}"
+      end
+    end
+
     test "a mismatched nonce fails device-auth signature verification", ctx do
       device_response = build_device_response(ctx)
 

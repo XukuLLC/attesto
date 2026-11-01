@@ -505,6 +505,29 @@ defmodule Attesto.DPoPTest do
       assert {:error, :invalid_htu} =
                DPoP.verify_proof(proof, base_opts(http_uri: "https://api.example.com/oauth/token"))
     end
+
+    test "rejects malformed, empty, or out-of-range ports in htu or http_uri" do
+      for bad_uri <- [
+            "https://api.example.com:abc/oauth/token",
+            "https://api.example.com:443xyz/oauth/token",
+            "https://api.example.com:8080x/oauth/token",
+            "https://api.example.com:0/oauth/token",
+            "https://api.example.com:65536/oauth/token",
+            "https://api.example.com:99999/oauth/token",
+            "https://api.example.com:/oauth/token",
+            "https://[2001:db8::1]:/oauth/token"
+          ] do
+        {proof, _jkt} = Factory.dpop_proof(htu: bad_uri)
+
+        assert {:error, :invalid_htu} =
+                 DPoP.verify_proof(proof, base_opts(http_uri: "https://api.example.com/oauth/token")),
+               "expected :invalid_htu when proof htu is #{bad_uri}"
+
+        assert {:error, :invalid_htu} =
+                 DPoP.verify_proof(proof, base_opts(http_uri: bad_uri)),
+               "expected :invalid_htu when both proof htu and http_uri are #{bad_uri}"
+      end
+    end
   end
 
   # -----------------------------------------------------------------

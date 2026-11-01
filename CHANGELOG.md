@@ -6,6 +6,39 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Added
+
+- `Attesto.StrictJSON.decode_value/2` decodes any JSON value (object, array, or
+  scalar) while rejecting duplicate object member names and container nesting
+  beyond `:max_json_depth` (`32`).
+- `Attesto.URI.valid_port?/2` validates that a parsed `URI` carries a port in
+  `1..65_535` with no malformed, non-numeric, or empty `:port` segment in the raw
+  URI string.
+
+### Changed
+
+- Reject malformed, empty, or out-of-range ports in `Attesto.DPoP.verify_proof/2`
+  (`htu` and `:http_uri`) and `Attesto.URI.https_identifier?/2`. `URI.parse/1`
+  fell back to default port `443` on non-numeric ports (`:abc`, `:443xyz`) and
+  returned `port: nil` for ports above `65535` (`:99999`); both paths now parse
+  via `URI.new/1` and require ports in `1..65_535` with no trailing empty `:`.
+- Decode SD-JWT Disclosures in `Attesto.SdJwt.verify/3` and
+  `Attesto.SdJwt.decode_disclosures/2` through `Attesto.JWS.decode64/2` and
+  `Attesto.StrictJSON.decode_value/2`, and switch `Attesto.Did` (`did:jwk`) and
+  `Attesto.AuthorizationRequest` (`claims` and `authorization_details`) to
+  `Attesto.StrictJSON`. Disclosures previously used `Base.url_decode64(...,
+  padding: false)` and `JSON.decode/1`, admitting `=`-padded or non-canonical
+  base64url segments, nesting past 32 levels, and duplicate JSON object keys.
+- Require `"version" => "1.0"` on the outer ISO/IEC 18013-5 `DeviceResponse` map
+  and validate that `deviceSigned.nameSpaces` maps non-empty string namespaces
+  to plain maps with non-empty string element identifiers in
+  `Attesto.Mdoc.verify_device_response/4` and `Attesto.Mdoc.peek_doc_type/1`.
+- Reject `redirect_uris` entries in `Attesto.ClientIdMetadata.validate_document/2`
+  that lack a URI scheme, carry a `#fragment` (forbidden by RFC 6749 §3.1.2), or
+  contain a malformed, empty, or out-of-range authority port.
+
 ## [2.9.0] - 2026-10-31
 
 ### Added

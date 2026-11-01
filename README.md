@@ -23,12 +23,12 @@ The Attesto family also includes:
 
 ## Certification
 
-[![FAPI 2.0 Certified](https://img.shields.io/badge/FAPI_2.0-Certified-F78C40)](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)
-[![FAPI-CIBA Certified](https://img.shields.io/badge/FAPI--CIBA-Certified-F78C40)](https://openid.net/certification/certified-fapi-ciba-openid-providers-profiles/)
-[![OpenID Connect Certified](https://img.shields.io/badge/OpenID_Connect-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-profiles/)
-[![Logout Profiles Certified](https://img.shields.io/badge/Logout_Profiles-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
-[![Session Management Certified](https://img.shields.io/badge/Session_Management-Certified-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
-[![Relying Party Certified](https://img.shields.io/badge/Relying_Party-Certified-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
+[![FAPI 2.0 Certified — AttestoPhoenix 4.2.0 / Attesto 2.6.1 (2026-10-18)](https://img.shields.io/badge/FAPI_2.0-Certified_(v4.2.0_/_v2.6.1,_2026--10--18)-F78C40)](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)
+[![FAPI-CIBA Certified — Attesto 1.0 (2026-07-08)](https://img.shields.io/badge/FAPI--CIBA-Certified_(v1.0,_2026--07--08)-F78C40)](https://openid.net/certification/certified-fapi-ciba-openid-providers-profiles/)
+[![OpenID Connect Certified — Attesto 1.0.0 / 1.0 (2026-07-04 / 2026-07-08)](https://img.shields.io/badge/OpenID_Connect-Certified_(v1.0.0,_2026--07--04)-F78C40)](https://openid.net/certification/certified-openid-providers-profiles/)
+[![Logout Profiles Certified — Attesto 1.0.0 / 1.0 (2026-07-04 / 2026-07-07)](https://img.shields.io/badge/Logout_Profiles-Certified_(v1.0.0,_2026--07--04)-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
+[![Session Management Certified — Attesto 1.0 (2026-07-07)](https://img.shields.io/badge/Session_Management-Certified_(v1.0,_2026--07--07)-F78C40)](https://openid.net/certification/certified-openid-providers-for-logout-profiles/)
+[![Relying Party Certified — Attesto 1.0 (2026-07-07)](https://img.shields.io/badge/Relying_Party-Certified_(v1.0,_2026--07--07)-F78C40)](https://openid.net/certification/certified-openid-relying-parties-profiles/)
 
 <a href="https://openid.net/certification/certified-openid-connect-implementations/"><img src="https://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm.png" alt="OpenID Certified" width="180" align="right"></a>
 
@@ -37,15 +37,18 @@ as an authorization server built from `attesto` +
 [`attesto_phoenix`](https://github.com/XukuLLC/attesto_phoenix), to:
 
 - **FAPI 2.0 Security Profile Final — OP** and **FAPI 2.0 Message Signing
-  Final — OP** ([Financial-grade API](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/))
-- **FAPI-CIBA — OP** (Client-Initiated Backchannel Authentication; poll and ping)
-- **OpenID Connect Core — Basic OP** and **Config OP**
-- **RP-Initiated**, **Back-Channel**, and **Front-Channel Logout — OP**
-- **Session Management — OP**
+  Final — OP** ([Financial-grade API](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)) — `AttestoPhoenix 4.2.0` (`Attesto 2.6.1`), certified `2026-10-18` (and `Attesto 1.0`, certified `2026-07-06`)
+- **FAPI-CIBA — OP** (Client-Initiated Backchannel Authentication; poll and ping) — `Attesto 1.0`, certified `2026-07-08`
+- **OpenID Connect Core — Basic OP** (`Attesto 1.0.0`, certified `2026-07-04`) and **Config OP** (`Attesto 1.0`, certified `2026-07-08`)
+- **RP-Initiated** and **Back-Channel Logout — OP** (`Attesto 1.0.0`, certified `2026-07-04`), and **Front-Channel Logout — OP** (`Attesto 1.0`, certified `2026-07-07`)
+- **Session Management — OP** — `Attesto 1.0`, certified `2026-07-07`
 
 The client side, [`attesto_client`](https://github.com/XukuLLC/attesto_client),
 is separately certified as a **Relying Party library** (Basic, Config, and
-Dynamic RP profiles).
+Dynamic RP profiles — `Attesto 1.0`, certified `2026-07-07`) and as an
+[**OpenID4VCI 1.0 + HAIP 1.0 wallet**](https://openid.net/certification/certified-oid4vci-haip-final/)
+and [**OpenID4VP 1.0 + HAIP 1.0 wallet**](https://openid.net/certification/certified-oid4vp-haip-final/)
+(`Attesto Client 2.7.0` / `Attesto 2.3.1`, certified `2026-10-08`).
 
 Attesto also provides the shared credential protocol and cryptography for the
 `attesto_phoenix` deployment certified as an
@@ -55,7 +58,7 @@ and an
 Both cover **SD-JWT VC** and **ISO mdoc**; issuer coverage includes
 wallet-initiated and issuer-initiated authorization code flows, and verifier
 coverage uses `direct_post.jwt`. The certified deployment versions are
-`attesto` **2.2.2**, `attesto_phoenix` **3.5.1**, and `attesto_client` **2.6.1**.
+`attesto` **2.2.2**, `attesto_phoenix` **3.5.1**, and `attesto_client` **2.6.1** (certified `2026-10-06`).
 
 Certification runs against the OpenID Foundation's conformance suite and the
 results are published on the OIDF site. The FAPI 2.0 certifications — bank-grade

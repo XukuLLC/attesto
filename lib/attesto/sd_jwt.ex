@@ -365,8 +365,8 @@ defmodule Attesto.SdJwt do
   end
 
   defp decode_disclosure(disclosure) do
-    with {:ok, bytes} <- Base.url_decode64(disclosure, padding: false),
-         {:ok, decoded} <- JSON.decode(bytes),
+    with {:ok, bytes} <- JWS.decode64(disclosure, max_encoded_bytes: @max_presentation_bytes),
+         {:ok, decoded} <- Attesto.StrictJSON.decode_value(bytes),
          :ok <- valid_disclosure_shape(decoded) do
       {:ok, %{used?: false, value: decoded}}
     else

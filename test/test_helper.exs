@@ -16,4 +16,4 @@ case Attesto.Test.NodeBridge.availability() do
   {:skip, _reason} -> :ok
 end
 
-ExUnit.start()
+ExUnit.start(exclude: [:fuzz])

@@ -1,16 +1,21 @@
 // JS JOSE reference for attesto cross-language parity tests (test-support only).
 // jose v5 is ESM-only, so it's loaded via dynamic import inside each async fn;
 // the `nodejs` Elixir bridge loads this CommonJS module and calls these exports.
-async function jose() {
-  return await import("jose");
+let josePromise;
+function jose() {
+  if (!josePromise) josePromise = import("jose");
+  return josePromise;
 }
 
-async function sdJwtLibraries() {
-  const [vc, core] = await Promise.all([
-    import("@sd-jwt/sd-jwt-vc"),
-    import("@sd-jwt/core"),
-  ]);
-  return { vc, core };
+let sdJwtPromise;
+function sdJwtLibraries() {
+  if (!sdJwtPromise) {
+    sdJwtPromise = Promise.all([
+      import("@sd-jwt/sd-jwt-vc"),
+      import("@sd-jwt/core"),
+    ]).then(([vc, core]) => ({ vc, core }));
+  }
+  return sdJwtPromise;
 }
 
 function sdHasher(data, alg) {
@@ -442,3 +447,465 @@ function whatwgUrl(input) {
   }
 }
 module.exports.whatwgUrl = whatwgUrl;
+
+// ── Differential fuzzing oracle helpers ────────────────────────────────────
+
+function formatErr(err) {
+  return {
+    ok: false,
+    error: (err && err.constructor && err.constructor.name) || "Error",
+    code: (err && err.code) || null,
+    message: String((err && err.message) || err),
+  };
+}
+
+// 1. JWS compact verification oracle via panva/jose
+async function fuzzVerifyJws(token, publicJwk, algorithms) {
+  try {
+    const j = await jose();
+    const alg = (algorithms && algorithms[0]) || publicJwk.alg || "ES256";
+    const key = await j.importJWK(publicJwk, alg);
+    const { payload, protectedHeader } = await j.compactVerify(token, key, {
+      algorithms,
+    });
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+    const claims = JSON.parse(text);
+    if (typeof claims !== "object" || claims === null || Array.isArray(claims)) {
+      return {
+        ok: false,
+        error: "JWTInvalid",
+        code: "ERR_JWT_INVALID",
+        message: "JWT Claims Set must be a top-level JSON object",
+      };
+    }
+    return { ok: true, header: protectedHeader, claims };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzVerifyJws = fuzzVerifyJws;
+
+// 2. JWE compact decryption & encryption oracle via panva/jose
+async function fuzzDecryptJwe(compact, privateJwk, algs, encs) {
+  try {
+    const j = await jose();
+    const key = await j.importJWK(privateJwk, "ECDH-ES");
+    const { plaintext, protectedHeader } = await j.compactDecrypt(compact, key, {
+      keyManagementAlgorithms: algs,
+      contentEncryptionAlgorithms: encs,
+    });
+    return {
+      ok: true,
+      plaintext_b64: Buffer.from(plaintext).toString("base64url"),
+      header: protectedHeader,
+    };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzDecryptJwe = fuzzDecryptJwe;
+
+async function fuzzEncryptJwe(publicJwk, plaintextB64, protectedHeader) {
+  const j = await jose();
+  const key = await j.importJWK(publicJwk, "ECDH-ES");
+  const plaintext = Buffer.from(plaintextB64, "base64url");
+  return await new j.CompactEncrypt(plaintext)
+    .setProtectedHeader(protectedHeader)
+    .encrypt(key);
+}
+module.exports.fuzzEncryptJwe = fuzzEncryptJwe;
+
+// 3. SD-JWT verification & disclosure decoding oracle via @sd-jwt/core
+async function fuzzDecodeDisclosures(disclosures, sdAlg) {
+  try {
+    const { core } = await sdJwtLibraries();
+    const alg = sdAlg || "sha-256";
+    const out = {};
+    for (const d of disclosures) {
+      const decoded = core.Disclosure.fromEncodeSync(d, {
+        hasher: sdHasher,
+        alg,
+      });
+      const digest = await decoded.digest({ hasher: sdHasher, alg });
+      const arr = decoded.key !== undefined
+        ? [decoded.salt, decoded.key, decoded.value]
+        : [decoded.salt, decoded.value];
+      out[digest] = arr;
+    }
+    return { ok: true, disclosures: out };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzDecodeDisclosures = fuzzDecodeDisclosures;
+
+async function fuzzVerifySdJwt(
+  combined,
+  issuerPublicJwk,
+  algorithms,
+  holderPublicJwk,
+  kbOpts,
+) {
+  try {
+    const j = await jose();
+    const { core } = await sdJwtLibraries();
+    const alg = (algorithms && algorithms[0]) || "ES256";
+    const issuerKey = await j.importJWK(issuerPublicJwk, alg);
+
+    const verifier = async (data, signature) => {
+      try {
+        await j.compactVerify(`${data}.${signature}`, issuerKey, {
+          algorithms: algorithms || ["ES256"],
+        });
+        return true;
+      } catch (_e) {
+        return false;
+      }
+    };
+
+    const kbRequired = Boolean(kbOpts && kbOpts.require_kb);
+    const kbVerifier = holderPublicJwk
+      ? async (data, signature) => {
+          try {
+            const kbAlg = (kbOpts && kbOpts.alg) || "ES256";
+            const hKey = await j.importJWK(holderPublicJwk, kbAlg);
+            await j.compactVerify(`${data}.${signature}`, hKey, {
+              algorithms: [kbAlg],
+            });
+            return true;
+          } catch (_e) {
+            return false;
+          }
+        }
+      : undefined;
+
+    const instance = new core.SDJwtInstance({
+      verifier,
+      kbVerifier,
+      hasher: sdHasher,
+    });
+
+    const verifyOptions = kbRequired
+      ? {
+          keyBindingNonce: (kbOpts && kbOpts.nonce) || "",
+          currentDate: kbOpts && kbOpts.now,
+          skewSeconds: 60,
+        }
+      : undefined;
+
+    const verified = await instance.verify(combined, verifyOptions);
+
+    if (kbRequired && kbOpts) {
+      if (!verified.kb || !verified.kb.payload || !verified.kb.header) {
+        throw new Error("Missing KB-JWT in verified SD-JWT");
+      }
+      if (verified.kb.header.typ !== "kb+jwt") {
+        throw new Error(`Invalid KB-JWT typ: ${verified.kb.header.typ}`);
+      }
+      if (kbOpts.nonce && verified.kb.payload.nonce !== kbOpts.nonce) {
+        throw new Error("KB-JWT nonce mismatch");
+      }
+      if (kbOpts.audience && verified.kb.payload.aud !== kbOpts.audience) {
+        throw new Error("KB-JWT aud mismatch");
+      }
+      if (typeof verified.kb.payload.iat !== "number") {
+        throw new Error("KB-JWT missing numeric iat");
+      }
+      if (kbOpts.now !== undefined) {
+        const maxAge = kbOpts.max_age_seconds || 300;
+        if (
+          verified.kb.payload.iat > kbOpts.now + 60 ||
+          verified.kb.payload.iat < kbOpts.now - maxAge
+        ) {
+          throw new Error("KB-JWT iat out of window");
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      claims: verified.payload,
+      header: verified.header,
+      kb: verified.kb ? verified.kb.payload : null,
+    };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzVerifySdJwt = fuzzVerifySdJwt;
+
+// 4. mdoc DeviceResponse verification oracles via @auth0/mdl
+function toPlainMdocValue(val) {
+  if (val instanceof Uint8Array || Buffer.isBuffer(val)) {
+    return { __bytes_b64: Buffer.from(val).toString("base64url") };
+  }
+  if (val instanceof Date) {
+    return Math.floor(val.getTime() / 1000);
+  }
+  if (val instanceof Map) {
+    const obj = {};
+    for (const [k, v] of val.entries()) {
+      obj[String(k)] = toPlainMdocValue(v);
+    }
+    return obj;
+  }
+  if (Array.isArray(val)) {
+    return val.map(toPlainMdocValue);
+  }
+  if (val && typeof val === "object") {
+    const obj = {};
+    for (const [k, v] of Object.entries(val)) {
+      obj[k] = toPlainMdocValue(v);
+    }
+    return obj;
+  }
+  return val;
+}
+
+// 4a. Raw @auth0/mdl Verifier.verifyData + verifyDeviceSignature (exposes @auth0/mdl crash on cert-less IssuerAuth)
+async function fuzzVerifyMdocRawVerifier(
+  deviceResponseInput,
+  isRawCborB64,
+  sessionTranscriptB64,
+) {
+  try {
+    const mdl = require("@auth0/mdl");
+    const { cborDecode, cborEncode } = require("@auth0/mdl/lib/cbor");
+    const { DataItem } = require("@auth0/mdl/lib/cbor/DataItem");
+    const rawBytes = Buffer.from(deviceResponseInput, "base64url");
+    const decodedSt = cborDecode(Buffer.from(sessionTranscriptB64, "base64url"));
+    const sessionTranscriptBytes = cborEncode(DataItem.fromData(decodedSt));
+    const parsed = mdl.parse(rawBytes);
+    const verifier = new mdl.Verifier([]);
+    const checks = [];
+    const onCheck = (c) => checks.push(c);
+    for (const doc of parsed.documents) {
+      await verifier.verifyData(doc, onCheck);
+      await verifier.verifyDeviceSignature(doc, {
+        sessionTranscriptBytes,
+        onCheck,
+      });
+    }
+    const failed = checks.filter((c) => c.status !== "PASSED");
+    if (failed.length > 0) {
+      return {
+        ok: false,
+        error: "MdlVerificationFailed",
+        code: failed[0].check,
+        message: failed[0].reason || failed[0].check,
+      };
+    }
+    return { ok: true, documentCount: parsed.documents.length };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzVerifyMdocRawVerifier = fuzzVerifyMdocRawVerifier;
+
+// 4b. Step-by-step @auth0/mdl parse + IssuerAuth.verify + IssuerSignedItem.isValid + Verifier.verifyDeviceSignature
+async function fuzzVerifyMdocDeviceResponse(
+  deviceResponseInput,
+  sessionTranscriptB64,
+  issuerPublicJwk,
+  opts,
+) {
+  try {
+    const mdl = require("@auth0/mdl");
+    const { cborDecode, cborEncode } = require("@auth0/mdl/lib/cbor");
+    const { DataItem } = require("@auth0/mdl/lib/cbor/DataItem");
+    const j = await jose();
+    const rawBytes = Buffer.from(deviceResponseInput, "base64url");
+    const decodedSt = cborDecode(Buffer.from(sessionTranscriptB64, "base64url"));
+    const sessionTranscriptBytes = cborEncode(DataItem.fromData(decodedSt));
+    const parsed = mdl.parse(rawBytes);
+
+    if (parsed.status !== 0) {
+      throw new Error(`DeviceResponse status is ${parsed.status}, expected 0`);
+    }
+    if (!Array.isArray(parsed.documents) || parsed.documents.length === 0) {
+      throw new Error("DeviceResponse has no documents");
+    }
+
+    const verifier = new mdl.Verifier([]);
+    const results = [];
+
+    for (const doc of parsed.documents) {
+      const issuerAuth = doc.issuerSigned && doc.issuerSigned.issuerAuth;
+      if (!issuerAuth) throw new Error("Missing issuerAuth");
+
+      const issuerKey = await j.importJWK(issuerPublicJwk, issuerAuth.algName);
+      if (!(await issuerAuth.verify(issuerKey))) {
+        throw new Error("IssuerAuth COSE_Sign1 signature invalid");
+      }
+
+      const mso = issuerAuth.decodedPayload;
+      if (!mso || mso.version !== "1.0") {
+        throw new Error("Invalid MSO version");
+      }
+      if (mso.digestAlgorithm !== "SHA-256") {
+        throw new Error(`Unsupported digestAlgorithm: ${mso.digestAlgorithm}`);
+      }
+      if (doc.docType !== mso.docType) {
+        throw new Error(`Document docType (${doc.docType}) != MSO docType (${mso.docType})`);
+      }
+      if (opts && opts.expected_doc_type && doc.docType !== opts.expected_doc_type) {
+        throw new Error(`Unexpected docType: ${doc.docType}`);
+      }
+
+      const vi = mso.validityInfo;
+      if (!vi || !(vi.signed instanceof Date) || !(vi.validFrom instanceof Date) || !(vi.validUntil instanceof Date)) {
+        throw new Error("Invalid MSO validityInfo");
+      }
+      const signedSec = Math.floor(vi.signed.getTime() / 1000);
+      const validFromSec = Math.floor(vi.validFrom.getTime() / 1000);
+      const validUntilSec = Math.floor(vi.validUntil.getTime() / 1000);
+      if (!(signedSec <= validFromSec && validFromSec < validUntilSec)) {
+        throw new Error("Invalid validityInfo ordering");
+      }
+      const nowSec = opts && typeof opts.now === "number" ? opts.now : Math.floor(Date.now() / 1000);
+      const skew = 60;
+      if (nowSec - skew >= validUntilSec) {
+        throw new Error("MSO expired");
+      }
+      if (nowSec + skew < validFromSec) {
+        throw new Error("MSO not yet valid");
+      }
+
+      const namespaces = {};
+      for (const ns of doc.issuerSignedNameSpaces) {
+        const items = doc.issuerSigned.nameSpaces[ns] || [];
+        const checks = await Promise.all(
+          items.map((item) => item.isValid(ns, issuerAuth)),
+        );
+        if (checks.some((valid) => !valid)) {
+          throw new Error(`Digest verification failed for namespace ${ns}`);
+        }
+        namespaces[ns] = toPlainMdocValue(doc.getIssuerNameSpace(ns));
+      }
+
+      const devChecks = [];
+      await verifier.verifyDeviceSignature(doc, {
+        sessionTranscriptBytes,
+        onCheck: (c) => devChecks.push(c),
+      });
+      const devFailed = devChecks.filter((c) => c.status !== "PASSED");
+      if (devFailed.length > 0) {
+        throw new Error(`Device signature failed: ${devFailed[0].reason || devFailed[0].check}`);
+      }
+
+      results.push({
+        doc_type: doc.docType,
+        namespaces,
+        validity: {
+          signed: signedSec,
+          valid_from: validFromSec,
+          valid_until: validUntilSec,
+        },
+      });
+    }
+
+    return { ok: true, documents: results };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzVerifyMdocDeviceResponse = fuzzVerifyMdocDeviceResponse;
+
+// 5. DPoP proof verification oracle via panva/jose EmbeddedJWK + WHATWG URL
+async function fuzzVerifyDpop(proof, opts) {
+  try {
+    const j = await jose();
+    const allowedAlgs = (opts && opts.algorithms) || [
+      "ES256",
+      "ES384",
+      "ES512",
+      "RS256",
+      "RS384",
+      "RS512",
+      "PS256",
+      "PS384",
+      "PS512",
+      "EdDSA",
+    ];
+    const { payload, protectedHeader } = await j.jwtVerify(
+      proof,
+      j.EmbeddedJWK,
+      {
+        typ: "dpop+jwt",
+        algorithms: allowedAlgs,
+        currentDate: new Date(0),
+      },
+    );
+
+    if (typeof payload.htm !== "string" || payload.htm !== opts.http_method) {
+      throw new Error(`htm mismatch: ${payload.htm}`);
+    }
+    if (typeof payload.htu !== "string" || typeof opts.http_uri !== "string") {
+      throw new Error("htu missing or not string");
+    }
+
+    const u1 = new URL(payload.htu);
+    const u2 = new URL(opts.http_uri);
+    if (u1.username || u1.password) {
+      throw new Error("htu contains userinfo");
+    }
+    if (
+      u1.protocol !== u2.protocol ||
+      u1.hostname !== u2.hostname ||
+      u1.port !== u2.port ||
+      u1.pathname !== u2.pathname
+    ) {
+      throw new Error(`htu mismatch: ${u1.origin}${u1.pathname} vs ${u2.origin}${u2.pathname}`);
+    }
+
+    if (typeof payload.iat !== "number" || !Number.isInteger(payload.iat) || payload.iat < 0) {
+      throw new Error("invalid iat");
+    }
+    const now = typeof opts.now === "number" ? opts.now : Math.floor(Date.now() / 1000);
+    const maxAge = typeof opts.max_age_seconds === "number" ? opts.max_age_seconds : 60;
+    if (payload.iat > now + 60) {
+      throw new Error("iat in the future");
+    }
+    if (payload.iat < now - maxAge) {
+      throw new Error("proof expired");
+    }
+
+    if (typeof payload.jti !== "string" || payload.jti.length === 0) {
+      throw new Error("invalid jti");
+    }
+
+    if (opts.access_token !== undefined && opts.access_token !== null) {
+      if (typeof payload.ath !== "string") {
+        throw new Error("missing ath");
+      }
+      const expectedAth = crypto
+        .createHash("sha256")
+        .update(opts.access_token, "ascii")
+        .digest("base64url");
+      if (payload.ath !== expectedAth) {
+        throw new Error("ath mismatch");
+      }
+    }
+
+    if (opts.expected_nonce !== undefined && opts.expected_nonce !== null) {
+      if (payload.nonce !== opts.expected_nonce) {
+        throw new Error("nonce mismatch");
+      }
+    }
+
+    const jkt = await j.calculateJwkThumbprint(protectedHeader.jwk, "sha256");
+    return {
+      ok: true,
+      jkt,
+      jti: payload.jti,
+      htm: payload.htm,
+      htu: payload.htu,
+      iat: payload.iat,
+      ath: payload.ath || null,
+    };
+  } catch (err) {
+    return formatErr(err);
+  }
+}
+module.exports.fuzzVerifyDpop = fuzzVerifyDpop;
+

@@ -31,12 +31,24 @@ defmodule Attesto.URI do
   def normalize_path(path) when path in [nil, ""], do: "/"
   def normalize_path(path) when is_binary(path), do: path
 
+  @doc false
+  @spec valid_port?(String.t(), term()) :: boolean()
+  def valid_port?(value, port) when is_binary(value) and is_integer(port) and port in 1..65_535 do
+    case Elixir.URI.parse(value).authority do
+      authority when is_binary(authority) -> not String.ends_with?(authority, ":")
+      _ -> false
+    end
+  end
+
+  def valid_port?(_value, _port), do: false
+
   defp valid_identifier?(value, allow_http?) do
     with {:ok, %Elixir.URI{} = uri} <- Elixir.URI.new(value),
          true <- accepted_scheme?(uri.scheme, allow_http?),
          true <- is_binary(uri.host) and uri.host != "",
          true <- is_nil(uri.userinfo),
-         true <- is_nil(uri.fragment) do
+         true <- is_nil(uri.fragment),
+         true <- valid_port?(value, uri.port) do
       true
     else
       _ -> false

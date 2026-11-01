@@ -503,12 +503,54 @@ defmodule Attesto.SdJwtTest do
                  SdJwt.decode_disclosures([SdJwt.object_disclosure("salt", reserved, "x")])
       end
 
-      for malformed <- [b64(~s(["salt"])), b64(~s([1, "name", "v"])), b64("not json"), "not base64!"] do
-        assert {:error, :invalid_disclosure} = SdJwt.decode_disclosures([malformed])
+      for malformed <- [
+            b64(~s(["salt"])),
+            b64(~s([1, "name", "v"])),
+            b64("not json"),
+            "not base64!",
+            "WyJzIiwiYSIsMV0=",
+            "WyJzIiwiYSIsMV1",
+            b64(~s(["salt", "profile", {"admin": true, "admin": false}])),
+            b64(
+              ~s(["salt", "deep", ) <>
+                String.duplicate("[", 33) <> "1" <> String.duplicate("]", 33) <> "]"
+            )
+          ] do
+        assert {:error, :invalid_disclosure} = SdJwt.decode_disclosures([malformed]),
+               "expected :invalid_disclosure for #{inspect(malformed)}"
       end
 
       assert {:error, :invalid_disclosure} = SdJwt.decode_disclosures([Process.get(:never_set, 42)])
       assert {:error, :unsupported_sd_alg} = SdJwt.decode_disclosures([object], "md5")
+    end
+
+    test "verify/3 rejects padded base64url, non-canonical base64url, duplicate JSON keys, and deep nesting in disclosures" do
+      {issuer_pem, issuer_jwk} = keypair({:ec, "P-256"})
+
+      deep_json =
+        ~s(["salt","deep",) <> String.duplicate("[", 33) <> "1" <> String.duplicate("]", 33) <> "]"
+
+      for bad_disclosure <- [
+            "WyJzIiwiYSIsMV0=",
+            "WyJzIiwiYSIsMV1",
+            b64(~s(["salt", "profile", {"admin": true, "admin": false}])),
+            b64(~s(["salt", "nested", {"_sd": ["d1"], "_sd": ["d2"]}])),
+            b64(deep_json)
+          ] do
+        digest = SdJwt.digest(bad_disclosure)
+
+        jwt =
+          Attesto.JWS.sign_compact(
+            issuer_pem,
+            %{"alg" => "ES256", "typ" => "vc+sd-jwt"},
+            %{"iss" => "https://issuer.example", "_sd_alg" => "sha-256", "_sd" => [digest]}
+          )
+
+        presentation = jwt <> "~" <> bad_disclosure <> "~"
+
+        assert {:error, :invalid_disclosure} = SdJwt.verify(presentation, issuer_jwk),
+               "expected :invalid_disclosure for presentation carrying #{inspect(bad_disclosure)}"
+      end
     end
   end
 end

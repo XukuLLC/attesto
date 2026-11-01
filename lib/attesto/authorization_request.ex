@@ -737,7 +737,7 @@ defmodule Attesto.AuthorizationRequest do
         {:ok, %{}}
 
       value when is_binary(value) ->
-        case JSON.decode(value) do
+        case Attesto.StrictJSON.decode(value) do
           {:ok, claims} when is_map(claims) ->
             {:ok, claims}
 
@@ -779,7 +779,7 @@ defmodule Attesto.AuthorizationRequest do
   end
 
   defp decode_authorization_details(value) when is_binary(value) do
-    case JSON.decode(value) do
+    case Attesto.StrictJSON.decode_value(value) do
       {:ok, decoded} -> {:ok, decoded}
       _error -> :error
     end

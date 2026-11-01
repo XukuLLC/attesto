@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -177,3 +180,57 @@ jobs:
             exit 1
           fi
           echo "attesto compiles clean without optional deps."
+
+  fuzz:
+    name: Differential Fuzzing (Python joserfc + Node jose/@sd-jwt/@auth0/mdl)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: "1.20.1"
+          otp-version: "29.1.2"
+
+      - name: Set up Python 3.14 (in-process parity stack)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Python parity dependencies
+        run: python -m pip install --upgrade pip joserfc cryptography
+
+      - name: Install Node parity dependencies
+        run: npm install --no-audit --no-fund --prefix test/support/js
+
+      - name: Install Mix dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Build erlang_python against Python 3.14
+        env:
+          PYTHON_CONFIG: ${{ env.pythonLocation }}/bin/python3.14-config
+        run: |
+          rm -rf deps/erlang_python/_build/cmake deps/erlang_python/priv/*.so
+          mix deps.compile erlang_python --force
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Run differential fuzzing suite (fixed seed, 2000 runs/property)
+        env:
+          ATTESTO_FUZZ_RUNS: "2000"
+        run: mix test --only fuzz --seed 20261101 --trace
+
+      - name: Run differential fuzzing suite (random seed, 2000 runs/property)
+        env:
+          ATTESTO_FUZZ_RUNS: "2000"
+        run: mix test --only fuzz --trace

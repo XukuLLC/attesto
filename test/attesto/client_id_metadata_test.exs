@@ -52,6 +52,9 @@ defmodule Attesto.ClientIdMetadataTest do
     test "rejects a value that does not parse as a URL with a host" do
       assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("not a url")
       assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("/relative/path")
+      assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("https://app.example:99999/cb")
+      assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("https://app.example:/cb")
+      assert {:error, :not_a_url} = ClientIdMetadata.validate_client_id("https://app.example:0/cb")
     end
 
     test "rejects invalid UTF-8 without raising" do
@@ -249,6 +252,26 @@ defmodule Attesto.ClientIdMetadataTest do
 
       assert {:error, :invalid_redirect_uris} =
                ClientIdMetadata.validate_document(client_id, doc)
+    end
+
+    test "rejects redirect_uris with fragments, relative paths, or malformed ports (RFC 6749 §3.1.2)" do
+      client_id = "https://app.example/meta"
+
+      for uri <- [
+            "https://app.example/cb#frag",
+            "https://app.example/cb#",
+            "/cb",
+            "//app.example/cb",
+            "https://app.example:99999/cb",
+            "https://app.example:/cb",
+            "https://app.example:443xyz/cb"
+          ] do
+        doc = %{"client_id" => client_id, "redirect_uris" => [uri]}
+
+        assert {:error, :invalid_redirect_uris} =
+                 ClientIdMetadata.validate_document(client_id, doc),
+               "expected #{inspect(uri)} to be rejected"
+      end
     end
   end
 
