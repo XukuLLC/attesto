@@ -154,24 +154,27 @@ defmodule Attesto.Key do
       else: :ok
   end
 
+  # RFC 7517 §§4.2-4.4: `use`, `key_ops`, and `alg` are optional, but a present
+  # member must be a string (an array for `key_ops`). An omitted member places
+  # no restriction; a present JSON null is malformed, not omitted.
   defp validate_jwk_usage(jwk_map) do
-    use_ok? = Map.get(jwk_map, "use") in [nil, "sig"]
+    use_ok? = Map.fetch(jwk_map, "use") in [:error, {:ok, "sig"}]
 
     key_ops_ok? =
-      case Map.get(jwk_map, "key_ops") do
-        nil -> true
-        key_ops when is_list(key_ops) -> "verify" in key_ops
-        _other -> false
+      case Map.fetch(jwk_map, "key_ops") do
+        :error -> true
+        {:ok, key_ops} when is_list(key_ops) -> "verify" in key_ops
+        {:ok, _other} -> false
       end
 
     if use_ok? and key_ops_ok?, do: :ok, else: {:error, :invalid_use}
   end
 
   defp validate_jwk_alg(jwk_map, alg) do
-    case Map.get(jwk_map, "alg") do
-      nil -> :ok
-      ^alg -> :ok
-      _other -> {:error, :alg_mismatch}
+    case Map.fetch(jwk_map, "alg") do
+      :error -> :ok
+      {:ok, ^alg} -> :ok
+      {:ok, _other} -> {:error, :alg_mismatch}
     end
   end
 

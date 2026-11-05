@@ -221,16 +221,18 @@ defmodule Attesto.CredentialProof do
   end
 
   defp check_key_attestation_header(header, jwk_map, trusted_jwks, opts) do
-    case Map.get(header, "key_attestation") do
-      nil ->
+    # An omitted header is optional unless attestation is required. A present
+    # header, a JSON null included, must be an attestation JWT.
+    case Map.fetch(header, "key_attestation") do
+      :error ->
         if Keyword.get(opts, :require_key_attestation, false),
           do: {:error, :missing_key_attestation},
           else: {:ok, nil}
 
-      attestation when is_binary(attestation) ->
+      {:ok, attestation} when is_binary(attestation) ->
         verify_key_attestation(attestation, jwk_map, trusted_jwks, opts)
 
-      _other ->
+      {:ok, _other} ->
         {:error, :invalid_key_attestation}
     end
   end

@@ -57,6 +57,15 @@ defmodule Attesto.KeyTest do
                Key.verification_jwk(Map.put(public_map, "key_ops", "verify"), alg: "ES256")
     end
 
+    test "rejects a present null use, key_ops, or alg instead of treating it as omitted" do
+      public_map = JOSE.JWK.generate_key({:ec, "P-256"}) |> public_map()
+
+      assert {:error, :invalid_use} = Key.verification_jwk(Map.put(public_map, "use", nil), alg: "ES256")
+      assert {:error, :invalid_use} = Key.verification_jwk(Map.put(public_map, "key_ops", nil), alg: "ES256")
+      assert {:error, :alg_mismatch} = Key.verification_jwk(Map.put(public_map, "alg", nil), alg: "ES256")
+      assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(public_map, alg: "ES256")
+    end
+
     test "rejects a JWK alg inconsistent with the protected header alg" do
       jwk_map =
         JOSE.JWK.generate_key({:ec, "P-256"})

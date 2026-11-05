@@ -158,8 +158,10 @@ defmodule Attesto.JWE do
 
   defp recipient_key(%{} = key, operation) do
     with :ok <- valid_p256_key(key),
-         true <- Map.get(key, "use") in [nil, "enc"],
-         true <- Map.get(key, "alg") in [nil, "ECDH-ES"],
+         # An omitted `use` or `alg` places no restriction; a present JSON null
+         # is malformed, as `key_operations/2` already treats `key_ops`.
+         true <- Map.fetch(key, "use") in [:error, {:ok, "enc"}],
+         true <- Map.fetch(key, "alg") in [:error, {:ok, "ECDH-ES"}],
          :ok <- key_operations(key, operation),
          :ok <- private_key(key, operation) do
       jose_key = JOSE.JWK.from_map(key)

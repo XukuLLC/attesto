@@ -204,6 +204,19 @@ defmodule Attesto.Federation.TrustChainTest do
     assert {:ok, _result} = TrustChain.validate(extension.chain, extension.anchor_jwks, now: @now)
   end
 
+  test "a present null constraint is malformed, not an omitted restriction" do
+    for name <- ~w(max_path_length naming_constraints allowed_entity_types) do
+      fixture = chain_fixture(anchor_constraints: %{name => nil})
+
+      assert {:error, :constraint_violation} =
+               TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now),
+             "expected a null #{name} to be refused"
+    end
+
+    omitted = chain_fixture(anchor_constraints: %{})
+    assert {:ok, _result} = TrustChain.validate(omitted.chain, omitted.anchor_jwks, now: @now)
+  end
+
   test "fails closed when policy forbids leaf metadata" do
     forbidden_policy = %{
       "openid_relying_party" => %{

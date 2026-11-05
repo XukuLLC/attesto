@@ -207,14 +207,25 @@ defmodule Attesto.Federation.TrustChain do
   defp apply_constraints(nil, _intermediates_below, _subordinate_entity_ids, metadata), do: {:ok, metadata}
 
   defp apply_constraints(constraints, intermediates_below, subordinate_entity_ids, metadata) when is_map(constraints) do
-    with :ok <- check_max_path_length(Map.get(constraints, "max_path_length"), intermediates_below),
-         :ok <- check_naming_constraints(Map.get(constraints, "naming_constraints"), subordinate_entity_ids) do
-      filter_allowed_entity_types(Map.get(constraints, "allowed_entity_types"), metadata)
+    with :ok <- check_max_path_length(constraint(constraints, "max_path_length"), intermediates_below),
+         :ok <- check_naming_constraints(constraint(constraints, "naming_constraints"), subordinate_entity_ids) do
+      filter_allowed_entity_types(constraint(constraints, "allowed_entity_types"), metadata)
     end
   end
 
   defp apply_constraints(_constraints, _intermediates_below, _subordinate_entity_ids, _metadata),
     do: {:error, :constraint_violation}
+
+  # An omitted constraint member places no restriction. A member present with a
+  # JSON null is malformed, not omitted: it maps to `:null`, which every
+  # constraint check refuses, whichever JSON backend decoded the statement.
+  defp constraint(constraints, name) do
+    case Map.fetch(constraints, name) do
+      :error -> nil
+      {:ok, nil} -> :null
+      {:ok, value} -> value
+    end
+  end
 
   defp check_max_path_length(nil, _intermediates_below), do: :ok
 

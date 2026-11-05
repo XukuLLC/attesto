@@ -659,11 +659,14 @@ defmodule Attesto.Token do
 
   # ----- internal: confirmation -----
 
+  # An absent `cnf` marks a bearer token. A present `cnf` must be one known
+  # binding; `"cnf": null` names a confirmation claim with no key in it and is
+  # refused rather than read as absent, which would downgrade it to bearer.
   defp check_confirmation_shape(claims) do
-    case Map.get(claims, "cnf") do
-      nil -> :ok
-      cnf when is_map(cnf) -> check_known_confirmation(cnf)
-      _other -> {:error, :unsupported_confirmation}
+    case Map.fetch(claims, "cnf") do
+      :error -> :ok
+      {:ok, cnf} when is_map(cnf) -> check_known_confirmation(cnf)
+      {:ok, _other} -> {:error, :unsupported_confirmation}
     end
   end
 

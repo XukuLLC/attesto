@@ -239,6 +239,25 @@ defmodule Attesto.CredentialProofTest do
       assert {:error, :missing_key_attestation} = CredentialProof.verify_jwt(proof, opts)
     end
 
+    test "a present null key_attestation header is malformed, not omitted" do
+      holder = JOSE.JWK.generate_key({:ec, "P-256"})
+      holder_map = public_map(holder)
+
+      header = %{
+        "alg" => "ES256",
+        "jwk" => holder_map,
+        "typ" => "openid4vci-proof+jwt",
+        "key_attestation" => nil
+      }
+
+      claims = %{"aud" => @issuer, "iat" => @now, "iss" => @client_id, "nonce" => @nonce}
+      proof = JWT.sign_compact(holder, header, claims)
+      signer = JOSE.JWK.generate_key({:ec, "P-256"})
+      opts = Keyword.put(verify_opts(), :key_attestation_trusted_jwks, trusted_key_attestation_signer(signer))
+
+      assert {:error, :invalid_key_attestation} = CredentialProof.verify_jwt(proof, opts)
+    end
+
     test "require_key_attestation: true fails closed without trusted attestation keys" do
       holder = JOSE.JWK.generate_key({:ec, "P-256"})
       proof = sign_proof(holder, public_map(holder))

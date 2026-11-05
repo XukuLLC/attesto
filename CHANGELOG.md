@@ -6,6 +6,53 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Security
+
+- Refuse a `cnf` claim that is present with a JSON `null` value, in
+  `Attesto.Token.verify/3` and `Attesto.Token.check_confirmation/2`
+  (`:unsupported_confirmation`) and in `Attesto.JwtVc.verify/3`
+  (`:invalid_cnf`). Both looked `cnf` up with `Map.get`, so a `nil` value read
+  as an absent claim: an access token passed as an unbound bearer token and a
+  JWT VC as a credential with no holder binding. Whether a verified `null`
+  arrived as `nil` depended on JOSE's JSON backend. The builtin OTP backend,
+  JOSE's default on OTP 27 and later, decodes it as `:null`, which was already
+  refused; Jason and Poison, selected on earlier OTP releases or through
+  `config :jose, json_module: ...`, decode it as `nil`. Claims returned by an
+  `Attesto.Plug.Authenticate` `:verify` callback were affected under any backend
+  when the callback decoded them itself with a decoder that maps `null` to
+  `nil`, such as `JSON.decode/1`.
+- Distinguish a present JSON `null` from an omitted member in these checks,
+  where an omitted member means "no restriction", so a null can no longer stand
+  in for absence:
+  - OpenID Federation `constraints` members `max_path_length`,
+    `naming_constraints`, and `allowed_entity_types` in
+    `Attesto.Federation.TrustChain.validate/3` (`:constraint_violation`).
+  - Status List Token `exp` in `Attesto.StatusList.verify/3`
+    (`:invalid_status_list`).
+  - SD-JWT VC `cnf` in `Attesto.SdJwtVc.verify/3`, which now returns the new
+    `:invalid_cnf` error for a present `cnf` that is not a non-empty object,
+    `null` and `{}` included, instead of returning it as holder-binding data.
+  - JWT VC `vc.id` and `credentialSubject.id` in `Attesto.JwtVc.verify/3`
+    (`:invalid_vc`).
+  - DPoP proof `ath` in `Attesto.DPoP.verify_proof/2` (`:invalid_ath` without a
+    bound access token, `:missing_ath` with one).
+  - OpenID4VCI proof `key_attestation` header in
+    `Attesto.CredentialProof.verify_jwt/2` when key attestation is checked
+    (`:invalid_key_attestation`).
+  - JWK `use`, `key_ops`, and `alg` in `Attesto.Key.verification_jwk/2`
+    (`:invalid_use` / `:alg_mismatch`), which wallet attestation `cnf` keys,
+    SD-JWT key-binding keys, and federation Entity Statement keys pass through.
+  - JWE recipient-key `use` and `alg` in `Attesto.JWE` (`:invalid_key`),
+    matching its existing handling of `key_ops`.
+
+  For a signed artifact, each case needs the signer to have put `null` in the
+  signed claim or protected header; none lets an attacker remove an existing
+  signed restriction. `Attesto.Key.verification_jwk/2` and `Attesto.JWE` also
+  refuse a null member in a key map a caller passes directly. Under the Jason
+  and Poison JOSE backends each null read as absent.
+
 ## [2.10.0] - 2026-11-01
 
 ### Added

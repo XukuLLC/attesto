@@ -564,7 +564,7 @@ defmodule Attesto.DPoP do
   end
 
   defp check_ath(claims, opts) do
-    case {Keyword.get(opts, :access_token), Map.get(claims, "ath")} do
+    case {Keyword.get(opts, :access_token), fetch_ath(claims)} do
       {nil, ath} when is_binary(ath) or is_nil(ath) ->
         {:ok, ath}
 
@@ -578,6 +578,17 @@ defmodule Attesto.DPoP do
 
       {nil, _other} ->
         {:error, :invalid_ath}
+    end
+  end
+
+  # An omitted `ath` is allowed when no access token is bound. A present `ath`,
+  # a JSON null included, must be a string, so null maps to `:null`, which no
+  # `check_ath/2` clause accepts.
+  defp fetch_ath(claims) do
+    case Map.fetch(claims, "ath") do
+      :error -> nil
+      {:ok, nil} -> :null
+      {:ok, value} -> value
     end
   end
 

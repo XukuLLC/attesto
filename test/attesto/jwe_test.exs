@@ -61,7 +61,14 @@ defmodule Attesto.JWETest do
     assert {:ok, compact} = JWE.encrypt(context.public, "private", context.header)
     assert {:error, :invalid_key} = JWE.decrypt(context.public, compact)
 
-    for field <- [%{"use" => "sig"}, %{"alg" => "ES256"}, %{"key_ops" => ["verify"]}] do
+    for field <- [
+          %{"use" => "sig"},
+          %{"alg" => "ES256"},
+          %{"key_ops" => ["verify"]},
+          %{"use" => nil},
+          %{"alg" => nil},
+          %{"key_ops" => nil}
+        ] do
       assert {:error, :invalid_key} = JWE.encrypt(Map.merge(context.public, field), "private", context.header)
     end
   end

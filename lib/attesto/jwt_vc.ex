@@ -194,7 +194,7 @@ defmodule Attesto.JwtVc do
          {:ok, registered} <- registered_claims(jwt_claims),
          :ok <- check_expected_issuer(registered.iss, opts),
          {:ok, vc, claims} <- validate_vc(jwt_claims, registered),
-         {:ok, cnf} <- validate_verified_cnf(Map.get(jwt_claims, "cnf")),
+         {:ok, cnf} <- validate_verified_cnf(Map.fetch(jwt_claims, "cnf")),
          :ok <- check_temporal(registered, NumericDate.now(opts)) do
       {:ok,
        %{
@@ -422,8 +422,8 @@ defmodule Attesto.JwtVc do
          :ok <- valid_types(Map.get(vc, "type")),
          {:ok, credential_subject} <- valid_credential_subject(Map.get(vc, "credentialSubject")),
          :ok <- matching_issuer(Map.get(vc, "issuer"), registered.iss),
-         :ok <- matching_optional_id(Map.get(vc, "id"), registered.jti),
-         :ok <- matching_optional_id(Map.get(credential_subject, "id"), registered.sub) do
+         :ok <- matching_optional_id(Map.fetch(vc, "id"), registered.jti),
+         :ok <- matching_optional_id(Map.fetch(credential_subject, "id"), registered.sub) do
       {:ok, vc, credential_subject}
     end
   end
@@ -451,13 +451,17 @@ defmodule Attesto.JwtVc do
   defp matching_issuer(%{"id" => expected}, expected), do: :ok
   defp matching_issuer(_issuer, _expected), do: {:error, :invalid_issuer}
 
-  defp matching_optional_id(nil, _expected), do: :ok
-  defp matching_optional_id(expected, expected), do: :ok
-  defp matching_optional_id(_actual, _expected), do: {:error, :invalid_vc}
+  # An omitted id is not compared. A present id, a JSON null included, must
+  # equal the registered claim.
+  defp matching_optional_id(:error, _expected), do: :ok
+  defp matching_optional_id({:ok, expected}, expected) when not is_nil(expected), do: :ok
+  defp matching_optional_id({:ok, _actual}, _expected), do: {:error, :invalid_vc}
 
-  defp validate_verified_cnf(nil), do: {:ok, nil}
+  # An absent `cnf` means the credential has no holder binding. A present
+  # `"cnf": null` is refused rather than read as absent.
+  defp validate_verified_cnf(:error), do: {:ok, nil}
 
-  defp validate_verified_cnf(cnf) do
+  defp validate_verified_cnf({:ok, cnf}) do
     case validate_cnf(cnf) do
       :ok -> {:ok, cnf}
       {:error, :invalid_cnf} = error -> error

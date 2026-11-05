@@ -233,6 +233,17 @@ defmodule Attesto.SdJwtVcTest do
       end
     end
 
+    test "rejects a present null cnf instead of returning an unbound credential" do
+      {pem, jwk} = keypair()
+      now = System.system_time(:second)
+
+      null_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type", "cnf" => nil}, pem: pem, typ: "vc+sd-jwt")
+      no_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type"}, pem: pem, typ: "vc+sd-jwt")
+
+      assert {:error, :invalid_cnf} = SdJwtVc.verify(null_cnf, jwk, now: now)
+      assert {:ok, %{cnf: nil}} = SdJwtVc.verify(no_cnf, jwk, now: now)
+    end
+
     test "accepts sub and iat reconstructed from disclosures" do
       {pem, jwk} = keypair()
       now = System.system_time(:second)

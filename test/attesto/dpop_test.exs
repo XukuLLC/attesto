@@ -159,6 +159,13 @@ defmodule Attesto.DPoPTest do
                DPoP.verify_proof(proof, base_opts(access_token: access_token))
     end
 
+    test "a present null ath is malformed rather than omitted" do
+      {proof, _key, _claims, _header} = valid_proof(claim_overrides: %{"ath" => nil})
+
+      assert {:error, :invalid_ath} = DPoP.verify_proof(proof, base_opts())
+      assert {:error, :missing_ath} = DPoP.verify_proof(proof, base_opts(access_token: "atk_present"))
+    end
+
     test "a clean proof htu matches a live uri carrying a query and fragment" do
       claim_uri = "https://api.example.com/positions"
       live_uri = "https://api.example.com/positions?cursor=abc#frag"

@@ -129,11 +129,11 @@ defmodule Attesto.StatusList do
   # one does not expire; when present it is honored with a small clock-skew
   # leeway. A non-integer `exp` is malformed. Pass `now:`/`leeway:` to override.
   defp check_expiry(claims, opts) do
-    case Map.get(claims, "exp") do
-      nil ->
+    case Map.fetch(claims, "exp") do
+      :error ->
         :ok
 
-      exp when is_integer(exp) ->
+      {:ok, exp} when is_integer(exp) ->
         now = NumericDate.now(opts, default: :system, invalid_override: :fallback)
         leeway = Keyword.get(opts, :leeway, @expiry_leeway_seconds)
         if NumericDate.not_expired?(exp, now, leeway: leeway), do: :ok, else: {:error, :expired}

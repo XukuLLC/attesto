@@ -100,6 +100,14 @@ defmodule Attesto.StatusListTest do
       assert {:ok, _} = StatusList.verify(no_exp, jwks, now: now + 10_000_000)
     end
 
+    test "rejects a present null exp instead of treating it as no expiry", %{jwks: jwks} do
+      token = StatusList.sign(TestKeystore, Map.put(valid_claims([0, 1]), "exp", nil))
+
+      assert [_header, payload, _signature] = String.split(token, ".")
+      assert payload |> Base.url_decode64!(padding: false) |> JSON.decode!() |> Map.fetch!("exp") == nil
+      assert {:error, :invalid_status_list} = StatusList.verify(token, jwks, now: 1_700_000_000)
+    end
+
     test "rejects a tampered signature", %{jwks: jwks} do
       token = StatusList.issue(TestKeystore, @uri, [0, 1, 0], now: 1_700_000_000)
 

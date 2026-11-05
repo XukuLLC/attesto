@@ -66,6 +66,7 @@ defmodule Attesto.SdJwtVc do
           | :missing_vct
           | :expired
           | :not_yet_valid
+          | :invalid_cnf
 
   @doc """
   Issue an SD-JWT VC.
@@ -215,13 +216,14 @@ defmodule Attesto.SdJwtVc do
          {:ok, iss} <- credential_issuer(base, opts),
          {:ok, vct} <- require_string(base.claims, "vct", :missing_vct),
          :ok <- check_exp(base.claims, opts),
-         :ok <- check_nbf(base.claims, opts) do
+         :ok <- check_nbf(base.claims, opts),
+         {:ok, cnf} <- check_cnf(base.claims) do
       {:ok,
        %{
          claims: base.claims,
          vct: vct,
          iss: iss,
-         cnf: Map.get(base.claims, "cnf"),
+         cnf: cnf,
          key_binding_jwt: base.key_binding_jwt,
          issuer_jwt: base.issuer_jwt,
          disclosures: base.disclosures
@@ -268,6 +270,17 @@ defmodule Attesto.SdJwtVc do
         else: {:ok, nil}
     else
       _invalid -> {:error, :missing_iss}
+    end
+  end
+
+  # An omitted `cnf` means the credential has no holder binding. A present `cnf`
+  # must be a non-empty object; a JSON null is refused rather than returned as an
+  # unbound credential.
+  defp check_cnf(claims) do
+    case Map.fetch(claims, "cnf") do
+      :error -> {:ok, nil}
+      {:ok, cnf} when is_map(cnf) and map_size(cnf) > 0 -> {:ok, cnf}
+      {:ok, _other} -> {:error, :invalid_cnf}
     end
   end
 

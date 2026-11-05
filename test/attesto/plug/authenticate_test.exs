@@ -171,6 +171,27 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert challenge =~ "dpop_proof_required"
     end
 
+    test "an alternate verifier's nil cnf is refused instead of passing as a bearer token" do
+      # JSON.decode/1 maps a JSON null to nil, so a host verifier that decodes
+      # an introspection response this way hands back "cnf" => nil for a token
+      # whose confirmation claim is null.
+      claims = JSON.decode!(~s({"sub": "remote-subject", "cnf": null}))
+
+      conn =
+        [{"authorization", "Bearer remote-token"}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(
+            config: :remote_issuer,
+            verify: {__MODULE__, :verify_result_callback, [{:ok, claims}]}
+          )
+        )
+
+      assert conn.halted
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_token"
+    end
+
     test "an alternate verifier accepts a matching DPoP confirmation binding" do
       jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       jkt = JOSE.JWK.thumbprint(jwk)

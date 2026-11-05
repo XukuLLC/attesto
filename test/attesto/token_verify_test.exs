@@ -653,6 +653,14 @@ defmodule Attesto.TokenVerifyTest do
       assert {:error, :unsupported_confirmation} = Token.verify(config, forged)
     end
 
+    test "an explicit null cnf fails with :unsupported_confirmation instead of verifying as bearer",
+         %{config: config, pem: pem} do
+      forged = forge(pem, client_claims(%{"cnf" => nil}))
+      assert {:error, :unsupported_confirmation} = Token.verify(config, forged)
+
+      assert {:ok, _claims} = Token.verify(config, forge(pem, client_claims()))
+    end
+
     test "unsupported-confirmation rejection wins over downstream claim-shape failures",
          %{config: config, pem: pem} do
       forged =
@@ -686,6 +694,7 @@ defmodule Attesto.TokenVerifyTest do
 
     test "rejects malformed confirmation claims and arguments" do
       assert {:error, :unsupported_confirmation} = Token.check_confirmation(%{"cnf" => "bad"})
+      assert {:error, :unsupported_confirmation} = Token.check_confirmation(%{"cnf" => nil})
       assert {:error, :unsupported_confirmation} = Token.check_confirmation(:untrusted)
     end
   end

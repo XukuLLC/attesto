@@ -270,5 +270,29 @@ defmodule Attesto.JwtVcTest do
       assert {:error, :invalid_cnf} =
                claims |> signed(jwk) |> JwtVc.verify(trusted_jwks(jwk, public), now: now)
     end
+
+    test "rejects a present null vc.id or credentialSubject.id instead of treating it as omitted" do
+      {jwk, _pem, public} = keypair()
+      now = 1_700_000_000
+      jwks = trusted_jwks(jwk, public)
+
+      null_vc_id = put_in(valid_claims(now), ["vc", "id"], nil)
+      null_subject_id = put_in(valid_claims(now), ["vc", "credentialSubject", "id"], nil)
+
+      assert {:error, :invalid_vc} = null_vc_id |> signed(jwk) |> JwtVc.verify(jwks, now: now)
+      assert {:error, :invalid_vc} = null_subject_id |> signed(jwk) |> JwtVc.verify(jwks, now: now)
+    end
+
+    test "rejects an explicit null cnf instead of reading it as an unbound credential" do
+      {jwk, _pem, public} = keypair()
+      now = 1_700_000_000
+      jwks = trusted_jwks(jwk, public)
+
+      assert {:error, :invalid_cnf} =
+               valid_claims(now) |> Map.put("cnf", nil) |> signed(jwk) |> JwtVc.verify(jwks, now: now)
+
+      assert {:ok, %{cnf: nil}} =
+               valid_claims(now) |> Map.delete("cnf") |> signed(jwk) |> JwtVc.verify(jwks, now: now)
+    end
   end
 end
