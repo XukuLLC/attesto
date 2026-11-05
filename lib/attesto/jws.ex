@@ -312,8 +312,8 @@ defmodule Attesto.JWS do
     validate_verification_result_options!(malformed_result, claims_map?, return_key?)
 
     case valid_verification_policy?(opts) and decode_and_validate_jwt(jwt, opts) do
-      :ok ->
-        Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, opts))
+      {:ok, claims} ->
+        Enum.reduce_while(candidates, {:error, terminal_error}, &verify_candidate(&1, &2, jwt, claims, opts))
 
       {:error, _reason} ->
         {:error, Keyword.get(opts, :malformed_error, terminal_error)}
@@ -397,9 +397,8 @@ defmodule Attesto.JWS do
     with {:ok, compact} <- decode_compact(jwt, opts),
          {:ok, protected} <- decode64(compact.protected_segment, decode_opts),
          {:ok, _header} <- decode_json_map(protected, opts),
-         {:ok, payload} <- decode64(compact.payload_segment, decode_opts),
-         {:ok, _claims} <- decode_json_map(payload, opts) do
-      :ok
+         {:ok, payload} <- decode64(compact.payload_segment, decode_opts) do
+      decode_json_map(payload, opts)
     end
   end
 
@@ -440,15 +439,20 @@ defmodule Attesto.JWS do
     end
   end
 
-  defp verify_candidate(candidate, acc, jwt, opts) do
+  defp verify_candidate(candidate, acc, jwt, claims, opts) do
     if allow_verification_candidate(candidate, opts, :skip) == true,
-      do: verify_allowed_candidate(candidate, acc, jwt, opts),
+      do: verify_allowed_candidate(candidate, acc, jwt, claims, opts),
       else: {:cont, acc}
   end
 
-  defp verify_allowed_candidate(candidate, acc, jwt, opts) do
+  # The claims returned are Attesto's strict decode of the payload segment, not
+  # JOSE's `fields`. Both come from the same signed bytes, but JOSE decodes with
+  # whichever JSON backend it selected, and the backends disagree on JSON null:
+  # the builtin OTP backend yields `:null`, Jason and Poison yield `nil`. The
+  # strict decode always yields `nil`, so every caller sees one representation.
+  defp verify_allowed_candidate(candidate, acc, jwt, claims, opts) do
     case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
-      {true, %JOSE.JWT{fields: claims}, %JOSE.JWS{}} ->
+      {true, %JOSE.JWT{}, %JOSE.JWS{}} ->
         if signature_parameters_valid?(jwt, candidate, opts),
           do: verified_candidate_result(claims, candidate, acc, opts),
           else: {:cont, acc}

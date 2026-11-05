@@ -217,6 +217,13 @@ defmodule Attesto.Federation.TrustChainTest do
     assert {:ok, _result} = TrustChain.validate(omitted.chain, omitted.anchor_jwks, now: @now)
   end
 
+  test "a null value operator in a signed policy removes the parameter" do
+    fixture = chain_fixture(anchor_policy: %{"openid_relying_party" => %{"redirect_uris" => %{"value" => nil}}})
+
+    assert {:ok, result} = TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+    refute Map.has_key?(result.metadata["openid_relying_party"], "redirect_uris")
+  end
+
   test "fails closed when policy forbids leaf metadata" do
     forbidden_policy = %{
       "openid_relying_party" => %{

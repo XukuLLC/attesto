@@ -53,6 +53,26 @@ defaults in a minor release.
   refuse a null member in a key map a caller passes directly. Under the Jason
   and Poison JOSE backends each null read as absent.
 
+### Changed
+
+- Verified JWT claims now come from Attesto's strict decode of the signed
+  payload rather than from JOSE's `fields`, so a JSON `null` is `nil` at every
+  depth whichever JSON backend JOSE selected. Under JOSE's builtin OTP backend,
+  the default on OTP 27 and later, verified claims carried the atom `:null`.
+  This applies to every Attesto JWT verifier, all of which verify through
+  `Attesto.JWS`; callers that matched `:null` in returned claims must match
+  `nil` instead. The signature is still verified by JOSE over the same
+  bytes; only the decoded representation changes. Observable effects under the
+  OTP backend:
+  - A Request Object's nested `null` re-encodes as JSON `null` rather than the
+    string `"null"`.
+  - An `authorization_details` entry with a `null` extension value is accepted,
+    as it already was under Jason and Poison.
+  - An Entity Statement whose metadata parameter is `null` is rejected with
+    `:invalid_entity_statement`.
+  - A federation metadata policy `"value": null` removes the parameter, as
+    OpenID Federation specifies.
+
 ## [2.10.0] - 2026-11-01
 
 ### Added

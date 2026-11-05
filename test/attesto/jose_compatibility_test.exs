@@ -46,6 +46,16 @@ defmodule Attesto.JOSECompatibilityTest do
   # and Poison yield nil. Attesto's confirmation checks have to refuse a
   # present "cnf": null under every backend, not only the default one.
   for backend <- [:jose_json_otp, :jose_json_jason] do
+    test "JWS.verify_strict/3 returns JSON null as nil at every depth under #{backend}" do
+      :ok = JOSE.json_module(unquote(backend))
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      claims = %{"top" => nil, "nested" => %{"inner" => nil, "list" => [nil, 1]}, "sub" => "x"}
+
+      jwt = JWT.sign_compact(jwk, %{"alg" => "ES256"}, claims)
+
+      assert {:ok, ^claims} = Attesto.JWS.verify_strict(jwt, [{nil, "ES256", JOSE.JWK.to_public(jwk)}])
+    end
+
     test "Token.verify/3 refuses an explicit null cnf under #{backend}" do
       :ok = JOSE.json_module(unquote(backend))
       pem = Factory.rsa_pem()

@@ -5,6 +5,7 @@ defmodule Attesto.Federation.EntityStatementTest do
   alias Attesto.Federation.EntityStatement
   alias Attesto.{JWS, Key, SigningAlg}
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
 
   @entity "https://entity.example"
   @superior "https://superior.example"
@@ -71,6 +72,26 @@ defmodule Attesto.Federation.EntityStatementTest do
     assert claims["sub"] == @entity
     assert claims["authority_hints"] == [@superior]
     assert claims["jwks"] == jwks(pem)
+  end
+
+  test "rejects a signed metadata parameter whose value is null" do
+    pem = Factory.ec_pem()
+    jwk = Attesto.Key.signing_jwk(pem)
+
+    claims = %{
+      "iss" => @entity,
+      "sub" => @entity,
+      "iat" => @now,
+      "exp" => @now + 300,
+      "jwks" => jwks(pem),
+      "authority_hints" => [@superior],
+      "metadata" => %{"openid_relying_party" => %{"redirect_uris" => nil}}
+    }
+
+    header = %{"alg" => "ES256", "kid" => Attesto.Key.kid(pem), "typ" => "entity-statement+jwt"}
+    jwt = JWT.sign_compact(jwk, header, claims)
+
+    assert {:error, :invalid_entity_statement} = EntityStatement.verify_self_signed(jwt, now: @now)
   end
 
   test "accepts an Attesto keystore module for signing" do

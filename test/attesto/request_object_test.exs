@@ -39,6 +39,23 @@ defmodule Attesto.RequestObjectTest do
 
   defp base_opts, do: [issuer: @issuer, audience: @audience]
 
+  test "re-encodes a signed nested JSON null as null, not as a string" do
+    key = ec_key()
+    jwt = request_object(key, %{"claims" => %{"id_token" => %{"email" => nil}}})
+
+    assert {:ok, params} = RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+    assert JSON.decode!(params["claims"]) == %{"id_token" => %{"email" => nil}}
+  end
+
+  test "preserves an authorization_details entry carrying a null extension value" do
+    key = ec_key()
+    details = [%{"type" => "payment_initiation", "note" => nil}]
+    jwt = request_object(key, %{"authorization_details" => details})
+
+    assert {:ok, %{"authorization_details" => ^details}} =
+             RequestObject.verify(jwt, %{"keys" => [public_jwk(key)]}, base_opts())
+  end
+
   test "verifies a valid signed request object with default opts" do
     key = ec_key()
     jwt = request_object(key)
