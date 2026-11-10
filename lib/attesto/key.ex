@@ -163,10 +163,14 @@ defmodule Attesto.Key do
     jwk
   end
 
+  @doc false
+  @spec private_members?(map()) :: boolean()
+  def private_members?(jwk_map) when is_map(jwk_map), do: Enum.any?(@private_jwk_members, &Map.has_key?(jwk_map, &1))
+
   defp reject_private_members(_jwk_map, false), do: :ok
 
   defp reject_private_members(jwk_map, true) do
-    if Enum.any?(@private_jwk_members, &Map.has_key?(jwk_map, &1)),
+    if private_members?(jwk_map),
       do: {:error, :private_material},
       else: :ok
   end

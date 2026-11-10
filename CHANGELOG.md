@@ -68,6 +68,24 @@ defaults in a minor release.
 - `Attesto.Key.single_jwk_map?/1`, the check the fixes above share: a map
   with a string `kty` and no `keys` member.
 
+### Fixed
+
+- Pass over a key in a trusted JWK Set that is well formed but cannot verify
+  a signature, instead of treating the whole set as malformed. A client or
+  identity provider that published an encryption key beside its signing keys
+  (`use: "enc"`, `key_ops` without `verify`, an `alg` such as `RSA-OAEP` or
+  `ECDH-ES`, or an X25519 or X448 key) got `:invalid_signature` for every
+  assertion from `Attesto.ClientAssertion.verify/5` and
+  `Attesto.IdentityAssertion.verify/3`, even when the header `kid` selected
+  the signing key. The wallet attestation, key attestation, request object,
+  JWT VC, and trust mark verifiers rejected such a set the same way.
+  RFC 7517 §5 has a reader ignore these keys, and keys of a type it does not
+  implement. They are now skipped, and the signature is checked against the
+  remaining keys. A key that is not a single public JWK, carries private
+  members, cannot be parsed, or has a `use`, `key_ops`, or `alg` member of the
+  wrong JSON type still makes the set fail. Entity Statement verification
+  keeps requiring every key in a federation `jwks` to be a signing key.
+
 ## [2.11.0] - 2026-11-05
 
 ### Security

@@ -255,6 +255,60 @@ defmodule Attesto.JWSTest do
              )
   end
 
+  test "a well-formed key that cannot verify signatures is passed over instead of rejecting the set" do
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    kid = JOSE.JWK.thumbprint(signer)
+    valid = public_map(signer, %{"kid" => kid, "alg" => "ES256"})
+    jwt = signed_jwt(signer, kid)
+    rsa = JOSE.JWK.generate_key({:rsa, 2048})
+    ec = JOSE.JWK.generate_key({:ec, "P-256"})
+
+    for other <- [
+          public_map(rsa, %{"kid" => "enc-rsa", "use" => "enc", "alg" => "RSA-OAEP"}),
+          public_map(ec, %{"kid" => "enc-ec", "use" => "enc"}),
+          public_map(ec, %{"kid" => "ecdh", "alg" => "ECDH-ES"}),
+          public_map(rsa, %{"kid" => "wrap", "key_ops" => ["wrapKey", "encrypt"]}),
+          public_map(JOSE.JWK.generate_key({:okp, :X25519}), %{"kid" => "x25519"}),
+          %{"kty" => "AKP", "kid" => "pq", "pub" => "AAAA"}
+        ] do
+      for keys <- [[other, valid], [valid, other]] do
+        assert [{^kid, "ES256", %JOSE.JWK{}}] =
+                 JWS.verification_candidates(keys, accepted_algs: ["ES256"], malformed_key: :reject_set),
+               "expected #{inspect(other["kid"])} to be passed over"
+      end
+
+      assert {:ok, %{"ok" => true}} =
+               JWS.verify_trusted(jwt, %{"kid" => kid}, %{"keys" => [other, valid]},
+                 accepted_algs: ["ES256"],
+                 malformed_key: :reject_set
+               )
+    end
+
+    {_type, private_ec} = JOSE.JWK.to_map(ec)
+
+    for malformed <- [
+          %{"not" => "a jwk"},
+          Map.put(valid, "use", nil),
+          Map.put(valid, "key_ops", "verify"),
+          Map.put(valid, "alg", nil),
+          Map.merge(private_ec, %{"kid" => "private-enc", "use" => "enc"}),
+          %{"kty" => "EC", "crv" => "P-256", "kid" => "no-coordinates"}
+        ] do
+      assert [] = JWS.verification_candidates([malformed, valid], accepted_algs: ["ES256"], malformed_key: :reject_set),
+             "expected #{inspect(malformed)} to reject the set"
+    end
+  end
+
+  test "with a fixed algorithm, a key whose own alg or type does not fit it is passed over" do
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    valid = public_map(signer, %{"kid" => "p256"})
+    other_alg = public_map(JOSE.JWK.generate_key({:ec, "P-256"}), %{"kid" => "declared", "alg" => "ES384"})
+    other_curve = public_map(JOSE.JWK.generate_key({:ec, "P-384"}), %{"kid" => "p384"})
+
+    assert [{"p256", "ES256", %JOSE.JWK{}}] =
+             JWS.verification_candidates([other_alg, other_curve, valid], alg: "ES256", malformed_key: :reject_set)
+  end
+
   test "trusted JWK candidates must be public verification keys" do
     key = JOSE.JWK.generate_key({:ec, "P-256"})
     public = public_map(key, %{"kid" => "valid", "alg" => "ES256"})

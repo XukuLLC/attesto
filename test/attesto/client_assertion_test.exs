@@ -212,6 +212,23 @@ defmodule Attesto.ClientAssertionTest do
              )
   end
 
+  test "verifies against a trusted set that also publishes encryption keys" do
+    key = ec_key()
+    jwt = assertion(key)
+    {_kty, rsa_enc} = {:rsa, 2048} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_public_map()
+    {_kty, x25519} = {:okp, :X25519} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_public_map()
+
+    trusted = %{
+      "keys" => [
+        public_jwk(key),
+        Map.merge(rsa_enc, %{"kid" => "enc-1", "use" => "enc", "alg" => "RSA-OAEP-256"}),
+        Map.merge(x25519, %{"kid" => "enc-2", "use" => "enc", "alg" => "ECDH-ES"})
+      ]
+    }
+
+    assert {:ok, %{"sub" => @client_id}} = ClientAssertion.verify(jwt, @client_id, @audience, trusted)
+  end
+
   test "rejects alg confusion: token header alg must match the trusted key alg" do
     key = ec_key()
     jwt = assertion(key)

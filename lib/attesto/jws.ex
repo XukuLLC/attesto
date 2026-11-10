@@ -13,6 +13,10 @@ defmodule Attesto.JWS do
   @max_protected_segment_bytes 256 * 1_024
   @max_signature_segment_bytes 256 * 1_024
 
+  # Curves whose keys can verify a JWS signature Attesto supports.
+  @signature_ec_curves ~w(P-256 P-384 P-521 secp256k1)
+  @signature_okp_curves ~w(Ed25519 Ed448)
+
   @type compact_segments :: %{
           protected_segment: binary(),
           payload_segment: binary(),
@@ -233,7 +237,12 @@ defmodule Attesto.JWS do
     * `:malformed_key` is `:reject_set` (default), `:skip`, or `:raise`.
       The first returns an empty set when any map is malformed, the second
       drops only that map, and the last lets a custom builder's exception
-      retain its caller-visible behavior.
+      retain its caller-visible behavior. A well-formed public JWK that cannot
+      verify the signature is dropped under every policy (RFC 7517 §5): one
+      whose `use` is not `sig`, whose `key_ops` lacks `verify`, whose `alg`
+      names no JWS signature algorithm, whose key type or curve has no
+      supported signature algorithm, or, with `alg:`, whose type or own `alg`
+      does not fit that algorithm.
     * `:candidate_builder` can build a candidate from non-JWK inputs, such as
       a PEM. Its result must be a `{kid, alg, jwk}` tuple.
   """
@@ -414,11 +423,11 @@ defmodule Attesto.JWS do
   defp normalize_verification_keys(_keys), do: []
 
   defp build_verification_candidate(key, opts, :raise) do
-    {:ok, build_candidate!(key, opts)}
+    build_candidate!(key, opts)
   end
 
   defp build_verification_candidate(key, opts, malformed_key) do
-    {:ok, build_candidate!(key, opts)}
+    build_candidate!(key, opts)
   rescue
     _ -> malformed_candidate(malformed_key)
   catch
@@ -522,15 +531,15 @@ defmodule Attesto.JWS do
       else: {:halt, successful_verification(claims, candidate, return_key?)}
   end
 
+  # Returns `{:ok, candidate}`, or `:skip` for a key that is well formed but
+  # cannot verify this signature. A malformed key raises, and the caller applies
+  # the `:malformed_key` policy.
   defp build_candidate!(key, opts) do
-    candidate =
-      case Keyword.get(opts, :candidate_builder) do
-        builder when is_function(builder, 1) -> builder.(key)
-        nil -> map_candidate!(key, opts)
-        _other -> raise ArgumentError, ":candidate_builder must be a unary function"
-      end
-
-    validate_candidate!(candidate)
+    case Keyword.get(opts, :candidate_builder) do
+      builder when is_function(builder, 1) -> {:ok, validate_candidate!(builder.(key))}
+      nil -> map_candidate!(key, opts)
+      _other -> raise ArgumentError, ":candidate_builder must be a unary function"
+    end
   end
 
   defp map_candidate!(jwk_map, opts) when is_map(jwk_map) do
@@ -542,23 +551,72 @@ defmodule Attesto.JWS do
       raise ArgumentError, "RSA verification key parameters are out of safe bounds"
     end
 
-    alg =
-      case Keyword.fetch(opts, :alg) do
-        {:ok, fixed_alg} when is_binary(fixed_alg) -> fixed_alg
-        {:ok, _other} -> raise ArgumentError, ":alg must be a string"
-        :error -> Map.get(jwk_map, "alg") || SigningAlg.infer(jwk_map)
-      end
-
-    jwk =
-      case Key.verification_jwk(jwk_map, alg: alg, minimum_rsa_bits: 1) do
-        {:ok, jwk} -> jwk
-        {:error, reason} -> raise ArgumentError, "invalid verification JWK: #{reason}"
-      end
-
-    {Map.get(jwk_map, "kid"), alg, jwk}
+    if other_purpose_key?(jwk_map), do: :skip, else: signature_key_candidate!(jwk_map, opts)
   end
 
   defp map_candidate!(_jwk_map, _opts), do: raise(ArgumentError, "verification candidate must be a JWK map")
+
+  defp signature_key_candidate!(jwk_map, opts) do
+    {alg_source, alg} = candidate_alg(jwk_map, opts)
+
+    case Key.verification_jwk(jwk_map, alg: alg, minimum_rsa_bits: 1) do
+      {:ok, jwk} ->
+        {:ok, {Map.get(jwk_map, "kid"), alg, jwk}}
+
+      {:error, reason} ->
+        if unusable_for_alg?(reason, alg_source, jwk_map),
+          do: :skip,
+          else: raise(ArgumentError, "invalid verification JWK: #{reason}")
+    end
+  end
+
+  # The algorithm a key is tried with: the caller's fixed `:alg`, else the
+  # key's own `alg` member, else the default for its type and curve.
+  defp candidate_alg(jwk_map, opts) do
+    case Keyword.fetch(opts, :alg) do
+      {:ok, fixed_alg} when is_binary(fixed_alg) -> {:fixed, fixed_alg}
+      {:ok, _other} -> raise ArgumentError, ":alg must be a string"
+      :error -> {:declared, Map.get(jwk_map, "alg") || SigningAlg.infer(jwk_map)}
+    end
+  end
+
+  # A fixed algorithm that the key's type cannot verify, or that differs from the
+  # key's own `alg`, leaves a well-formed key unusable for this signature. A key
+  # whose own `alg` contradicts its type, or a present `alg` that is not a
+  # string, is malformed.
+  defp unusable_for_alg?(:incompatible_key, :fixed, _jwk_map), do: true
+  defp unusable_for_alg?(:alg_mismatch, :fixed, %{"alg" => alg}) when is_binary(alg), do: true
+  defp unusable_for_alg?(_reason, _alg_source, _jwk_map), do: false
+
+  # RFC 7517 §5: a JWK Set may hold keys for other purposes, such as encryption
+  # keys, and keys of a type the reader does not implement, and a reader
+  # ignores them. Such a key is passed over whatever the `:malformed_key`
+  # policy, so publishing one beside the signing keys does not reject the set.
+  # A key that is not a single public JWK, or whose `use`, `key_ops`, or `alg`
+  # member has the wrong JSON type, is still malformed.
+  defp other_purpose_key?(jwk_map) do
+    Key.single_jwk_map?(jwk_map) and not Key.private_members?(jwk_map) and
+      (other_use?(jwk_map) or other_key_ops?(jwk_map) or other_alg?(jwk_map) or other_key_type?(jwk_map))
+  end
+
+  defp other_use?(%{"use" => use}) when is_binary(use), do: use != "sig"
+  defp other_use?(_jwk_map), do: false
+
+  defp other_key_ops?(%{"key_ops" => ops}) when is_list(ops), do: Enum.all?(ops, &is_binary/1) and "verify" not in ops
+  defp other_key_ops?(_jwk_map), do: false
+
+  # An `alg` naming no JWS signature algorithm, such as `RSA-OAEP` or `ECDH-ES`.
+  defp other_alg?(%{"alg" => alg}) when is_binary(alg), do: not SigningAlg.valid_verification_algorithms?([alg])
+  defp other_alg?(_jwk_map), do: false
+
+  # Key types and curves that cannot verify any supported JWS algorithm, such as
+  # the X25519 and X448 key-agreement curves. A missing or non-string `crv` on
+  # an EC or OKP key is malformed and left to `Key.verification_jwk/2`.
+  defp other_key_type?(%{"kty" => kty}) when kty in ["RSA", "oct"], do: false
+  defp other_key_type?(%{"kty" => "EC", "crv" => crv}) when is_binary(crv), do: crv not in @signature_ec_curves
+  defp other_key_type?(%{"kty" => "OKP", "crv" => crv}) when is_binary(crv), do: crv not in @signature_okp_curves
+  defp other_key_type?(%{"kty" => kty}) when kty in ["EC", "OKP"], do: false
+  defp other_key_type?(_jwk_map), do: true
 
   defp validate_candidate!({kid, alg, %JOSE.JWK{} = jwk}) when is_binary(alg), do: {kid, alg, jwk}
 
