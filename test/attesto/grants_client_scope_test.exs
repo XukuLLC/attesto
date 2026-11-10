@@ -8,6 +8,7 @@ defmodule Attesto.GrantsClientScopeTest do
   alias Attesto.PKCE
   alias Attesto.RefreshStore
   alias Attesto.RefreshToken
+  alias Attesto.Secret
 
   @verifier "client-scope-verifier_unreserved.chars-aaaaaaaaaa~0"
 
@@ -118,16 +119,22 @@ defmodule Attesto.GrantsClientScopeTest do
       %{t0: t0}
     end
 
-    test "a subset request narrows the successor's scope", %{t0: t0} do
+    test "a subset request narrows the access token, not the successor refresh token", %{t0: t0} do
+      granted = ["documents.read", "documents.write", "positions.read"]
+
       assert {:ok, %{token: t1, context: ctx}} =
                RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.read"])
 
       assert ctx.scope == ["documents.read"]
 
-      # The narrowed scope sticks: the next rotation cannot re-widen back to
-      # the original grant.
-      assert {:error, :invalid_scope} =
+      # RFC 6749 §6: the new refresh token's scope is identical to the
+      # presented token's, so the next refresh can obtain the full grant again.
+      assert {:ok, %{data: %{scope: ^granted}}} = RefreshStore.ETS.get(Secret.hash(t1))
+
+      assert {:ok, %{token: t2, context: %{scope: ["documents.write"]}}} =
                RefreshToken.rotate(RefreshStore.ETS, t1, scope: ["documents.write"])
+
+      assert {:ok, %{context: %{scope: ^granted}}} = RefreshToken.rotate(RefreshStore.ETS, t2)
     end
 
     test "no scope request keeps the full granted scope", %{t0: t0} do
@@ -141,6 +148,40 @@ defmodule Attesto.GrantsClientScopeTest do
 
       # Token intact: a valid narrowing retry still works.
       assert {:ok, %{generation: 1}} = RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.read"])
+    end
+  end
+
+  describe "refresh resource selection (RFC 8707 §2.2)" do
+    @granted_resources ["https://api.example/a", "https://api.example/b"]
+
+    setup do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RefreshStore.ETS, %{
+          subject: "usr_42",
+          scope: ["documents.read"],
+          resource: @granted_resources
+        })
+
+      %{t0: t0}
+    end
+
+    test "a subset request audiences the access token while the successor keeps the full grant", %{t0: t0} do
+      assert {:ok, %{token: t1, context: %{resource: ["https://api.example/a"]}}} =
+               RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/a"])
+
+      assert {:ok, %{data: %{resource: @granted_resources}}} = RefreshStore.ETS.get(Secret.hash(t1))
+
+      assert {:ok, %{token: t2, context: %{resource: ["https://api.example/b"]}}} =
+               RefreshToken.rotate(RefreshStore.ETS, t1, resource: ["https://api.example/b"])
+
+      assert {:ok, %{context: %{resource: @granted_resources}}} = RefreshToken.rotate(RefreshStore.ETS, t2)
+    end
+
+    test "a resource outside the grant is refused and does not burn the token", %{t0: t0} do
+      assert {:error, :invalid_target} =
+               RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/c"])
+
+      assert {:ok, %{generation: 1}} = RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/a"])
     end
   end
 end

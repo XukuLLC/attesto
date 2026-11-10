@@ -833,14 +833,31 @@ defmodule Attesto.RefreshTokenTest do
       assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client-a")
     end
 
-    test "a consumed-token retry with a different requested scope revokes the family" do
+    test "a consumed-token retry may request another granted scope subset for its access token" do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RefreshStore.ETS, context(%{scope: ["documents.read", "documents.write"]}))
+
+      {:ok, first} = RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.read"])
+
+      # The successor carries the full grant whatever the request named, so a
+      # retry that names a different granted subset is served the same
+      # successor and an access-token context for its own request.
+      assert {:ok, retry} = RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.write"])
+      assert retry.token == first.token
+      assert first.context.scope == ["documents.read"]
+      assert retry.context.scope == ["documents.write"]
+
+      assert {:ok, %{generation: 2}} = RefreshToken.rotate(RefreshStore.ETS, first.token)
+    end
+
+    test "a consumed-token retry requesting scope outside the grant revokes the family" do
       {:ok, %{token: t0}} =
         RefreshToken.issue(RefreshStore.ETS, context(%{scope: ["documents.read", "documents.write"]}))
 
       {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.read"])
 
       assert {:error, :reuse_detected} =
-               RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.write"])
+               RefreshToken.rotate(RefreshStore.ETS, t0, scope: ["documents.read", "billing.read"])
 
       assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1)
     end
@@ -868,12 +885,29 @@ defmodule Attesto.RefreshTokenTest do
                )
 
       assert retry.token == first.token
-      assert retry.context == first.context
-      assert retry.context.scope == ["documents.write", "documents.read"]
-      assert retry.context.resource == ["https://api.example/b", "https://api.example/a"]
+      assert first.context.scope == ["documents.write", "documents.read"]
+      assert first.context.resource == ["https://api.example/b", "https://api.example/a"]
+      assert retry.context.scope == ["documents.read", "documents.write"]
+      assert retry.context.resource == ["https://api.example/a", "https://api.example/b"]
+      assert Map.drop(retry.context, [:scope, :resource]) == Map.drop(first.context, [:scope, :resource])
     end
 
-    test "a consumed-token retry with a different requested resource revokes the family" do
+    test "a consumed-token retry may request another granted resource subset for its access token" do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(
+          RefreshStore.ETS,
+          context(%{resource: ["https://api.example/a", "https://api.example/b"]})
+        )
+
+      {:ok, first} = RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/a"])
+
+      assert {:ok, retry} = RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/b"])
+      assert retry.token == first.token
+      assert first.context.resource == ["https://api.example/a"]
+      assert retry.context.resource == ["https://api.example/b"]
+    end
+
+    test "a consumed-token retry requesting a resource outside the grant revokes the family" do
       {:ok, %{token: t0}} =
         RefreshToken.issue(
           RefreshStore.ETS,
@@ -884,9 +918,39 @@ defmodule Attesto.RefreshTokenTest do
         RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/a"])
 
       assert {:error, :reuse_detected} =
-               RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/b"])
+               RefreshToken.rotate(RefreshStore.ETS, t0, resource: ["https://api.example/c"])
 
       assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1)
+    end
+
+    test "a retry against a successor persisted with a narrower grant cannot obtain the parent's grant" do
+      # A successor written by an earlier release carried the request's subset
+      # as its own grant. Serving a retry for the parent's full scope from it
+      # would hand back an access token wider than the refresh token returned.
+      wide = ["documents.read", "documents.write"]
+      narrow = ["documents.read"]
+      {:ok, %{token: t0}} = RefreshToken.issue(MalformedContextStore, context(%{scope: wide}), now: 1_000)
+      {:ok, first} = RefreshToken.rotate(MalformedContextStore, t0, scope: narrow, now: 1_000)
+      child_hash = Secret.hash(first.token)
+
+      Process.put({MalformedContextStore, :mutator}, fn
+        %{token_hash: ^child_hash} = child ->
+          put_in(child, [:data, :scope], narrow)
+
+        %{successor: %{context: _}} = parent ->
+          put_in(parent, [:successor, :context, :scope], narrow)
+
+        record ->
+          record
+      end)
+
+      assert {:ok, retry} = RefreshToken.rotate(MalformedContextStore, t0, scope: narrow, now: 1_001)
+      assert retry.token == first.token
+      assert retry.context.scope == narrow
+
+      assert {:error, :reuse_detected} = RefreshToken.rotate(MalformedContextStore, t0, now: 1_002)
+    after
+      Process.delete({MalformedContextStore, :mutator})
     end
   end
 

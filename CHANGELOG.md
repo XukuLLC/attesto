@@ -147,6 +147,26 @@ defaults in a minor release.
   verified with the out-of-band Trust Anchor keys, its `jwks` verify the
   Trust Anchor's Subordinate Statement, it must configure the issuer of that
   statement, and its `exp` counts toward the chain's `exp`.
+- Keep the full grant on a rotated refresh token when the refresh request
+  names a narrower `scope` or `resource`. `Attesto.RefreshToken.rotate/3`
+  stored the requested subset as the successor's scope and resource set, so
+  one down-scoped refresh permanently removed the rest of the grant from the
+  family. RFC 6749 §6 requires a new refresh token's scope to be identical to
+  the presented token's, and RFC 8707 §2.2 keeps a refresh token bound to the
+  full original grant. Rotated refresh tokens now keep the full grant: the
+  successor copies the parent's scope and resource set unchanged, and the
+  requested subset applies only to the returned `context`, which the caller
+  mints the access token from. A later refresh can obtain the full grant
+  again. A request outside the grant is still `:invalid_scope` or
+  `:invalid_target` and does not consume the token. A lost-response retry
+  inside `:rotation_grace_seconds` no longer has to repeat the original
+  request's scope and resource: it receives the same successor and a
+  `context` for its own requested subset, while a retry from another client
+  or binding, or one requesting anything outside the grant, still revokes the
+  family. `Attesto.RefreshStore.ETS.rotate/4` returns
+  `{:error, :invalid_rotation}` for a child whose scope or resource set
+  differs from its parent's. The `Attesto.RefreshStore` callbacks are
+  unchanged, and an adapter that accepted a narrower child needs no change.
 
 ## [2.11.0] - 2026-11-05
 

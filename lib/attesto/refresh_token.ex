@@ -10,9 +10,16 @@ defmodule Attesto.RefreshToken do
   expiry remains authoritative: a cached successor is never returned after
   the consumed parent expires, even when the persisted retry deadline is
   later. Outside the intersection of those two fixed deadlines, or when the
-  retry does not match the original client, binding, and scope, a rotated
-  token is a captured-token signal and the entire family is revoked so neither
-  the attacker nor the victim can continue, forcing a fresh authorization.
+  retry does not match the original client and binding or requests scope or
+  resource outside the grant, a rotated token is a captured-token signal and
+  the entire family is revoked so neither the attacker nor the victim can
+  continue, forcing a fresh authorization.
+
+  A refresh request may name a subset of the granted scope (RFC 6749 §6) and
+  resource set (RFC 8707 §2.2). The subset applies to the access token minted
+  from the returned context only. The successor refresh token keeps exactly
+  the presented token's scope and resource set, so a later refresh can obtain
+  the full grant again.
 
   This module is pure logic over a `Attesto.RefreshStore`; the store
   provides the atomic family-level `rotate/4` transaction on which reuse
@@ -188,15 +195,19 @@ defmodule Attesto.RefreshToken do
 
   On success returns `{:ok, %{token, family_id, generation, context}}`
   where `token` is the new refresh token, `generation` is the successor's
-  generation, and `context` is the grant context to mint the next access
-  token from.
+  generation, and `context` is the grant context to mint this request's
+  access token from: its `:scope` and `:resource` are the values resolved
+  from the `:scope` and `:resource` options below. The new refresh token
+  itself keeps the presented token's full scope and resource set.
 
-  If the presented token was already rotated, an immediate matching retry
-  returns the original successor within `:rotation_grace_seconds`;
-  otherwise the whole family is revoked and `{:error, :reuse_detected}` is
-  returned. Other failures include `:invalid_grant` (unknown token), `:expired`,
-  `:grant_revoked`, `:temporarily_unavailable`, `:client_mismatch`,
-  `:issuer_mismatch`, `:invalid_scope`, and the DPoP binding errors.
+  If the presented token was already rotated, an immediate retry by the same
+  client and binding returns the original successor within
+  `:rotation_grace_seconds`, with a `context` for the retry's own requested
+  scope and resource; otherwise the whole family is revoked and
+  `{:error, :reuse_detected}` is returned. Other failures include
+  `:invalid_grant` (unknown token), `:expired`, `:grant_revoked`,
+  `:temporarily_unavailable`, `:client_mismatch`, `:issuer_mismatch`,
+  `:invalid_scope`, `:invalid_target`, and the DPoP binding errors.
 
   Options:
 
@@ -218,9 +229,17 @@ defmodule Attesto.RefreshToken do
       unconsumed token or revoking a consumed token's family. Omitting this
       option preserves legacy behavior.
     * `:scope` - a requested scope list. MUST be a subset of the token's
-      granted scope; the successor then carries the narrowed scope. A
-      request for any scope not granted is `:invalid_scope` (no
-      escalation). Omitted, the successor carries the full granted scope.
+      granted scope; the returned `context` then carries the requested scope
+      for the access token, while the successor refresh token keeps the full
+      granted scope (RFC 6749 §6). A request for any scope not granted is
+      `:invalid_scope` (no escalation). Omitted, `context` carries the full
+      granted scope.
+    * `:resource` - a requested resource list. MUST be a subset of the
+      token's granted resource set; the returned `context` then carries the
+      requested resources for the access token's audience, while the
+      successor stays bound to the full set (RFC 8707 §2.2). A resource not
+      granted is `:invalid_target`. Omitted, `context` carries the full
+      granted set.
     * `:ttl` - lifetime for the successor.
     * `:rotation_grace_seconds` - non-negative integer idempotency window for
       an immediate retry of the just-rotated token. Defaults to `10`; set `0`

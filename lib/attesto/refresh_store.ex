@@ -91,7 +91,13 @@ defmodule Attesto.RefreshStore do
 
     * `:subject` - a non-empty string.
     * `:scope` and `:resource` - lists of non-empty strings; either may be
-      empty, and rotation may only narrow them.
+      empty. `Attesto.RefreshToken.rotate/3` copies both unchanged from parent
+      to child (RFC 6749 §6, RFC 8707 §2.2); a scope or resource subset named
+      by a refresh request applies only to that request's access token. The
+      bundled ETS adapter rejects a child whose sets differ from its parent's
+      with `{:error, :invalid_rotation}`. An adapter that accepts a child whose
+      sets are a subset of its parent's, as earlier releases required, needs
+      no change.
     * `:client_id` and `:dpop_jkt` - a non-empty client ID or DPoP thumbprint,
       respectively, or `nil` when unbound.
     * `:acr` - a non-empty authentication-context string or `nil`.

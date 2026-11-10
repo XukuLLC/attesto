@@ -104,7 +104,7 @@ defmodule Attesto.RefreshToken.Rotation do
              family_id: record.family_id,
              generation: successor.generation,
              expires_at: expires_at,
-             context: TokenRecord.public_context(successor.context)
+             context: access_context(successor.context, scope, resource)
            }}
 
         :consumed ->
@@ -237,9 +237,13 @@ defmodule Attesto.RefreshToken.Rotation do
   defp rotate_successor(store, parent, scope, resource, opts),
     do: rotate_successor(store, parent, scope, resource, opts, 3)
 
+  # RFC 6749 §6: a new refresh token's scope MUST be identical to the presented
+  # token's. The successor therefore copies the parent's complete grant context;
+  # a requested `scope` or `resource` subset applies only to the access token
+  # minted from the returned context (see `access_context/3`).
   defp rotate_successor(store, parent, scope, resource, opts, attempts_left) do
     now = NumericDate.now(opts)
-    successor_data = %{parent.data | scope: scope, resource: resource}
+    successor_data = parent.data
 
     {issued, child} =
       TokenRecord.build_issue(
@@ -342,7 +346,11 @@ defmodule Attesto.RefreshToken.Rotation do
          rotation.successor,
          rotation.now
        ) and valid_committed_child?(committed_child, rotation.child, rotation.now),
-       do: rotated_successfully(rotation.issued, rotation.successor_data),
+       do:
+         rotated_successfully(
+           rotation.issued,
+           access_context(rotation.successor_data, rotation.scope, rotation.resource)
+         ),
        else:
          fail_rotation_state(
            rotation.store,
@@ -379,16 +387,22 @@ defmodule Attesto.RefreshToken.Rotation do
       TokenRecord.same_identity?(committed, original)
   end
 
-  defp rotated_successfully(issued, successor_data) do
+  defp rotated_successfully(issued, context) do
     {:ok,
      %{
        token: issued.token,
        family_id: issued.family_id,
        generation: issued.generation,
        expires_at: issued.expires_at,
-       context: TokenRecord.public_context(successor_data)
+       context: context
      }}
   end
+
+  # The context the caller mints this request's access token from: the stored
+  # grant context with `scope` and `resource` replaced by the values resolved
+  # for this request (the full granted sets when none were requested).
+  defp access_context(grant_context, scope, resource),
+    do: TokenRecord.public_context(%{grant_context | scope: scope, resource: resource})
 
   defp fail_rotation_state(store, record, operation, reason) do
     metadata = rotation_state_metadata(record, operation, reason)
@@ -507,9 +521,10 @@ defmodule Attesto.RefreshToken.Rotation do
     Options.boolean!(opts, :allow_missing_client_id?, false)
   end
 
-  # RFC 6749 §6: the requested scope MUST be a subset of the originally
-  # granted scope. Narrowing is allowed; widening is refused. No request
-  # means the successor keeps the full granted scope.
+  # RFC 6749 §6: the requested scope MUST NOT include any scope not originally
+  # granted, and if omitted is treated as equal to the granted scope. The
+  # resolved scope is the access token's; the successor refresh token keeps the
+  # full granted scope.
   defp resolve_scope(%{scope: granted}, opts) do
     case Keyword.get(opts, :scope) do
       nil ->
@@ -525,11 +540,11 @@ defmodule Attesto.RefreshToken.Rotation do
     end
   end
 
-  # RFC 8707 + RFC 6749 §6 (mirrors scope narrowing): a refresh request may
-  # narrow the bound resource set via a `:resource` opt but never widen it - a
-  # requested resource not among the originally granted set is `:invalid_target`.
-  # No `:resource` opt keeps the full granted set, so a refreshed access token
-  # stays audienced to the resources the original grant authorized.
+  # RFC 8707 §2.2: a refresh request may name a subset of the granted resources
+  # for this access token but never widen it - a requested resource not among
+  # the originally granted set is `:invalid_target`. No `:resource` opt selects
+  # the full granted set. Either way the successor refresh token stays bound to
+  # the full original grant.
   defp resolve_resource(data, opts) do
     granted = Map.get(data, :resource, [])
 
@@ -659,8 +674,12 @@ defmodule Attesto.RefreshToken.Rotation do
       not TokenRecord.successor_context?(context, record.data) ->
         {:state_error, :successor_state_invalid}
 
-      not equivalent_authorization_set?(context.scope, scope) or
-          not equivalent_authorization_set?(context.resource, resource) ->
+      # The cached successor carries its own refresh grant, so a retry may
+      # request any subset of it for its new access token. A successor
+      # persisted by an earlier release can carry a narrower grant than its
+      # parent; a request outside that grant cannot be served from it.
+      not authorization_subset?(scope, context.scope) or
+          not authorization_subset?(resource, context.resource) ->
         {:error, :retry_request_mismatch}
 
       true ->
@@ -668,7 +687,7 @@ defmodule Attesto.RefreshToken.Rotation do
     end
   end
 
-  defp equivalent_authorization_set?(left, right), do: MapSet.equal?(MapSet.new(left), MapSet.new(right))
+  defp authorization_subset?(requested, granted), do: MapSet.subset?(MapSet.new(requested), MapSet.new(granted))
 
   # ----- grant checks -----
 

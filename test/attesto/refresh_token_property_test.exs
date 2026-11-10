@@ -66,6 +66,7 @@ defmodule Attesto.RefreshTokenPropertyTest do
         if Enum.all?(expected_requested, &(&1 in granted)) do
           assert {:ok, rotated} = RefreshToken.rotate(RefreshStore.ETS, token, scope: requested)
           assert rotated.context.scope == expected_requested
+          assert {:ok, %{data: %{scope: ^granted}}} = RefreshStore.ETS.get(Secret.hash(rotated.token))
         else
           assert {:error, :invalid_scope} = RefreshToken.rotate(RefreshStore.ETS, token, scope: requested)
           assert {:ok, _rotated} = RefreshToken.rotate(RefreshStore.ETS, token, scope: granted)

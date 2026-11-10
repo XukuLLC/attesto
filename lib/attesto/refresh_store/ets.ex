@@ -290,9 +290,21 @@ defmodule Attesto.RefreshStore.ETS do
       valid_child_state?(child) and
       valid_child_lifetime?(child, now) and
       valid_child_context?(child, successor) and
+      valid_grant_sets?(parent, child) and
       valid_attestation_binding?(parent, child) and
       valid_family_deadline?(parent, child) and
       valid_successor_state?(successor, child, now)
+  end
+
+  # RFC 6749 §6: a rotated refresh token keeps exactly the presented token's
+  # scope, and (RFC 8707 §2.2) stays bound to the full original resource set.
+  defp valid_grant_sets?(parent, child) do
+    parent_data = Map.get(parent, :data, %{})
+    child_data = Map.get(child, :data, %{})
+
+    is_map(parent_data) and is_map(child_data) and
+      Map.fetch(parent_data, :scope) == Map.fetch(child_data, :scope) and
+      Map.fetch(parent_data, :resource) == Map.fetch(child_data, :resource)
   end
 
   defp valid_child_identity?(parent, child) do

@@ -124,6 +124,31 @@ defmodule Attesto.RefreshStore.ETSTest do
              ETS.rotate(legacy.token_hash, candidate, successor("introduced-binding", candidate), now: 1_000)
   end
 
+  test "a direct rotation cannot narrow, widen, or drop the granted scope or resource set" do
+    data = %{subject: "usr_42", scope: ["documents.read", "documents.write"], resource: ["https://api.example/a"]}
+    rec = record("granted-parent", data: data)
+    assert :ok = ETS.insert(rec)
+
+    for candidate_data <- [
+          %{data | scope: ["documents.read"]},
+          %{data | scope: ["documents.read", "documents.write", "billing.read"]},
+          %{data | resource: []},
+          Map.delete(data, :resource)
+        ] do
+      candidate = child("granted-child", data: candidate_data)
+
+      assert {:error, :invalid_rotation} =
+               ETS.rotate(rec.token_hash, candidate, successor("granted-child", candidate), now: 1_000)
+
+      assert {:ok, ^rec} = ETS.get(rec.token_hash)
+    end
+
+    candidate = child("granted-child", data: data)
+
+    assert {:ok, _parent, ^candidate} =
+             ETS.rotate(rec.token_hash, candidate, successor("granted-child", candidate), now: 1_000)
+  end
+
   test "rotate of an absent hash returns :error" do
     candidate = child("tok-never-inserted-child")
 
