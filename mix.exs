@@ -14,7 +14,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "2.11.0"
+  @version "2.12.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
