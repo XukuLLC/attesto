@@ -229,6 +229,25 @@ defmodule Attesto.ClientAssertionTest do
     assert {:ok, %{"sub" => @client_id}} = ClientAssertion.verify(jwt, @client_id, @audience, trusted)
   end
 
+  test "a trusted key without alg verifies the FAPI algorithms its key type supports" do
+    rsa = JOSE.JWK.generate_key({:rsa, 2048})
+    ed = JOSE.JWK.generate_key({:okp, :Ed25519})
+
+    for {key, alg} <- [{rsa, "PS256"}, {ed, "Ed25519"}, {ed, "EdDSA"}] do
+      trusted = %{"keys" => [public_jwk(key) |> Map.delete("alg")]}
+
+      assert {:ok, %{"sub" => @client_id}} =
+               ClientAssertion.verify(assertion(key, %{}, alg), @client_id, @audience, trusted),
+             "expected #{alg} to verify"
+    end
+
+    # RS256 is outside the FAPI default even though the key type supports it.
+    trusted = %{"keys" => [public_jwk(rsa) |> Map.delete("alg")]}
+
+    assert {:error, :invalid_signature} =
+             ClientAssertion.verify(assertion(rsa, %{}, "RS256"), @client_id, @audience, trusted)
+  end
+
   test "rejects alg confusion: token header alg must match the trusted key alg" do
     key = ec_key()
     jwt = assertion(key)

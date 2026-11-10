@@ -85,6 +85,19 @@ defaults in a minor release.
   members, cannot be parsed, or has a `use`, `key_ops`, or `alg` member of the
   wrong JSON type still makes the set fail. Entity Statement verification
   keeps requiring every key in a federation `jwks` to be a signing key.
+- Verify a trusted JWK that has no `alg` member with any algorithm its key
+  type and curve support, within the verifier's accepted algorithms. Such a
+  key was bound to the one algorithm `Attesto.SigningAlg.infer/1` derives,
+  RS256 for RSA and `EdDSA` for Ed25519, so a correctly signed JWS under
+  another algorithm returned `:invalid_signature`. An RSA client key without
+  `alg` could not authenticate with any algorithm under the default FAPI list
+  of `Attesto.ClientAssertion.verify/5`, which excludes RS256, and an Ed25519
+  key without `alg` refused the RFC 9864 `Ed25519` identifier. RFC 7517 §4.4
+  places no restriction on a key that omits `alg`. Such a key is now tried
+  with the algorithm in the JWS header when its type can verify it, and is
+  passed over when it cannot; the accepted list still decides which
+  algorithms are used, and a key with an `alg` member is used with that
+  algorithm only.
 
 ## [2.11.0] - 2026-11-05
 

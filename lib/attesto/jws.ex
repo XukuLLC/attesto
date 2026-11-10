@@ -217,13 +217,19 @@ defmodule Attesto.JWS do
   Build the trusted candidates used by strict JWT verification.
 
   The returned tuples retain the input order and are `{kid, alg, jwk}`. The
-  default map builder derives an algorithm from each JWK's `alg` member or
-  key material and validates that algorithm against the key. Passing `alg:`
+  default map builder takes each JWK's algorithm from its `alg` member; for a
+  JWK without one, from `:presented_alg` when given, else from its key
+  material. It validates that algorithm against the key. Passing `alg:`
   deliberately uses one presented algorithm for every map; SD-JWT issuer
   verification uses that mode for compatibility with its existing policy.
 
   Options:
 
+    * `:presented_alg` is the `alg` of the JWS being verified. A JWK without
+      an `alg` member is bound to it when the key's type and curve can verify
+      it, and is dropped when they cannot. RFC 7517 §4.4 lets such a key be
+      used with any algorithm its type supports, so `:accepted_algs` is what
+      bounds the choice. `verify_trusted/4` sets it from the protected header.
     * `:kid` narrows the result after conversion and algorithm filtering.
     * `:accepted_algs` filters algorithms; an explicit empty list denies all.
       Omitting the option leaves algorithms unrestricted at this low-level API.
@@ -265,7 +271,8 @@ defmodule Attesto.JWS do
   @doc """
   Build trusted verification candidates from `keys` and verify `jwt` strictly.
 
-  The protected header supplies the `kid` used for candidate selection. All
+  The protected header supplies the `kid` used for candidate selection and the
+  `:presented_alg` a trusted JWK without an `alg` member is tried with. All
   candidate-building and strict-result options accepted by
   `verification_candidates/2` and `verify_strict/3` may be passed together,
   including the protocol-specific `:malformed_key`, `:malformed_result`,
@@ -284,6 +291,12 @@ defmodule Attesto.JWS do
       if Keyword.get(opts, :select_kid, true),
         do: Keyword.put(opts, :kid, Map.get(header, "kid")),
         else: Keyword.delete(opts, :kid)
+
+    candidate_opts =
+      case Map.get(header, "alg") do
+        alg when is_binary(alg) -> Keyword.put(candidate_opts, :presented_alg, alg)
+        _missing -> Keyword.delete(candidate_opts, :presented_alg)
+      end
 
     candidates =
       verification_candidates(keys, candidate_opts)
@@ -571,20 +584,26 @@ defmodule Attesto.JWS do
   end
 
   # The algorithm a key is tried with: the caller's fixed `:alg`, else the
-  # key's own `alg` member, else the default for its type and curve.
+  # key's own `alg` member, else the algorithm of the JWS being verified, else
+  # the default for the key's type and curve. RFC 7517 §4.4 makes `alg`
+  # optional and an omitted one restricts nothing, so a key without it is tried
+  # with the presented algorithm; `Key.verification_jwk/2` checks that the
+  # algorithm suits the key, and `:accepted_algs` still bounds which are used.
   defp candidate_alg(jwk_map, opts) do
-    case Keyword.fetch(opts, :alg) do
-      {:ok, fixed_alg} when is_binary(fixed_alg) -> {:fixed, fixed_alg}
-      {:ok, _other} -> raise ArgumentError, ":alg must be a string"
-      :error -> {:declared, Map.get(jwk_map, "alg") || SigningAlg.infer(jwk_map)}
+    case {Keyword.fetch(opts, :alg), Map.fetch(jwk_map, "alg"), Keyword.get(opts, :presented_alg)} do
+      {{:ok, fixed_alg}, _declared, _presented} when is_binary(fixed_alg) -> {:fixed, fixed_alg}
+      {{:ok, _other}, _declared, _presented} -> raise ArgumentError, ":alg must be a string"
+      {:error, {:ok, declared}, _presented} -> {:declared, declared || SigningAlg.infer(jwk_map)}
+      {:error, :error, presented} when is_binary(presented) -> {:presented, presented}
+      {:error, :error, _presented} -> {:inferred, SigningAlg.infer(jwk_map)}
     end
   end
 
-  # A fixed algorithm that the key's type cannot verify, or that differs from the
-  # key's own `alg`, leaves a well-formed key unusable for this signature. A key
-  # whose own `alg` contradicts its type, or a present `alg` that is not a
-  # string, is malformed.
-  defp unusable_for_alg?(:incompatible_key, :fixed, _jwk_map), do: true
+  # A fixed or presented algorithm that the key's type cannot verify, or a fixed
+  # one that differs from the key's own `alg`, leaves a well-formed key unusable
+  # for this signature. A key whose own `alg` contradicts its type, or a present
+  # `alg` that is not a string, is malformed.
+  defp unusable_for_alg?(:incompatible_key, source, _jwk_map) when source in [:fixed, :presented], do: true
   defp unusable_for_alg?(:alg_mismatch, :fixed, %{"alg" => alg}) when is_binary(alg), do: true
   defp unusable_for_alg?(_reason, _alg_source, _jwk_map), do: false
 

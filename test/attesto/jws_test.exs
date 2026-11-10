@@ -6,6 +6,7 @@ defmodule Attesto.JWSTest do
   alias Attesto.JWS
   alias Attesto.Key
   alias Attesto.Test.Factory
+  alias Attesto.Test.JWT
 
   defp public_map(key, overrides) do
     {_kty, map} = JOSE.JWK.to_public_map(key)
@@ -307,6 +308,56 @@ defmodule Attesto.JWSTest do
 
     assert [{"p256", "ES256", %JOSE.JWK{}}] =
              JWS.verification_candidates([other_alg, other_curve, valid], alg: "ES256", malformed_key: :reject_set)
+  end
+
+  test "a trusted JWK without alg verifies any algorithm its key type supports inside the accepted list" do
+    rsa = JOSE.JWK.generate_key({:rsa, 2048})
+    rsa_keys = [public_map(rsa, %{"kid" => "rsa"})]
+    claims = %{"ok" => true}
+
+    for alg <- ["RS256", "PS256", "RS384"] do
+      jwt = JWT.sign_compact(rsa, %{"alg" => alg, "kid" => "rsa"}, claims)
+
+      assert {:ok, ^claims} =
+               JWS.verify_trusted(jwt, %{"alg" => alg, "kid" => "rsa"}, rsa_keys,
+                 accepted_algs: ["RS256", "PS256", "RS384"]
+               ),
+             "expected #{alg} to verify"
+    end
+
+    pss = JWT.sign_compact(rsa, %{"alg" => "PS256", "kid" => "rsa"}, claims)
+
+    assert {:error, :invalid_signature} =
+             JWS.verify_trusted(pss, %{"alg" => "PS256", "kid" => "rsa"}, rsa_keys, accepted_algs: ["RS256"])
+
+    ed = JOSE.JWK.generate_key({:okp, :Ed25519})
+    ed_keys = [public_map(ed, %{"kid" => "ed"})]
+
+    for alg <- ["EdDSA", "Ed25519"] do
+      jwt = JWT.sign_compact(ed, %{"alg" => alg, "kid" => "ed"}, claims)
+
+      assert {:ok, ^claims} =
+               JWS.verify_trusted(jwt, %{"alg" => alg, "kid" => "ed"}, ed_keys, accepted_algs: ["EdDSA", "Ed25519"]),
+             "expected #{alg} to verify"
+    end
+
+    # The presented algorithm only selects among those the key's type can
+    # verify; one it cannot leaves the key out without rejecting the set.
+    signer = JOSE.JWK.generate_key({:ec, "P-256"})
+    kid = JOSE.JWK.thumbprint(signer)
+    jwt = signed_jwt(signer, kid)
+    p384 = public_map(JOSE.JWK.generate_key({:ec, "P-384"}), %{"kid" => kid})
+
+    assert {:ok, ^claims} =
+             JWS.verify_trusted(jwt, protected_header(jwt), [p384, public_map(signer, %{"kid" => kid})],
+               malformed_key: :reject_set
+             )
+
+    hs = JWT.sign_compact(JOSE.JWK.from_oct("secret"), %{"alg" => "HS256", "kid" => "rsa"}, claims)
+    assert {:error, :invalid_signature} = JWS.verify_trusted(hs, %{"alg" => "HS256", "kid" => "rsa"}, rsa_keys, [])
+
+    # Without a presented algorithm the default for the key type is kept.
+    assert [{"rsa", "RS256", %JOSE.JWK{}}] = JWS.verification_candidates(rsa_keys)
   end
 
   test "trusted JWK candidates must be public verification keys" do
