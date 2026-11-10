@@ -40,11 +40,28 @@ defaults in a minor release.
   `{"keys": []}`, or a `kty`-bearing key with a nested `{"keys": []}`, held
   the verifying process until its caller timed out. This was reachable without
   authentication through the DPoP, OpenID4VCI proof and SIOP verifiers,
-  `did:jwk` resolution, and the `jwks` of a self-signed Entity Configuration. `Attesto.Thumbprint.of_jwk/1` returns
-  `:malformed_jwk`, `Attesto.Did.resolve/2` returns `:invalid_jwk`,
-  `Attesto.SigningAlg.infer/1` raises `ArgumentError` for a parsed set, and
-  `Attesto.JWE`, `Attesto.JwtVc` and the COSE verifier refuse the map before
-  parsing it.
+  `did:jwk` resolution, and the `jwks` of a self-signed Entity Configuration.
+  `Attesto.Thumbprint.of_jwk/1` returns `:malformed_jwk`,
+  `Attesto.Did.resolve/2` returns `:invalid_jwk`, `Attesto.SigningAlg.infer/1`
+  raises `ArgumentError` for a parsed set, and `Attesto.JWE`, `Attesto.JwtVc`
+  and the COSE verifier refuse the map before parsing it.
+- `Attesto.Plug.Authenticate` built the URI a DPoP proof's `htu` is compared
+  against from the request's scheme, `Host` header, and port unless an `:htu`
+  callback was given. A resource server that answers requests whatever their
+  `Host` therefore accepted a proof made for a different server: a party that
+  received a DPoP-bound access token and its proof, for a token whose audience
+  this server also accepts, could replay both here with the other server's
+  name in `Host`. RFC 9449 §4.3 binds the proof to its target URI to prevent
+  exactly this. The new `:origin` option names the origin clients address the
+  resource server by, such as `"https://api.example"`; with it, the `htu` is
+  that origin followed by the request path, and the request's scheme, `Host`,
+  and port are not consulted. The default is unchanged because the
+  configuration does not say where a resource server is reachable. A host
+  that accepts DPoP-bound tokens through this plug should set `:origin`, or
+  `:htu` when it answers on several origins or behind a path-rewriting proxy.
+  `init/1` raises `ArgumentError` for an `:origin` that is not an `https` URL
+  with a host and no path, userinfo, query, or fragment, and when both
+  `:origin` and `:htu` are set.
 
 ### Added
 

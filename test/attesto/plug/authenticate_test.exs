@@ -889,6 +889,53 @@ defmodule Attesto.Plug.AuthenticateTest do
       refute conn.halted
     end
 
+    test "with :origin, a proof made for another server is refused whatever the Host header names",
+         %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: "https://other-rs.example/x", ath: ath)
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Map.put(:host, "other-rs.example")
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            replay_check: fn _jti, _ttl -> :ok end
+          )
+        )
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_dpop_proof"
+      assert JSON.decode!(conn.resp_body)["error_description"] == "invalid_htu"
+    end
+
+    test "with :origin, a proof for that origin verifies behind a proxy that changes scheme, host and port",
+         %{config: config} do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      jkt = JOSE.JWK.thumbprint(jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: ath)
+
+      for origin <- ["https://api.example.com", "https://API.example.com:443/"] do
+        conn =
+          [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+          |> request()
+          |> Map.merge(%{scheme: :http, host: "app.internal", port: 4000})
+          |> Authenticate.call(
+            Authenticate.init(config: config, origin: origin, replay_check: fn _jti, _ttl -> :ok end)
+          )
+
+        refute conn.halted, "expected #{origin} to authenticate"
+        assert conn.assigns.attesto_claims["cnf"]["jkt"] == jkt
+      end
+    end
+
     test "a nonce_check demanding a nonce is 401 with a DPoP-Nonce header", %{config: config} do
       jwk = JOSE.JWK.generate_key({:ec, "P-256"})
       jkt = JOSE.JWK.thumbprint(jwk)
@@ -981,6 +1028,33 @@ defmodule Attesto.Plug.AuthenticateTest do
     test "a :nonce_check paired with a :nonce_issue initializes cleanly", %{config: config} do
       opts = Authenticate.init(config: config, nonce_check: fn _ -> :ok end, nonce_issue: fn -> "n" end)
       assert Keyword.get(opts, :config) == config
+    end
+
+    test "an :origin that is not a bare https origin raises at init", %{config: config} do
+      for origin <- [
+            "http://api.example.com",
+            "https://api.example.com/x",
+            "https://api.example.com?x=1",
+            "https://api.example.com#x",
+            "https://user@api.example.com",
+            "https://api.example.com:0",
+            "https://",
+            "",
+            :api
+          ] do
+        assert_raise ArgumentError, ~r/:origin must be an https URL/, fn ->
+          Authenticate.init(config: config, origin: origin)
+        end
+      end
+
+      assert Authenticate.init(config: config, origin: "https://api.example.com:8443")[:origin] ==
+               "https://api.example.com:8443"
+    end
+
+    test ":origin and :htu together raise at init", %{config: config} do
+      assert_raise ArgumentError, ~r/either :origin or :htu/, fn ->
+        Authenticate.init(config: config, origin: "https://api.example.com", htu: fn _conn -> @uri end)
+      end
     end
   end
 

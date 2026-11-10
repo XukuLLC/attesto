@@ -529,6 +529,7 @@ standard error responses:
 ```elixir
 plug Attesto.Plug.Authenticate,
   config: &MyApp.Attesto.config/0,
+  origin: "https://api.example",
   replay_check: &MyApp.DPoPReplay.check_and_record/2,
   cert_der: &MyApp.TLS.client_cert_der/1
 
@@ -537,7 +538,10 @@ plug Attesto.Plug.RequireScopes, ["documents.read"]
 
 `Authenticate` parses `Authorization: Bearer …` / `DPoP …`, verifies the
 DPoP proof and the access token (and the mTLS binding when `:cert_der`
-returns a certificate), and assigns the verified claims.
+returns a certificate), and assigns the verified claims. `:origin` is the
+origin clients address this resource server by; a DPoP proof must name it.
+Without `:origin` (or an `:htu` callback) the origin is taken from the
+request's `Host` header.
 `Attesto.Plug.OAuthError` renders the RFC 6750 / RFC 9449 responses
 (`WWW-Authenticate`, `DPoP-Nonce`, `invalid_token`, `invalid_dpop_proof`,
 `insufficient_scope`, `use_dpop_nonce`). `Plug` is an optional dependency:

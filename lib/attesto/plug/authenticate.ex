@@ -58,10 +58,19 @@ if Code.ensure_loaded?(Plug.Conn) do
         include `config.audience` when it should remain accepted. When absent,
         the configured single-audience behavior is unchanged. Resolver safety
         and fail-closed semantics are documented on `Attesto.Token.verify/3`.
-      * `:htu` - `(conn -> https_uri_string)` overriding how the request URI
-        (without query/fragment) is built; default uses `conn` directly,
-        which requires the scheme/host to reflect the external request
-        (configure your proxy-forwarding rewrite).
+      * `:origin` - the external origin of this resource server as clients
+        address it, such as `"https://api.example"` or
+        `"https://api.example:8443"`: an `https` URL with a host, an optional
+        port, and no path, userinfo, query, or fragment. The DPoP `htu` a
+        proof must sign is then this origin followed by `conn.request_path`,
+        and the request's scheme, `Host` header, and port are not used.
+        Set it on every resource server that accepts DPoP-bound tokens; see
+        "Choosing the DPoP target URI" below. Mutually exclusive with `:htu`.
+      * `:htu` - `(conn -> https_uri_string)` building the request URI
+        (without query/fragment) a DPoP proof must sign, for a resource
+        server that answers on several origins or whose proxy rewrites the
+        request path. Build it from configured origins, not from request
+        headers. Mutually exclusive with `:origin`.
       * `:credential_from_conn` - optional fallback
         `(conn -> {:ok, :bearer | :dpop, token} | :missing)`. Use this for
         host-owned credential channels such as first-party cookies. The
@@ -94,8 +103,27 @@ if Code.ensure_loaded?(Plug.Conn) do
 
         plug Attesto.Plug.Authenticate,
           config: &MyApp.Attesto.config/0,
+          origin: "https://api.example",
           replay_check: &MyApp.DPoPReplay.check_and_record/2,
           cert_der: &MyApp.TLS.client_cert_der/1
+
+    ## Choosing the DPoP target URI
+
+    RFC 9449 §4.3 binds a proof to the URI of the request it was made for, so
+    that a proof sent to one server cannot be replayed to another. That holds
+    only if the URI a proof is compared against names this server whatever
+    the request says. Without `:origin` or `:htu`, the plug builds it from
+    `conn.scheme`, `conn.host`, and `conn.port`, and `conn.host` comes from
+    the client's `Host` header. A resource server that answers requests for
+    any `Host` then accepts a proof made for another server, together with a
+    DPoP-bound access token whose audience it also accepts, when the sender
+    puts that server's name in `Host`. The default also requires the
+    scheme and port seen by the application to match the external request,
+    which a TLS-terminating proxy changes unless the host rewrites them.
+
+    Set `:origin` to the origin clients use. Use `:htu` instead when the
+    resource server answers on several origins or behind a path-rewriting
+    proxy.
     """
 
     @behaviour Plug
@@ -126,10 +154,40 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "use_dpop_nonce challenge can carry a DPoP-Nonce header."
       end
 
+      validate_htu_options!(opts)
+
       opts
       |> Keyword.put(:bearer_methods, bearer_methods(opts))
       |> normalize_step_up()
     end
+
+    defp validate_htu_options!(opts) do
+      if Keyword.has_key?(opts, :origin) and Keyword.has_key?(opts, :htu) do
+        raise ArgumentError,
+              "Attesto.Plug.Authenticate: set either :origin or :htu, not both; " <>
+                ":htu builds the whole DPoP target URI."
+      end
+
+      case Keyword.fetch(opts, :origin) do
+        :error ->
+          :ok
+
+        {:ok, origin} ->
+          if !origin?(origin) do
+            raise ArgumentError,
+                  "Attesto.Plug.Authenticate: :origin must be an https URL with a host, an " <>
+                    "optional port, and no path, userinfo, query, or fragment " <>
+                    "(e.g. \"https://api.example\"); got #{inspect(origin)}"
+          end
+      end
+    end
+
+    defp origin?(origin) when is_binary(origin) do
+      Attesto.URI.https_identifier?(origin) and
+        match?({:ok, %URI{path: path, query: nil}} when path in [nil, "", "/"], URI.new(origin))
+    end
+
+    defp origin?(_origin), do: false
 
     # RFC 9470: a route may declare a step-up requirement (`step_up:
     # [acr_values: [...], max_age: ...]` or a `%Attesto.StepUp.Requirement{}`).
@@ -649,15 +707,22 @@ if Code.ensure_loaded?(Plug.Conn) do
     # the scheme's default port (443 for https, 80 for http). Query and
     # fragment are intentionally omitted - the engine compares against the
     # normalized htu.
+    #
+    # A configured `:origin` takes the place of the request's scheme, host,
+    # and port, so a proof made for another server cannot be matched by
+    # sending that server's name in the `Host` header.
     defp htu(conn, opts) do
-      case Keyword.get(opts, :htu) do
-        fun when is_function(fun, 1) ->
+      case {Keyword.get(opts, :htu), Keyword.get(opts, :origin)} do
+        {fun, _origin} when is_function(fun, 1) ->
           case fun.(conn) do
             value when is_binary(value) and value != "" -> {:ok, value}
             _invalid -> {:error, :invalid_http_uri}
           end
 
-        _ ->
+        {_htu, origin} when is_binary(origin) ->
+          {:ok, String.trim_trailing(origin, "/") <> conn.request_path}
+
+        _default ->
           scheme = Atom.to_string(conn.scheme)
           {:ok, scheme <> "://" <> uri_host(conn.host) <> port_suffix(scheme, conn.port) <> conn.request_path}
       end
