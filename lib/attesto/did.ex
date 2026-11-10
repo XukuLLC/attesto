@@ -324,10 +324,20 @@ defmodule Attesto.Did do
       String.to_integer(port) in 1..65_535
   end
 
+  # A segment is checked as a server will read it, after percent-decoding.
+  # RFC 3986 §6.2.2.2 makes `%2e` equivalent to `.`, and servers and proxies
+  # that decode a path before removing dot-segments or splitting on `/` (or on
+  # `\`, as some do) would read `did:web:example.com:%2e%2e:admin` as
+  # `https://example.com/admin/did.json` and `a%2Fb` as two segments. A host
+  # that allow-lists `did:web` documents by path prefix relies on neither.
   defp valid_web_path?(segments) do
     Enum.all?(segments, fn segment ->
-      segment not in ["", ".", ".."] and Regex.match?(@web_path_segment, segment)
+      Regex.match?(@web_path_segment, segment) and valid_decoded_segment?(URI.decode(segment))
     end)
+  end
+
+  defp valid_decoded_segment?(decoded) do
+    decoded not in ["", ".", ".."] and not String.contains?(decoded, ["/", "\\"])
   end
 
   defp invoke_resolver(resolver, url) do

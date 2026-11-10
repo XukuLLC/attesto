@@ -76,6 +76,17 @@ defaults in a minor release.
   `:constraint_violation` when a naming constraint applies to it. Under a
   naming constraint this also refuses a host containing `_` or an IPv6
   literal. Chains without naming constraints are unaffected.
+- Refuse a `did:web` path segment that percent-decodes to `.` or `..`, or to
+  a value containing `/` or `\`. `Attesto.Did.resolve/2` refused the literal
+  dot-segments but returned
+  `{:needs_fetch, "https://example.com/%2e%2e/%2e%2e/admin/did.json"}` for
+  `did:web:example.com:%2e%2e:%2e%2e:admin`, and a URL ending in
+  `/a%2Fb/did.json` for `did:web:example.com:a%2Fb`. RFC 3986 makes `%2e`
+  equivalent to `.`, and a server or proxy that decodes the path before
+  removing dot-segments, or that splits on a decoded slash, serves a
+  document outside the path the DID names. A host that allow-lists `did:web`
+  documents by path prefix relied on that not happening. These DIDs now
+  return `{:error, :invalid_web_did}`, with or without a `:resolver`.
 
 ### Added
 

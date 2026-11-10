@@ -179,6 +179,23 @@ defmodule Attesto.DidTest do
         assert {:error, :invalid_web_did} = Did.resolve(did), "expected #{did} to be rejected"
       end
     end
+
+    test "rejects path segments that decode to a dot-segment or a path separator" do
+      for did <- [
+            "did:web:example.com:%2e%2e:%2e%2e:admin",
+            "did:web:example.com:users:%2E%2E",
+            "did:web:example.com:.%2e",
+            "did:web:example.com:%2e",
+            "did:web:example.com:a%2Fb",
+            "did:web:example.com:a%2fb",
+            "did:web:example.com:a%5Cb"
+          ] do
+        assert {:error, :invalid_web_did} = Did.resolve(did), "expected #{did} to be rejected"
+      end
+
+      assert {:needs_fetch, "https://example.com/v1.0/a%2e%2eb/did.json"} =
+               Did.resolve("did:web:example.com:v1.0:a%2e%2eb")
+    end
   end
 
   test "rejects unsupported methods, malformed DIDs, and invalid options" do
