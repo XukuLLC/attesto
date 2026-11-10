@@ -181,6 +181,45 @@ defmodule Attesto.Federation.TrustChainTest do
              TrustChain.validate(dotted_constraint.chain, dotted_constraint.anchor_jwks, now: @now)
   end
 
+  test "a host that is not an LDH name satisfies no naming constraint" do
+    # `intermediate.b%61d.example` names `intermediate.bad.example` to HTTP
+    # clients that decode the host, and `evil.test%2F.example` ends in
+    # `.example` only as a string.
+    for {entity, naming_constraints} <- [
+          {"https://intermediate.bad%2eexample", %{"excluded" => [".bad.example"]}},
+          {"https://intermediate%2Ebad.example", %{"excluded" => [".bad.example"]}},
+          {"https://intermediate.b%61d.example", %{"excluded" => [".bad.example"]}},
+          {"https://b%61d.example", %{"excluded" => ["bad.example"]}},
+          {"https://evil.test%2F.example", %{"permitted" => [".example"]}},
+          {"https://evil.test,.example", %{"permitted" => [".example"]}}
+        ] do
+      fixture =
+        chain_fixture(
+          intermediate_entity: entity,
+          authority_hints: [entity],
+          anchor_constraints: %{"max_path_length" => 1, "naming_constraints" => naming_constraints}
+        )
+
+      assert {:error, :constraint_violation} =
+               TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now),
+             "expected #{entity} to fail #{inspect(naming_constraints)}"
+    end
+
+    for {entity, naming_constraints} <- [
+          {"https://INTERMEDIATE.Example", %{"permitted" => [".example"], "excluded" => [".bad.example"]}},
+          {"https://intermediate.example", %{"excluded" => [".bad.example"]}}
+        ] do
+      fixture =
+        chain_fixture(
+          intermediate_entity: entity,
+          authority_hints: [entity],
+          anchor_constraints: %{"max_path_length" => 1, "naming_constraints" => naming_constraints}
+        )
+
+      assert {:ok, _result} = TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+    end
+  end
+
   test "applies an intermediate statement's naming constraints to its leaf subject" do
     fixture =
       chain_fixture(

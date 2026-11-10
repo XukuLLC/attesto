@@ -62,6 +62,20 @@ defaults in a minor release.
   `init/1` raises `ArgumentError` for an `:origin` that is not an `https` URL
   with a host and no path, userinfo, query, or fragment, and when both
   `:origin` and `:htu` are set.
+- Match OpenID Federation naming constraints against a host that HTTP
+  clients resolve the same way. `Attesto.Federation.TrustChain.validate/3`
+  compared each Entity Identifier's host as `URI.parse/1` returns it, with
+  percent-encoding intact, so a Subordinate Statement could name an entity
+  inside an `excluded` domain by escaping part of its host:
+  `https://leaf.bad%2eexample` passed an exclusion of `.bad.example`, and
+  common HTTP clients decode that host to `leaf.bad.example`. On the
+  `permitted` side, a host such as `evil.test%2F.good.example` matched
+  `.good.example` by suffix. A host that is not a DNS name of letter, digit,
+  and hyphen labels, the syntax the constraints themselves must use, now
+  satisfies no naming constraint, and the chain fails with
+  `:constraint_violation` when a naming constraint applies to it. Under a
+  naming constraint this also refuses a host containing `_` or an IPv6
+  literal. Chains without naming constraints are unaffected.
 
 ### Added
 

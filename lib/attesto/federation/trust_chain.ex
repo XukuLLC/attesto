@@ -289,17 +289,28 @@ defmodule Attesto.Federation.TrustChain do
   # The host is compared case-folded and without a trailing dot, so
   # `https://le.bad.test.` cannot step around an `excluded` entry for
   # `.bad.test` (DNS treats the two names as one).
+  #
+  # The host must also be a DNS name made of LDH labels, the syntax the
+  # constraints themselves are held to. `URI.parse/1` leaves percent-encoding
+  # in the host, so `https://leaf.bad%2eexample` would compare as a name
+  # outside `.bad.example` while HTTP clients resolve it to
+  # `leaf.bad.example`, and `https://evil.test%2F.good.example` would match
+  # `.good.example` by suffix alone. A host that is not an LDH name therefore
+  # satisfies no naming constraint, permitted or excluded.
   defp entity_identifier_permitted?(entity_id, permitted, excluded) do
-    case URI.parse(entity_id) do
-      %URI{host: host} when is_binary(host) and host != "" ->
-        host = host |> String.downcase() |> String.trim_trailing(".")
-        permitted? = is_nil(permitted) or Enum.any?(permitted, &domain_constraint_matches?(host, &1))
-        excluded? = not is_nil(excluded) and Enum.any?(excluded, &domain_constraint_matches?(host, &1))
-        permitted? and not excluded?
-
-      _other ->
-        false
+    with %URI{host: host} when is_binary(host) <- URI.parse(entity_id),
+         host = host |> String.downcase() |> String.trim_trailing("."),
+         true <- dns_name?(host) do
+      permitted? = is_nil(permitted) or Enum.any?(permitted, &domain_constraint_matches?(host, &1))
+      excluded? = not is_nil(excluded) and Enum.any?(excluded, &domain_constraint_matches?(host, &1))
+      permitted? and not excluded?
+    else
+      _other -> false
     end
+  end
+
+  defp dns_name?(host) do
+    host != "" and byte_size(host) <= 253 and host |> String.split(".") |> Enum.all?(&valid_domain_label?/1)
   end
 
   defp domain_constraint_matches?(host, "." <> domain), do: String.ends_with?(host, "." <> domain)
