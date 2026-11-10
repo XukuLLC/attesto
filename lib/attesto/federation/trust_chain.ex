@@ -3,8 +3,10 @@ defmodule Attesto.Federation.TrustChain do
   Validate an already-resolved OpenID Federation 1.0 Trust Chain.
 
   The input is ordered leaf first: the leaf Entity Configuration followed by
-  Subordinate Statements issued successively toward the Trust Anchor. The
-  final statement is verified with the Trust Anchor keys supplied out of band.
+  Subordinate Statements issued successively toward the Trust Anchor,
+  optionally ending with the Trust Anchor's own Entity Configuration
+  (OpenID Federation 1.0 §4 lets a chain include or omit it). The final
+  statement is verified with the Trust Anchor keys supplied out of band.
   Fetching Entity Statements and choosing among candidate chains remain host
   responsibilities.
   """
@@ -44,11 +46,12 @@ defmodule Attesto.Federation.TrustChain do
 
     with true <- length(chain) <= max_chain_length,
          true <- Enum.all?(chain, &is_binary/1),
-         {:ok, claims} <- verify_from_anchor(chain, trust_anchor_jwks, opts),
+         {:ok, all_claims} <- verify_from_anchor(chain, trust_anchor_jwks, opts),
+         {claims, anchor_configuration} = split_anchor_configuration(all_claims),
          :ok <- reject_entity_cycles(claims),
          :ok <- verify_leaf_self_signature(hd(chain), hd(claims), opts),
          :ok <- validate_statement_roles(claims),
-         :ok <- validate_links(claims),
+         :ok <- validate_links(claims ++ anchor_configuration),
          :ok <- validate_authority_hint(claims),
          {:ok, trust_anchor} <- validate_trust_anchor(claims, opts),
          {:ok, metadata} <- resolve_metadata(claims),
@@ -58,7 +61,7 @@ defmodule Attesto.Federation.TrustChain do
        %{
          metadata: metadata,
          trust_anchor: trust_anchor,
-         exp: claims |> Enum.map(&Map.fetch!(&1, "exp")) |> Enum.min()
+         exp: all_claims |> Enum.map(&Map.fetch!(&1, "exp")) |> Enum.min()
        }}
     else
       false -> {:error, :invalid_trust_chain}
@@ -109,6 +112,23 @@ defmodule Attesto.Federation.TrustChain do
   end
 
   defp statement_opts(opts), do: Keyword.take(opts, [:now, :leeway, :accepted_algs])
+
+  # OpenID Federation 1.0 §4: a Trust Chain ends with the Trust Anchor's Entity
+  # Configuration, which MAY be omitted. When present it is self-issued, comes
+  # after at least one Subordinate Statement, and has been verified with the
+  # out-of-band Trust Anchor keys; its `jwks` then verified the statement before
+  # it. It is set aside so the role, cycle, constraint, and policy checks see
+  # only the statements linking the leaf to the Trust Anchor, and
+  # `validate_links/1` still requires the last of those to have been issued by
+  # the entity it configures.
+  defp split_anchor_configuration([_leaf, _statement, _anchor | _rest] = claims) do
+    case List.last(claims) do
+      %{"iss" => entity, "sub" => entity} = configuration -> {Enum.drop(claims, -1), [configuration]}
+      _subordinate_statement -> {claims, []}
+    end
+  end
+
+  defp split_anchor_configuration(claims), do: {claims, []}
 
   defp validate_statement_roles([%{"iss" => entity, "sub" => entity} | subordinate_statements]) do
     if Enum.all?(subordinate_statements, fn

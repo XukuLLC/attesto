@@ -127,6 +127,15 @@ defaults in a minor release.
   passed over when it cannot; the accepted list still decides which
   algorithms are used, and a key with an `alg` member is used with that
   algorithm only.
+- Accept an OpenID Federation Trust Chain that ends with the Trust Anchor's
+  Entity Configuration. OpenID Federation 1.0 §4 has a chain end with that
+  configuration and lets it be omitted, but
+  `Attesto.Federation.TrustChain.validate/3` accepted only the abbreviated
+  form and returned `:broken_trust_chain` for the full one. A trailing
+  self-issued statement after at least one Subordinate Statement is now
+  verified with the out-of-band Trust Anchor keys, its `jwks` verify the
+  Trust Anchor's Subordinate Statement, it must configure the issuer of that
+  statement, and its `exp` counts toward the chain's `exp`.
 
 ## [2.11.0] - 2026-11-05
 

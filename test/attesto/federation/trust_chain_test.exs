@@ -34,6 +34,36 @@ defmodule Attesto.Federation.TrustChainTest do
            }
   end
 
+  test "accepts a chain that ends with the Trust Anchor's Entity Configuration" do
+    fixture = chain_fixture()
+    anchor_configuration = EntityStatement.entity_configuration(fixture.anchor_pem, @anchor, now: @now, exp: @now + 200)
+
+    assert {:ok, abbreviated} = TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+
+    assert {:ok, result} =
+             TrustChain.validate(fixture.chain ++ [anchor_configuration], fixture.anchor_jwks,
+               now: @now,
+               trust_anchor: @anchor
+             )
+
+    assert result.trust_anchor == @anchor
+    assert result.metadata == abbreviated.metadata
+    assert result.exp == @now + 200
+  end
+
+  test "the Trust Anchor's Entity Configuration must verify with the anchor keys and name the last issuer" do
+    fixture = chain_fixture()
+
+    other_entity = EntityStatement.entity_configuration(fixture.anchor_pem, "https://other-anchor.example", now: @now)
+    other_key = EntityStatement.entity_configuration(Factory.ec_pem(), @anchor, now: @now)
+
+    assert {:error, :broken_trust_chain} =
+             TrustChain.validate(fixture.chain ++ [other_entity], fixture.anchor_jwks, now: @now)
+
+    assert {:error, :invalid_signature} =
+             TrustChain.validate(fixture.chain ++ [other_key], fixture.anchor_jwks, now: @now)
+  end
+
   test "rejects a broken signature link" do
     fixture = chain_fixture()
     rogue_pem = Factory.ec_pem()
@@ -365,6 +395,7 @@ defmodule Attesto.Federation.TrustChainTest do
       chain: [leaf, intermediate, anchor],
       leaf_jwks: leaf_jwks,
       intermediate_pem: intermediate_pem,
+      anchor_pem: anchor_pem,
       anchor_jwks: anchor_jwks
     }
   end
