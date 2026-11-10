@@ -32,7 +32,7 @@ defmodule Attesto.DPoPCapabilitiesTest do
     refute Enum.any?(DPoP.allowed_algs(), &(&1 == "none" or String.starts_with?(&1, "HS")))
   end
 
-  test "clearing resumes capability discovery rather than retaining the snapshot" do
+  test "clearing drops the snapshot so the next call discovers capabilities again" do
     expected = DPoP.allowed_algs()
     assert :ok = DPoP.prime_allowed_algs()
     assert :ok = DPoP.clear_allowed_algs_cache()
@@ -40,8 +40,49 @@ defmodule Attesto.DPoPCapabilitiesTest do
 
     assert DPoP.allowed_algs() == expected
     assert DPoP.allowed_algs() == expected
-    assert {:call_count, 2} = :erlang.trace_info({:jose_jwa, :supports, 0}, :call_count)
+    assert {:call_count, 1} = :erlang.trace_info({:jose_jwa, :supports, 0}, :call_count)
     assert :ok = DPoP.clear_allowed_algs_cache()
+  end
+
+  test "capabilities are discovered once without priming, including for rejected proofs" do
+    assert :ok = DPoP.clear_allowed_algs_cache()
+    expected = DPoP.allowed_algs()
+    :erlang.trace_pattern({:jose_jwa, :supports, 0}, true, [:call_count])
+
+    for _ <- 1..100, do: assert(DPoP.allowed_algs() == expected)
+
+    {_kty, public} = {:ec, "P-256"} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_public_map()
+    opts = [http_method: "GET", http_uri: "https://api.example/x"]
+
+    for alg <- ["ES256", "ES384", "none", "HS256"] do
+      header = %{"typ" => "dpop+jwt", "alg" => alg, "jwk" => public}
+      proof = Enum.map_join([JSON.encode!(header), "{}", "x"], ".", &Base.url_encode64(&1, padding: false))
+      assert {:error, _reason} = DPoP.verify_proof(proof, opts)
+    end
+
+    assert {:call_count, 0} = :erlang.trace_info({:jose_jwa, :supports, 0}, :call_count)
+    assert :uncached = :persistent_term.get({DPoP, :jws_capabilities, 1}, :uncached)
+  end
+
+  test "unprimed capabilities follow a JOSE backend change" do
+    :ok = :meck.new(JOSE.JWA, [:passthrough, :no_link])
+
+    :meck.expect(JOSE.JWA, :supports, fn ->
+      algorithms = if JOSE.crypto_fallback(), do: ["RS256"], else: ["ES256"]
+      [jws: {:alg, algorithms}]
+    end)
+
+    JOSE.crypto_fallback(false)
+    assert :ok = DPoP.clear_allowed_algs_cache()
+    assert DPoP.allowed_algs() == ["ES256"]
+    assert DPoP.allowed_algs() == ["ES256"]
+    assert :meck.num_calls(JOSE.JWA, :supports, []) == 1
+
+    JOSE.crypto_fallback(true)
+    assert DPoP.allowed_algs() == ["RS256"]
+    JOSE.crypto_fallback(false)
+    assert DPoP.allowed_algs() == ["ES256"]
+    assert :meck.num_calls(JOSE.JWA, :supports, []) == 3
   end
 
   test "empty and symmetric-only discovery refuse an unprimed snapshot" do

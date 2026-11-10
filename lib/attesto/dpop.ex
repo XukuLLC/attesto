@@ -308,29 +308,58 @@ defmodule Attesto.DPoP do
 
   @doc """
   The list of JOSE `alg` values accepted on a DPoP proof's protected
-  header, filtered by the configured JOSE backend's capabilities. By default
-  these are discovered per call; `prime_allowed_algs/0` opts into a VM snapshot.
+  header, filtered by the configured JOSE backend's capabilities.
+
+  Discovering those capabilities costs more than verifying a proof's
+  signature, and every proof needs them before that check, so the result is
+  cached for the current JOSE backend configuration: the crypto fallback
+  setting, the Curve25519, Curve448, and SHA-3 modules, and OpenSSL FIPS
+  mode. A change to any of these through JOSE's or `:crypto`'s own functions
+  is picked up on the next call. `prime_allowed_algs/0` instead pins one
+  snapshot that does not follow such changes, and
+  `clear_allowed_algs_cache/0` drops both.
   """
   @spec allowed_algs() :: [String.t()]
   @capabilities_cache_key {__MODULE__, :jws_capabilities, 1}
+  @discovered_cache_key {__MODULE__, :discovered_jws_algs, 1}
 
   def allowed_algs do
-    supported =
-      case :persistent_term.get(@capabilities_cache_key, :uncached) do
-        :uncached -> jose_jws_algs()
-        algorithms -> algorithms
-      end
+    case :persistent_term.get(@capabilities_cache_key, :uncached) do
+      :uncached -> discovered_allowed_algs()
+      algorithms -> Enum.filter(@allowed_algs, &(&1 in algorithms))
+    end
+  end
 
-    Enum.filter(@allowed_algs, &(&1 in supported))
+  # The cache entry is keyed by the backend configuration it was discovered
+  # under, so a backend change is a cache miss. A discovery that leaves no
+  # accepted algorithm is not cached, so a transient failure is retried.
+  defp discovered_allowed_algs do
+    backend = jose_backend()
+
+    case :persistent_term.get(@discovered_cache_key, :uncached) do
+      {^backend, algorithms} ->
+        algorithms
+
+      _missing_or_stale ->
+        supported = jose_jws_algs()
+        algorithms = Enum.filter(@allowed_algs, &(&1 in supported))
+        if algorithms != [], do: :persistent_term.put(@discovered_cache_key, {backend, algorithms})
+        algorithms
+    end
+  end
+
+  defp jose_backend do
+    {JOSE.crypto_fallback(), JOSE.curve25519_module(), JOSE.curve448_module(), JOSE.sha3_module(), :crypto.info_fips()}
   end
 
   @doc """
-  Snapshot the current JOSE signing capabilities for this VM.
+  Pin the current JOSE signing capabilities for this VM.
 
-  Opt in only when the application owns the node's crypto configuration and
-  keeps it immutable until restart. Call `clear_allowed_algs_cache/0` before
-  changing JOSE backends, then prime again after the change. Without priming,
-  `allowed_algs/0` continues to discover the current capabilities on every call.
+  `allowed_algs/0` caches capabilities without this call. Priming pins one
+  snapshot that `allowed_algs/0` then returns even if the JOSE backend
+  configuration changes, until `clear_allowed_algs_cache/0` is called. Use it
+  only when the application owns the node's crypto configuration and keeps it
+  immutable until restart.
 
   This caches capability data only. Every proof still verifies its header,
   public key, signature, claims, target, freshness and replay policy. The fixed
@@ -350,10 +379,14 @@ defmodule Attesto.DPoP do
     end
   end
 
-  @doc "Resume per-call JOSE capability discovery, including after backend changes."
+  @doc """
+  Drop the primed snapshot and the cached capabilities, so the next
+  `allowed_algs/0` call discovers them again from the current JOSE backend.
+  """
   @spec clear_allowed_algs_cache() :: :ok
   def clear_allowed_algs_cache do
     :persistent_term.erase(@capabilities_cache_key)
+    :persistent_term.erase(@discovered_cache_key)
     :ok
   end
 
@@ -365,8 +398,10 @@ defmodule Attesto.DPoP do
   defp check_typ(%{"typ" => @proof_typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
+  # The fixed whitelist is checked first, so `none`, `HS256`, and other names
+  # it excludes are refused without consulting the backend at all.
   defp check_alg(%{"alg" => alg}) when is_binary(alg) do
-    if alg in allowed_algs(), do: :ok, else: {:error, :invalid_alg}
+    if alg in @allowed_algs and alg in allowed_algs(), do: :ok, else: {:error, :invalid_alg}
   end
 
   defp check_alg(_header), do: {:error, :invalid_alg}

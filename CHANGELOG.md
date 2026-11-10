@@ -68,6 +68,21 @@ defaults in a minor release.
 - `Attesto.Key.single_jwk_map?/1`, the check the fixes above share: a map
   with a string `kty` and no `keys` member.
 
+### Changed
+
+- `Attesto.DPoP.allowed_algs/0` caches the algorithms it discovers from the
+  JOSE backend, keyed by that backend's configuration: the crypto fallback
+  setting, the Curve25519, Curve448, and SHA-3 modules, and FIPS mode.
+  `Attesto.DPoP.verify_proof/2` also refuses an `alg` outside its fixed list
+  before consulting the backend. Unless `prime_allowed_algs/0` had been
+  called, every proof, an unauthenticated one with `alg: "none"` included,
+  ran `JOSE.JWA.supports/0` before its signature was checked, and that call
+  costs more than verifying an ES256 proof. A backend change made through
+  JOSE's or `:crypto`'s functions is still picked up on the next call.
+  `clear_allowed_algs_cache/0` now drops the cached result so that the next
+  call discovers it again, rather than switching to discovery on every call;
+  `prime_allowed_algs/0` still pins a snapshot that ignores backend changes.
+
 ### Fixed
 
 - Pass over a key in a trusted JWK Set that is well formed but cannot verify
