@@ -6,6 +6,51 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Security
+
+- Refuse a JWK that carries a `keys` member wherever one key is expected.
+  JOSE parses a map with both `kty` and `keys` as the outer key with the inner
+  keys attached, and `Attesto.JWS.verify_trusted/4` expanded any map with a
+  `keys` list into those keys. A proof whose `jwk` header named one key and
+  listed another under `keys` was therefore validated and thumbprinted as the
+  first key and signature-checked against the second.
+  Anyone who knew a public key could pass proof of possession for it with a
+  key of their own:
+  - `Attesto.DPoP.verify_proof/2` returned the `jkt` of a key that had not
+    signed the proof, so a party holding a DPoP-bound access token could
+    present it without the bound private key.
+  - `Attesto.Siop.verify/2` accepted a Self-Issued ID Token for a subject whose
+    key had not signed it.
+  - `Attesto.CredentialProof.verify_jwt/2` returned the named key as the proven
+    key, including under `require_key_attestation: true` when the attestation
+    covered only the named key. A credential issued to the returned `jwk`
+    carried the `keys` member in `cnf`, and its SD-JWT key binding then
+    verified against the inner key.
+  - The wallet attestation proof of possession in `Attesto.WalletAttestation`
+    passed its key the same way.
+  `Attesto.Key.verification_jwk/2` now returns `:malformed_jwk` for a map
+  with a `keys` member or without a string `kty`, `verify_trusted/4` treats a
+  map with `kty` as one key, and those verifiers pass their key as a
+  one-element list so it is never expanded.
+- Return an error instead of not terminating when a JWK Set is given where one
+  JWK is expected. JOSE does not return from its thumbprint or public-map
+  conversion for a set, an empty one included, so a `jwk` header such as
+  `{"keys": []}`, or a `kty`-bearing key with a nested `{"keys": []}`, held
+  the verifying process until its caller timed out. This was reachable without
+  authentication through the DPoP, OpenID4VCI proof and SIOP verifiers,
+  `did:jwk` resolution, and the `jwks` of a self-signed Entity Configuration. `Attesto.Thumbprint.of_jwk/1` returns
+  `:malformed_jwk`, `Attesto.Did.resolve/2` returns `:invalid_jwk`,
+  `Attesto.SigningAlg.infer/1` raises `ArgumentError` for a parsed set, and
+  `Attesto.JWE`, `Attesto.JwtVc` and the COSE verifier refuse the map before
+  parsing it.
+
+### Added
+
+- `Attesto.Key.single_jwk_map?/1`, the check the fixes above share: a map
+  with a string `kty` and no `keys` member.
+
 ## [2.11.0] - 2026-11-05
 
 ### Security

@@ -254,9 +254,13 @@ if Code.ensure_loaded?(CBOR) do
     defp verification_jwk(%JOSE.JWK{} = jwk), do: validate_verification_jwk(jwk)
 
     defp verification_jwk(jwk_map) when is_map(jwk_map) do
-      jwk_map
-      |> JOSE.JWK.from_map()
-      |> validate_verification_jwk()
+      if Attesto.Key.single_jwk_map?(jwk_map) do
+        jwk_map
+        |> JOSE.JWK.from_map()
+        |> validate_verification_jwk()
+      else
+        {:error, :invalid_key}
+      end
     rescue
       _error -> {:error, :invalid_key}
     catch

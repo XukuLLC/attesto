@@ -585,7 +585,7 @@ defmodule Attesto.SdJwt do
            SigningAlg.valid_verification_algorithms?(accepted) and is_binary(alg) and
              alg in accepted and alg != "none",
          {:ok, _jwk} <- Key.verification_jwk(holder_jwk, alg: alg) do
-      JWS.verify_trusted(kb_jwt, header, holder_jwk,
+      JWS.verify_trusted(kb_jwt, header, [holder_jwk],
         alg: alg,
         select_kid: false,
         malformed_key: :reject_set,

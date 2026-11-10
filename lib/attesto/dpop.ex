@@ -399,7 +399,7 @@ defmodule Attesto.DPoP do
   # ----- internal: signature verification -----
 
   defp verify_signature(proof, header) do
-    JWS.verify_trusted(proof, header, Map.fetch!(header, "jwk"),
+    JWS.verify_trusted(proof, header, [Map.fetch!(header, "jwk")],
       alg: Map.get(header, "alg"),
       select_kid: false,
       malformed_key: :reject_set,

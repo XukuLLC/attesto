@@ -91,7 +91,8 @@ defmodule Attesto.Key do
 
     validate_verification_options!(require_public?, minimum_rsa_bits)
 
-    with :ok <- reject_private_members(jwk_map, require_public?),
+    with :ok <- validate_single_jwk(jwk_map),
+         :ok <- reject_private_members(jwk_map, require_public?),
          :ok <- validate_jwk_usage(jwk_map),
          :ok <- validate_jwk_alg(jwk_map, alg),
          :ok <- validate_rsa_params(jwk_map),
@@ -100,6 +101,22 @@ defmodule Attesto.Key do
          :ok <- validate_verification_algorithm(alg, jwk) do
       {:ok, jwk}
     end
+  end
+
+  @doc """
+  Whether `jwk_map` is a single JWK rather than a JWK Set.
+
+  A JWK has a string `kty` member (RFC 7517 §4.1) and no `keys` member. JOSE
+  parses a map that has both as the outer key with the inner keys attached,
+  and a map that has only `keys` as a set, so a caller that expects one key
+  must refuse both before parsing.
+  """
+  @spec single_jwk_map?(term()) :: boolean()
+  def single_jwk_map?(%{"kty" => kty} = jwk_map) when is_binary(kty), do: not is_map_key(jwk_map, "keys")
+  def single_jwk_map?(_jwk_map), do: false
+
+  defp validate_single_jwk(jwk_map) do
+    if single_jwk_map?(jwk_map), do: :ok, else: {:error, :malformed_jwk}
   end
 
   # Bound RSA modulus/exponent on the RAW map before `JOSE.JWK.from_map/1` so a

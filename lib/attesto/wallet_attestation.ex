@@ -337,7 +337,7 @@ defmodule Attesto.WalletAttestation do
   end
 
   defp verify_pop_signature(pop, header, jwk_map) do
-    JWS.verify_trusted(pop, header, jwk_map,
+    JWS.verify_trusted(pop, header, [jwk_map],
       alg: Map.get(header, "alg"),
       select_kid: false,
       malformed_key: :reject_set,

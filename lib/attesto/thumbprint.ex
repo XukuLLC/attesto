@@ -81,12 +81,19 @@ defmodule Attesto.Thumbprint do
   canonicalized as a JWK.
   """
   @spec of_jwk(JOSE.JWK.t() | map()) :: {:ok, String.t()} | {:error, :malformed_jwk}
-  def of_jwk(%JOSE.JWK{} = jwk), do: jwk_thumbprint(jwk)
+  def of_jwk(%JOSE.JWK{keys: :undefined, kty: kty} = jwk) when kty != :undefined, do: jwk_thumbprint(jwk)
+
+  # A JWK Set has no RFC 7638 thumbprint, and JOSE does not terminate on one.
+  def of_jwk(%JOSE.JWK{}), do: {:error, :malformed_jwk}
 
   def of_jwk(jwk_map) when is_map(jwk_map) do
-    jwk_map
-    |> JOSE.JWK.from_map()
-    |> jwk_thumbprint()
+    if Attesto.Key.single_jwk_map?(jwk_map) do
+      jwk_map
+      |> JOSE.JWK.from_map()
+      |> jwk_thumbprint()
+    else
+      {:error, :malformed_jwk}
+    end
   rescue
     _ -> {:error, :malformed_jwk}
   catch

@@ -148,7 +148,7 @@ defmodule Attesto.CredentialProof do
   # ── signature ────────────────────────────────────────────────────────────
 
   defp verify_signature(proof, header, jwk_map) do
-    JWS.verify_trusted(proof, header, jwk_map,
+    JWS.verify_trusted(proof, header, [jwk_map],
       alg: Map.get(header, "alg"),
       select_kid: false,
       malformed_key: :reject_set,

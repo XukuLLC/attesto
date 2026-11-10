@@ -405,6 +405,9 @@ defmodule Attesto.JWS do
   defp segment_key(:protected), do: :protected_segment
   defp segment_key(:payload), do: :payload_segment
 
+  # A map with `kty` is one JWK even when it also carries `keys`; it is never
+  # expanded into the keys it carries, and `Key.verification_jwk/2` refuses it.
+  defp normalize_verification_keys(%{"kty" => _kty} = jwk), do: [jwk]
   defp normalize_verification_keys(%{"keys" => keys}) when is_list(keys), do: keys
   defp normalize_verification_keys(keys) when is_list(keys), do: keys
   defp normalize_verification_keys(%{} = jwk), do: [jwk]

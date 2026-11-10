@@ -273,7 +273,7 @@ defmodule Attesto.Siop do
   defp binding_error(:jwk_thumbprint), do: :invalid_sub_jwk
 
   defp verify_signature(id_token, header, jwk_map) do
-    JWS.verify_trusted(id_token, header, jwk_map,
+    JWS.verify_trusted(id_token, header, [jwk_map],
       alg: Map.get(header, "alg"),
       select_kid: false,
       malformed_key: :reject_set,

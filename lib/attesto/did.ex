@@ -129,6 +129,10 @@ defmodule Attesto.Did do
       not SigningAlg.rsa_params_ok?(jwk) ->
         {:error, :invalid_jwk}
 
+      # JOSE does not terminate when asked for the public form of a JWK Set.
+      not Attesto.Key.single_jwk_map?(jwk) ->
+        {:error, :invalid_jwk}
+
       true ->
         parse_public_jwk(jwk)
     end

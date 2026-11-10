@@ -387,10 +387,15 @@ defmodule Attesto.SigningAlg do
   defp fallback_inferred_alg(nil, jwk), do: infer(jwk)
   defp fallback_inferred_alg(alg, _jwk), do: alg
 
-  defp public_fields(jwk) do
+  defp public_fields(%JOSE.JWK{keys: :undefined} = jwk) do
     jwk
     |> JOSE.JWK.to_public_map()
     |> elem(1)
+  end
+
+  # JOSE does not terminate when asked for the public form of a JWK Set.
+  defp public_fields(_jwk) do
+    raise ArgumentError, "unsupported signing key; expected one JWK, not a JWK Set"
   end
 
   defp infer_from_fields(%{"kty" => "RSA"}), do: "RS256"
