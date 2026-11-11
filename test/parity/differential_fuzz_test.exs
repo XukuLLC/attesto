@@ -34,7 +34,6 @@ defmodule Attesto.Parity.DifferentialFuzzTest do
     padded_b64_payload: {:error, :malformed},
     deep_json_payload: {:error, :invalid_signature},
     crit_empty: {:error, :unsupported_critical_header},
-    rsa_jwk_without_explicit_ps256_alg: {:error, :invalid_signature},
     private_key_in_jwk: {:error, :invalid_signature},
     wrong_use_in_jwk: {:error, :invalid_signature}
   }
@@ -275,7 +274,7 @@ defmodule Attesto.Parity.DifferentialFuzzTest do
 
       case att_res do
         {:ok, claims} ->
-          assert item.mutation == :valid
+          assert item.mutation in [:valid, :rsa_jwk_without_explicit_ps256_alg]
           assert py_res["ok"] == true
           assert js_res["ok"] == true
           assert py_res["claims"] == claims

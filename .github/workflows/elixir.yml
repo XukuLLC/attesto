@@ -115,6 +115,12 @@ jobs:
           ATTESTO_TEST_PRIME_DPOP_ALGS: "1"
         run: mix test test/attesto/dpop_test.exs
 
+      - name: Run differential fuzzing smoke pass
+        if: ${{ matrix.lint }}
+        env:
+          ATTESTO_FUZZ_RUNS: "200"
+        run: mix test --only fuzz --seed 20261101 --trace
+
       - name: Check formatting
         if: ${{ matrix.lint }}
         run: mix format --check-formatted
