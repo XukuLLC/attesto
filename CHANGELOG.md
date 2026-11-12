@@ -6,7 +6,7 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
-## [Unreleased]
+## [2.15.0] - 2026-11-12
 
 ### Security
 
@@ -69,6 +69,25 @@ defaults in a minor release.
   `deviceKeyInfo.keyAuthorizations` (ISO/IEC 18013-5 §9.1.2.4). An issuer
   that wants holders to present device-signed elements has to set it.
   `Attesto.Mdoc.verify/3` returns the authorizations as `:key_authorizations`.
+- `Attesto.X509.verify/2` validates a leaf-first DER certificate chain against
+  explicit trust anchors using OTP PKIX and returns the verified leaf public
+  JWK and authority key identifiers. It bounds chain length and certificate
+  size, enforces signing key usage and RSA parameters, supports the mdoc
+  document-signer purpose, and applies optional host policy after validation.
+  `decode_x5c/1` decodes bounded JOSE certificate chains. `haip: true` refuses
+  self-signed leaves and embedded trust anchors (HAIP 1.0 §6.1.1).
+- `Attesto.X509.matches_issuer?/2` binds a validated leaf to an HTTPS issuer
+  using URI SANs first, then DNS SANs only when no URI SAN exists. SD-JWT VC
+  draft -08 §3.5 describes both name forms but gives neither precedence;
+  URI precedence is an explicit stricter policy. HAIP references draft -13
+  §3.5, which identifies the issuer by its certificate subject. Draft -26
+  §2.5 permits issuer binding policy and does not authenticate `iss` merely
+  from a trusted certificate path.
+- `Attesto.SdJwtVc.verify/3` accepts `:trusted_certificates` to opt into `x5c`
+  path validation, leaf-key signature verification, and binding to a required
+  signed `iss`. This mode defaults to `haip: true`, accepts an additional
+  `:certificate_trust` callback, and never falls back to caller-supplied keys.
+  Verification without this option retains the existing behavior.
 
 ## [2.14.0] - 2026-11-11
 
