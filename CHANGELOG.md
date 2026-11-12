@@ -6,7 +6,7 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
-## [Unreleased]
+## [2.13.0] - 2026-11-11
 
 ### Changed
 
