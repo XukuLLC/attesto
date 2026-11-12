@@ -23,12 +23,13 @@ defmodule Attesto.SdJwtVc do
       reached. Holder binding is a separate step - pass the returned `cnf` key to
       `Attesto.SdJwt.verify_key_binding/3` with the presentation's nonce/audience.
       Explicit certificate identity mode permits an omitted `iss` after the
-      caller establishes certificate trust.
+      caller establishes certificate trust. Alternatively, `:trusted_certificates`
+      opts into core path validation and SAN binding to a required `iss`.
 
   Conn-free and fail-closed, like the rest of attesto core.
   """
 
-  alias Attesto.{JWS, MapParams, NumericDate, SdJwt}
+  alias Attesto.{JWS, MapParams, NumericDate, SdJwt, X509}
 
   # RFC-registered media type for an SD-JWT VC; the newer draft additionally
   # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
@@ -67,6 +68,8 @@ defmodule Attesto.SdJwtVc do
           | :expired
           | :not_yet_valid
           | :invalid_cnf
+          | X509.verify_error()
+          | :certificate_issuer_mismatch
 
   @doc """
   Issue an SD-JWT VC.
@@ -182,8 +185,8 @@ defmodule Attesto.SdJwtVc do
   @doc """
   Verify an SD-JWT VC presentation and reconstruct the disclosed claims.
 
-  `jwks` is the issuer's JWK Set. Options are passed through to
-  `Attesto.SdJwt.verify/3` (e.g. `:accepted_algs`), plus:
+  `jwks` is the issuer's JWK Set (or `nil` with `:trusted_certificates`). Options
+  are passed through to `Attesto.SdJwt.verify/3` (e.g. `:accepted_algs`), plus:
 
     * `:now` / `:max_age_seconds` - clock reference for the temporal checks.
     * `:issuer_identity` - defaults to `:claim`, requiring a nonempty `iss`.
@@ -191,8 +194,24 @@ defmodule Attesto.SdJwtVc do
       and supplying its verified leaf public key as `jwks`. This mode permits
       an omitted `iss` when the signed header contains `x5c`, as in the SD-JWT
       VC profile referenced by HAIP. A present malformed `iss` still fails.
-      This module does not establish certificate trust; an `x5c` header alone
-      is never a trust decision.
+      Without `:trusted_certificates`, the caller establishes certificate trust;
+      an `x5c` header alone is never a trust decision.
+    * `:trusted_certificates` - opt into X.509 key resolution with a nonempty
+      list of DER trust anchors. The protected `x5c` chain is validated with
+      `Attesto.X509.verify/2`; its leaf public key replaces `jwks` for signature
+      verification. A required, signed `iss` must then pass
+      `Attesto.X509.matches_issuer?/2`, including URI SAN precedence. This is
+      the stricter binding policy documented there, not a requirement of all
+      SD-JWT VC revisions. Empty or invalid anchors fail without falling back
+      to `jwks`. This option also requires `iss` in `:certificate` identity mode.
+    * `:haip` - with `:trusted_certificates`, defaults to `true`: refuse a
+      self-signed leaf or an embedded configured trust anchor (HAIP §6.1.1).
+      Set `false` for generic X.509 chain handling. The certificate purpose is
+      always `:generic` for SD-JWT VC, regardless of any `:purpose` option.
+    * `:certificate_trust` - with `:trusted_certificates`, an optional additional
+      chain policy callback as in `Attesto.X509.verify/2`. It cannot bypass
+      path validation, signature verification, or issuer binding. `:now` affects
+      credential claims only; OTP uses system time for certificate validity.
 
   Returns `{:ok, %{claims:, vct:, iss:, cnf:, key_binding_jwt:, ...}}`. Holder
   binding is NOT checked here - if `cnf` is present and the presentation carries
@@ -206,14 +225,16 @@ defmodule Attesto.SdJwtVc do
   claim. Verifiers must therefore trust the issuer to follow the profile's
   registered-claim visibility rule.
   """
-  @spec verify(String.t(), map() | [map()] | list(), keyword()) ::
+  @spec verify(String.t(), map() | [map()] | list() | nil, keyword()) ::
           {:ok, verified()} | {:error, verify_error()}
   def verify(combined, jwks, opts \\ []) when is_binary(combined) do
     opts = Keyword.put_new(opts, :accepted_typ, @accepted_typ)
 
-    with {:ok, base} <- SdJwt.verify(combined, jwks, opts),
+    with {:ok, issuer_keys, leaf} <- issuer_keys(combined, jwks, opts),
+         {:ok, base} <- SdJwt.verify(combined, issuer_keys, opts),
          :ok <- check_registered_claim_visibility(base),
          {:ok, iss} <- credential_issuer(base, opts),
+         :ok <- check_certificate_issuer(leaf, iss),
          {:ok, vct} <- require_string(base.claims, "vct", :missing_vct),
          :ok <- check_exp(base.claims, opts),
          :ok <- check_nbf(base.claims, opts),
@@ -229,6 +250,39 @@ defmodule Attesto.SdJwtVc do
          disclosures: base.disclosures
        }}
     end
+  end
+
+  defp issuer_keys(combined, jwks, opts) do
+    if Keyword.has_key?(opts, :trusted_certificates) do
+      certificate_issuer_keys(combined, opts)
+    else
+      {:ok, jwks, nil}
+    end
+  end
+
+  defp certificate_issuer_keys(combined, _opts) when byte_size(combined) > @max_issuer_segment_bytes,
+    do: {:error, :malformed}
+
+  defp certificate_issuer_keys(combined, opts) do
+    issuer_jwt = combined |> :binary.split("~") |> hd()
+    trust_opts = opts |> Keyword.put_new(:haip, true) |> Keyword.put(:purpose, :generic)
+
+    with {:ok, header} <-
+           JWS.protected_header(issuer_jwt,
+             crit_error: :malformed,
+             max_compact_bytes: @max_issuer_segment_bytes
+           ),
+         {:ok, chain} <- X509.decode_x5c(Map.get(header, "x5c")),
+         {:ok, verified} <- X509.verify(chain, trust_opts) do
+      {:ok, verified.public_key, hd(chain)}
+    end
+  end
+
+  defp check_certificate_issuer(nil, _iss), do: :ok
+  defp check_certificate_issuer(_leaf, nil), do: {:error, :missing_iss}
+
+  defp check_certificate_issuer(leaf, iss) do
+    if X509.matches_issuer?(leaf, iss), do: :ok, else: {:error, :certificate_issuer_mismatch}
   end
 
   # ── claim rules ──────────────────────────────────────────────────────────
