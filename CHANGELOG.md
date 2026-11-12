@@ -6,6 +6,70 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Security
+
+- `Attesto.Cose` and `Attesto.Mdoc` refuse CBOR in which a map repeats a key.
+  A COSE_Sign1 whose protected or unprotected header named a label twice was
+  accepted: the general-purpose decoder builds a map as it reads, so one of
+  the two entries was dropped before any check ran, and with two different
+  values the one kept was whichever came last. RFC 9052 §3 says "if a label
+  appears multiple times, the message MUST be rejected as malformed". The
+  same applied to every map in an mdoc `DeviceResponse`, `IssuerSigned`
+  structure and Mobile Security Object. All of them are now decoded through
+  `Attesto.StrictCBOR`, and such input is `:invalid_cose` or `:invalid_mdoc`.
+  Two keys count as the same when they decode to the same value, so a key
+  repeated in a non-minimal or indefinite-length encoding is refused too.
+- `Attesto.Mdoc.verify_device_response/4` checks device-signed data elements
+  against the Mobile Security Object's `keyAuthorizations`. ISO/IEC 18013-5
+  §9.1.3.4 says "the mdoc reader shall validate this authorization as part of
+  validating the mdoc authentication". Until now a `DeviceSigned` element in
+  any namespace was returned in `device_namespaces` as long as the device
+  signature verified. An element whose namespace is not authorized in full
+  and which is not listed by name for its namespace is now refused with
+  `{:error, :unauthorized_device_element}`. A presentation with no
+  device-signed elements is unaffected.
+
+  Behaviour change: a credential whose issuer set no `keyAuthorizations`
+  authorizes no device-signed element, so a presentation of it that carries
+  one is refused where it used to be accepted. `Attesto.VpToken` evaluates
+  DCQL claims against issuer-signed namespaces only, so query results do not
+  change; a host that reads `device_namespaces` is affected.
+- `Attesto.SdJwt.verify_key_binding/3` enforces a Key Binding JWT's `exp` and
+  `nbf` when the holder included them. Only `iat` was read, so a binding with
+  an `exp` in the past, an `nbf` in the future, or a non-numeric value for
+  either was accepted while its `iat` was within the freshness window (300
+  seconds by default). RFC 9901 §7.3 requires the Key Binding JWT to be "a
+  valid JWT in all other respects, per [RFC7519]", and RFC 7519 §4.1.4 /
+  §4.1.5 say a JWT MUST NOT be accepted on or after `exp` or before `nbf`.
+  Both are checked with the 60 seconds of clock allowance `iat` already had,
+  and a value that is not a non-negative integer is refused. Both claims
+  remain optional.
+
+### Fixed
+
+- `Attesto.StatusList.verify/3` refuses a status list whose ZLIB stream is cut
+  short. The stream was read as a complete, shorter list: entries in the part
+  that survived answered with their real values and an index in the missing
+  part failed as out of range. No index could be read as a different status
+  than the full list gives, and the list is inside the issuer's signature, so
+  only the Status Issuer can produce one. It is now `:invalid_status_list`,
+  as a list that fails its checksum already was. Bytes after the end of a
+  complete stream are still ignored.
+
+### Added
+
+- `Attesto.StrictCBOR.decode/2` decodes one CBOR data item and refuses a map
+  with a repeated key at any depth, input nested deeper than `:max_depth`
+  (default 32), trailing bytes, and input longer than `:max_bytes`. It is the
+  CBOR counterpart of `Attesto.StrictJSON`.
+- `Attesto.Mdoc.issue/1` takes `:key_authorizations` (`:name_spaces` and/or
+  `:data_elements`) and writes it to the Mobile Security Object's
+  `deviceKeyInfo.keyAuthorizations` (ISO/IEC 18013-5 §9.1.2.4). An issuer
+  that wants holders to present device-signed elements has to set it.
+  `Attesto.Mdoc.verify/3` returns the authorizations as `:key_authorizations`.
+
 ## [2.14.0] - 2026-11-11
 
 ### Changed

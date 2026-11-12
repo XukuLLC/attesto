@@ -282,7 +282,9 @@ defmodule Attesto.SdJwt do
     * `:now` / `:max_age_seconds` - freshness bounds on `iat` (default 300s).
 
   Verifies the KB-JWT signature under `holder_jwk`, its `typ` (`kb+jwt`), the
-  `nonce`/`aud`, and that `sd_hash` equals `base64url(HASH(<Issuer JWT and
+  `nonce`/`aud`, the `iat` window, an `exp` or `nbf` when the holder included
+  one (RFC 7519 §4.1.4 / §4.1.5, with 60 seconds of clock allowance; a value
+  that is not an integer is refused), and that `sd_hash` equals `base64url(HASH(<Issuer JWT and
   presented Disclosures, `~`-joined, trailing `~`>))`, using the signed
   top-level `_sd_alg` (spec §4.3) - so the holder signed over exactly the
   presentation the verifier reconstructed claims from.
@@ -301,7 +303,9 @@ defmodule Attesto.SdJwt do
          {:ok, claims} <- verify_kb_signature(verified.key_binding_jwt, header, holder_jwk, opts),
          :ok <- check_kb_nonce(claims, opts),
          :ok <- check_kb_audience(claims, opts),
-         :ok <- check_kb_iat(claims, opts) do
+         :ok <- check_kb_iat(claims, opts),
+         :ok <- check_kb_exp(claims, opts),
+         :ok <- check_kb_nbf(claims, opts) do
       check_kb_sd_hash(claims, verified)
     end
   end
@@ -573,6 +577,7 @@ defmodule Attesto.SdJwt do
 
   @kb_typ "kb+jwt"
   @default_kb_max_age 300
+  @kb_clock_skew_seconds 60
 
   defp check_kb_typ(%{"typ" => @kb_typ}), do: :ok
   defp check_kb_typ(_), do: {:error, :invalid_key_binding}
@@ -619,12 +624,39 @@ defmodule Attesto.SdJwt do
     now = NumericDate.now(opts, invalid_override: :fallback)
     max_age = Keyword.get(opts, :max_age_seconds, @default_kb_max_age)
     # Reject a future-dated or too-old key binding.
-    if NumericDate.fresh?(iat, now, future_skew: 60, max_age: max_age) == :ok,
+    if NumericDate.fresh?(iat, now, future_skew: @kb_clock_skew_seconds, max_age: max_age) == :ok,
       do: :ok,
       else: {:error, :invalid_key_binding}
   end
 
   defp check_kb_iat(_claims, _opts), do: {:error, :invalid_key_binding}
+
+  # RFC 9901 §7.3 step 5h: the Key Binding JWT must be "a valid JWT in all
+  # other respects, per [RFC7519]". A Key Binding JWT need not carry `exp` or
+  # `nbf` (§4.3 requires only `iat`, `aud`, `nonce`, `sd_hash`), but RFC 7519
+  # §4.1.4 / §4.1.5 say a JWT MUST NOT be accepted on or after its `exp` or
+  # before its `nbf`, and that each value MUST be a number. So a present claim
+  # is enforced, with the same clock allowance as `iat`, and a present value
+  # that is not an integer NumericDate is refused.
+  defp check_kb_exp(%{"exp" => exp}, opts) do
+    now = NumericDate.now(opts, invalid_override: :fallback)
+
+    if NumericDate.valid?(exp) and NumericDate.not_expired?(exp, now, leeway: @kb_clock_skew_seconds),
+      do: :ok,
+      else: {:error, :invalid_key_binding}
+  end
+
+  defp check_kb_exp(_claims, _opts), do: :ok
+
+  defp check_kb_nbf(%{"nbf" => nbf}, opts) do
+    now = NumericDate.now(opts, invalid_override: :fallback)
+
+    if NumericDate.valid?(nbf) and NumericDate.not_before_reached?(nbf, now, skew: @kb_clock_skew_seconds),
+      do: :ok,
+      else: {:error, :invalid_key_binding}
+  end
+
+  defp check_kb_nbf(_claims, _opts), do: :ok
 
   # `sd_hash` binds the KB-JWT to the exact Issuer-JWT + presented Disclosures.
   defp check_kb_sd_hash(%{"sd_hash" => presented}, verified) when is_binary(presented) do

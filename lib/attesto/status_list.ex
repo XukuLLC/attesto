@@ -304,10 +304,17 @@ defmodule Attesto.StatusList do
     end
   end
 
-  defp bounded_inflate(_z, {:finished, output}, acc, total) do
+  # `safeInflate/2` also answers `:finished` when the input simply ran out, so
+  # a ZLIB stream cut short would be read as a complete, shorter list.
+  # `inflateEnd/1` raises unless the end of the stream was reached (and its
+  # Adler-32 verified), and `inflate/1` turns that into `:invalid_compression`.
+  # Bytes after the end of a complete stream are not part of the list and are
+  # ignored.
+  defp bounded_inflate(z, {:finished, output}, acc, total) do
     if total + IO.iodata_length(output) > @max_inflated_bytes do
       {:error, :status_list_too_large}
     else
+      :ok = :zlib.inflateEnd(z)
       {:ok, IO.iodata_to_binary([acc, output])}
     end
   end

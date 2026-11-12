@@ -207,6 +207,69 @@ defmodule Attesto.MdocTest do
     assert Enum.map(unprotected[33], fn %CBOR.Tag{tag: :bytes, value: der} -> der end) == chain
   end
 
+  describe "issue/1 :key_authorizations" do
+    setup do
+      {issuer_pem, issuer_public} = keypair()
+      {_holder_pem, holder_public} = keypair()
+
+      %{
+        issuer_pem: issuer_pem,
+        issuer_public: issuer_public,
+        holder_public: holder_public,
+        now: System.system_time(:second)
+      }
+    end
+
+    test "is written to the MSO and returned by verify/3", ctx do
+      authorizations = [name_spaces: ["org.example.device"], data_elements: %{@mdl_namespace => ["age_over_21"]}]
+
+      assert {:ok, issued} =
+               Mdoc.issue(issue_opts(ctx.issuer_pem, ctx.holder_public, ctx.now, key_authorizations: authorizations))
+
+      assert {:ok, verified} = Mdoc.verify(issued, ctx.issuer_public, now: ctx.now)
+
+      assert verified.key_authorizations == %{
+               name_spaces: ["org.example.device"],
+               data_elements: %{@mdl_namespace => ["age_over_21"]}
+             }
+    end
+
+    test "is absent from the MSO when not given", ctx do
+      assert {:ok, issued} = Mdoc.issue(issue_opts(ctx.issuer_pem, ctx.holder_public, ctx.now, []))
+      assert {:ok, verified} = Mdoc.verify(issued, ctx.issuer_public, now: ctx.now)
+      assert verified.key_authorizations == %{name_spaces: [], data_elements: %{}}
+
+      [_protected, _unprotected, %CBOR.Tag{tag: :bytes, value: payload}, _signature] =
+        issued |> Base.url_decode64!(padding: false) |> decode!() |> Access.get("issuerAuth")
+
+      %CBOR.Tag{tag: 24, value: %CBOR.Tag{tag: :bytes, value: mso_bytes}} = decode!(payload)
+      refute Map.has_key?(decode!(mso_bytes)["deviceKeyInfo"], "keyAuthorizations")
+    end
+
+    test "refuses an empty authorization, a namespace listed both ways, and malformed values", ctx do
+      for invalid <- [
+            [],
+            %{},
+            [name_spaces: []],
+            [data_elements: %{}],
+            [name_spaces: ["ns"], data_elements: %{"ns" => ["a"]}],
+            [name_spaces: [""]],
+            [name_spaces: ["ns", "ns"]],
+            [name_spaces: "ns"],
+            [data_elements: %{"ns" => []}],
+            [data_elements: %{"ns" => [""]}],
+            [data_elements: %{"" => ["a"]}],
+            [data_elements: [{"ns", ["a"]}]],
+            [name_spaces: ["ns"], other: true],
+            "ns"
+          ] do
+        assert {:error, :invalid_options} =
+                 Mdoc.issue(issue_opts(ctx.issuer_pem, ctx.holder_public, ctx.now, key_authorizations: invalid)),
+               "#{inspect(invalid)} was accepted"
+      end
+    end
+  end
+
   describe "verify_device_response/4" do
     setup do
       {issuer_pem, issuer_public} = keypair()
@@ -221,14 +284,31 @@ defmodule Attesto.MdocTest do
         }
       }
 
-      {:ok, issued} = Mdoc.issue(issue_opts(issuer_pem, holder_public, now, namespaces: namespaces))
+      # The device key may sign `age_over_21` in the mDL namespace, and
+      # anything in `org.example.device`.
+      {:ok, issued} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, holder_public, now,
+            namespaces: namespaces,
+            key_authorizations: [
+              name_spaces: ["org.example.device"],
+              data_elements: %{@mdl_namespace => ["age_over_21"]}
+            ]
+          )
+        )
+
       issuer_signed = issued |> Base.url_decode64!(padding: false) |> decode!()
+
+      {:ok, issued_without_authorizations} =
+        Mdoc.issue(issue_opts(issuer_pem, holder_public, now, namespaces: namespaces))
 
       %{
         client_id: "x509_san_dns:verifier.example.com",
         holder_pem: holder_pem,
         issuer_public: issuer_public,
         issuer_signed: issuer_signed,
+        issuer_signed_without_authorizations:
+          issued_without_authorizations |> Base.url_decode64!(padding: false) |> decode!(),
         namespaces: namespaces,
         now: now,
         nonce: "n-0S6_WzA2Mj",
@@ -316,6 +396,67 @@ defmodule Attesto.MdocTest do
       assert verified.doc_type == @doc_type
       assert verified.namespaces == ctx.namespaces
       assert verified.device_namespaces == %{@mdl_namespace => %{"age_over_21" => true}}
+    end
+
+    test "accepts device-signed elements the MSO authorizes, by element or by namespace", ctx do
+      for device_namespaces <- [
+            %{},
+            %{@mdl_namespace => %{"age_over_21" => true}},
+            %{"org.example.device" => %{"note" => "any element in an authorized namespace"}},
+            %{@mdl_namespace => %{"age_over_21" => true}, "org.example.device" => %{"a" => 1, "b" => 2}}
+          ] do
+        device_response = build_device_response(ctx, device_namespaces: device_namespaces)
+
+        assert {:ok, [verified]} =
+                 Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now)
+
+        assert verified.device_namespaces == device_namespaces
+      end
+    end
+
+    test "refuses a device-signed element the MSO does not authorize (ISO/IEC 18013-5 §9.1.3.4)", ctx do
+      for device_namespaces <- [
+            # A namespace the MSO names nowhere.
+            %{"org.example.unlisted" => %{"note" => "signed by the device key"}},
+            # An authorized namespace's element list does not cover this one.
+            %{@mdl_namespace => %{"age_over_18" => true}},
+            # One authorized element beside one that is not.
+            %{@mdl_namespace => %{"age_over_21" => true, "family_name" => "Roe"}},
+            # An authorized namespace beside one that is not.
+            %{"org.example.device" => %{"a" => 1}, "org.example.unlisted" => %{"a" => 1}}
+          ] do
+        device_response = build_device_response(ctx, device_namespaces: device_namespaces)
+
+        assert {:error, :unauthorized_device_element} =
+                 Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now),
+               "#{inspect(device_namespaces)} was accepted"
+      end
+    end
+
+    test "an MSO with no keyAuthorizations authorizes no device-signed element", ctx do
+      ctx = %{ctx | issuer_signed: ctx.issuer_signed_without_authorizations}
+
+      empty = build_device_response(ctx, device_namespaces: %{})
+
+      assert {:ok, [%{device_namespaces: %{}}]} =
+               Mdoc.verify_device_response(empty, context(ctx), ctx.issuer_public, now: ctx.now)
+
+      signed = build_device_response(ctx, device_namespaces: %{@mdl_namespace => %{"age_over_21" => true}})
+
+      assert {:error, :unauthorized_device_element} =
+               Mdoc.verify_device_response(signed, context(ctx), ctx.issuer_public, now: ctx.now)
+    end
+
+    test "a forged device signature is reported before the authorization check", ctx do
+      {other_pem, _other_public} = keypair()
+
+      device_response =
+        build_device_response(%{ctx | holder_pem: other_pem},
+          device_namespaces: %{"org.example.unlisted" => %{"a" => 1}}
+        )
+
+      assert {:error, :invalid_signature} =
+               Mdoc.verify_device_response(device_response, context(ctx), ctx.issuer_public, now: ctx.now)
     end
 
     test "rejects a CBOR tag where DeviceNameSpaces requires a plain map", ctx do
@@ -536,6 +677,48 @@ defmodule Attesto.MdocTest do
       assert {:error, :invalid_mdoc} =
                Mdoc.verify_device_response(device_response, incomplete_context, ctx.issuer_public, now: ctx.now)
     end
+  end
+
+  test "rejects a DeviceResponse in which a map repeats a key" do
+    encode = fn bytes -> Base.url_encode64(bytes, padding: false) end
+    document = CBOR.encode(%{"docType" => "org.iso.18013.5.1.mDL"})
+
+    # {"version": "1.0", "documents": [{"docType": ...}], "status": 0}
+    control =
+      <<0xA3>> <>
+        CBOR.encode("version") <>
+        CBOR.encode("1.0") <>
+        CBOR.encode("documents") <> <<0x81>> <> document <> CBOR.encode("status") <> <<0x00>>
+
+    assert {:ok, "org.iso.18013.5.1.mDL"} = Mdoc.peek_doc_type(encode.(control))
+
+    # The same response with "documents" a second time, naming another type.
+    # A decoder that keeps one of the two would read whichever it kept.
+    other = CBOR.encode(%{"docType" => "org.example.other"})
+
+    repeated =
+      <<0xA4>> <>
+        CBOR.encode("version") <>
+        CBOR.encode("1.0") <>
+        CBOR.encode("documents") <>
+        <<0x81>> <>
+        document <>
+        CBOR.encode("documents") <> <<0x81>> <> other <> CBOR.encode("status") <> <<0x00>>
+
+    assert {:error, :invalid_mdoc} = Mdoc.peek_doc_type(encode.(repeated))
+
+    # A repeat inside the document map is refused as well.
+    nested =
+      <<0xA3>> <>
+        CBOR.encode("version") <>
+        CBOR.encode("1.0") <>
+        CBOR.encode("documents") <>
+        <<0x81, 0xA2>> <>
+        CBOR.encode("docType") <>
+        CBOR.encode("org.iso.18013.5.1.mDL") <>
+        CBOR.encode("docType") <> CBOR.encode("org.example.other") <> CBOR.encode("status") <> <<0x00>>
+
+    assert {:error, :invalid_mdoc} = Mdoc.peek_doc_type(encode.(nested))
   end
 
   test "rejects oversized deeply nested CBOR before decoding" do

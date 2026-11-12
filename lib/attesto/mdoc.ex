@@ -44,6 +44,7 @@ if Code.ensure_loaded?(CBOR) do
             doc_type: String.t(),
             namespaces: %{String.t() => %{String.t() => term()}},
             device_key: map(),
+            key_authorizations: key_authorizations(),
             validity: validity()
           }
 
@@ -62,8 +63,20 @@ if Code.ensure_loaded?(CBOR) do
             | :invalid_mdoc
             | :invalid_signature
             | :not_yet_valid
+            | :unauthorized_device_element
             | :unexpected_doc_type
             | :unsupported_algorithm
+
+    @typedoc """
+    What the issuer authorized the device key to sign, from the MSO's
+    `deviceKeyInfo.keyAuthorizations` (ISO/IEC 18013-5 §9.1.2.4): whole
+    namespaces, and individual data elements by namespace. Both are empty when
+    the MSO carries no authorization.
+    """
+    @type key_authorizations :: %{
+            name_spaces: [String.t()],
+            data_elements: %{String.t() => [String.t()]}
+          }
 
     @doc """
     Issue a base64url-encoded ISO 18013-5 IssuerSigned structure.
@@ -72,6 +85,14 @@ if Code.ensure_loaded?(CBOR) do
     `:issuer_pem`, and `:validity`. `:x5chain` optionally carries a list of
     issuer-certificate DER binaries in the COSE unprotected header.
     Validity must satisfy `signed <= valid_from < valid_until`.
+
+    `:key_authorizations` optionally states what the device key may sign as
+    device-signed data elements (ISO/IEC 18013-5 §9.1.2.4): a keyword list or
+    map with `:name_spaces` (a list of namespaces authorized in full) and/or
+    `:data_elements` (a map from namespace to a list of element identifiers).
+    It must authorize something, and a namespace authorized in full must not
+    also appear under `:data_elements`. Without it the device key may sign no
+    data elements, and a verifier refuses a presentation that carries any.
     """
     @spec issue(keyword()) :: {:ok, String.t()} | {:error, :invalid_options}
     def issue(opts) when is_list(opts) do
@@ -118,6 +139,14 @@ if Code.ensure_loaded?(CBOR) do
     Each document's `DeviceSigned.deviceAuth` is additionally verified as an
     ES256 `COSE_Sign1` with a detached payload, signed by the device key
     bound in that document's MSO.
+
+    Device-signed data elements (`DeviceSigned.nameSpaces`) are returned in
+    `device_namespaces`, apart from the issuer-signed `namespaces`: the holder's
+    device asserts them, the issuer does not. Each one must be authorized by
+    the MSO's `keyAuthorizations`, by its namespace in full or by name (ISO/IEC
+    18013-5 §9.1.3.4); otherwise the result is
+    `{:error, :unauthorized_device_element}`. An MSO with no
+    `keyAuthorizations` authorizes none.
 
     Returns one verified result per document in the `DeviceResponse`.
     """
@@ -186,6 +215,7 @@ if Code.ensure_loaded?(CBOR) do
          %{
            device_key: device_key,
            doc_type: mso_parts.doc_type,
+           key_authorizations: mso_parts.key_authorizations,
            namespaces: namespaces,
            validity: mso_parts.validity
          }}
@@ -231,7 +261,8 @@ if Code.ensure_loaded?(CBOR) do
                device_authentication_bytes(session_transcript, doc_type, device_namespaces_bytes),
                issuer_result.device_key,
                []
-             ) do
+             ),
+           :ok <- check_device_authorizations(device_namespaces, issuer_result.key_authorizations) do
         {:ok,
          %{
            device_namespaces: device_namespaces,
@@ -373,9 +404,10 @@ if Code.ensure_loaded?(CBOR) do
       issuer_pem = Keyword.fetch!(opts, :issuer_pem)
       validity = opts |> Keyword.fetch!(:validity) |> validate_validity!()
       x5chain = Keyword.get(opts, :x5chain)
+      key_authorizations = opts |> Keyword.get(:key_authorizations) |> validate_key_authorizations!()
 
       {issuer_namespaces, value_digests} = build_namespaces(namespaces)
-      mso = build_mso(doc_type, value_digests, device_key, validity)
+      mso = build_mso(doc_type, value_digests, device_key, validity, key_authorizations)
       mso_payload = mso |> embedded_cbor() |> CBOR.encode()
       issuer_auth = issuer_pem |> Cose.sign1(mso_payload, x5chain: x5chain) |> decode_complete!()
 
@@ -418,9 +450,59 @@ if Code.ensure_loaded?(CBOR) do
       {Enum.reverse(items), digests}
     end
 
-    defp build_mso(doc_type, value_digests, device_key, validity) do
+    # ISO/IEC 18013-5 §9.1.2.4: "If the KeyAuthorizations map is present, it
+    # shall not be empty", and a namespace authorized in full "shall not be
+    # included in the AuthorizedDataElements map".
+    defp validate_key_authorizations!(nil), do: nil
+
+    defp validate_key_authorizations!(authorizations) when is_list(authorizations) or is_map(authorizations) do
+      authorizations = Map.new(authorizations)
+      name_spaces = Map.get(authorizations, :name_spaces, [])
+      data_elements = Map.get(authorizations, :data_elements, %{})
+
+      if Map.keys(authorizations) -- [:name_spaces, :data_elements] == [] and
+           valid_key_authorizations?(name_spaces, data_elements) do
+        %{}
+        |> put_unless_empty("nameSpaces", name_spaces)
+        |> put_unless_empty("dataElements", data_elements)
+      else
+        raise ArgumentError,
+              ":key_authorizations must authorize at least one namespace or data element, and a " <>
+                "namespace authorized in full must not also appear under :data_elements"
+      end
+    end
+
+    defp validate_key_authorizations!(_other),
+      do: raise(ArgumentError, ":key_authorizations must be a keyword list or map")
+
+    defp valid_key_authorizations?(name_spaces, data_elements) do
+      nonempty_strings?(name_spaces, true) and plain_map?(data_elements) and
+        Enum.all?(data_elements, &valid_data_elements_entry?(&1, name_spaces)) and
+        (name_spaces != [] or map_size(data_elements) > 0)
+    end
+
+    defp valid_data_elements_entry?({namespace, elements}, name_spaces) do
+      nonempty_string?(namespace) and namespace not in name_spaces and nonempty_strings?(elements, false)
+    end
+
+    defp nonempty_string?(value), do: is_binary(value) and value != ""
+
+    defp nonempty_strings?(values, allow_empty?) do
+      is_list(values) and (allow_empty? or values != []) and Enum.all?(values, &nonempty_string?/1) and
+        Enum.uniq(values) == values
+    end
+
+    defp put_unless_empty(map, _key, value) when value == [] or value == %{}, do: map
+    defp put_unless_empty(map, key, value), do: Map.put(map, key, value)
+
+    defp device_key_info(device_key, nil), do: %{"deviceKey" => device_key}
+
+    defp device_key_info(device_key, key_authorizations),
+      do: %{"deviceKey" => device_key, "keyAuthorizations" => key_authorizations}
+
+    defp build_mso(doc_type, value_digests, device_key, validity, key_authorizations) do
       %{
-        "deviceKeyInfo" => %{"deviceKey" => device_key},
+        "deviceKeyInfo" => device_key_info(device_key, key_authorizations),
         "digestAlgorithm" => @digest_algorithm,
         "docType" => doc_type,
         "validityInfo" => %{
@@ -466,7 +548,7 @@ if Code.ensure_loaded?(CBOR) do
     end
 
     defp validate_mso(%{
-           "deviceKeyInfo" => %{"deviceKey" => device_key},
+           "deviceKeyInfo" => %{"deviceKey" => device_key} = device_key_info,
            "digestAlgorithm" => @digest_algorithm,
            "docType" => doc_type,
            "validityInfo" => validity_info,
@@ -479,6 +561,7 @@ if Code.ensure_loaded?(CBOR) do
          %{
            device_key: device_key,
            doc_type: doc_type,
+           key_authorizations: key_authorizations(device_key_info),
            validity: validity,
            value_digests: value_digests
          }}
@@ -487,6 +570,46 @@ if Code.ensure_loaded?(CBOR) do
 
     defp validate_mso(%{"digestAlgorithm" => _other}), do: {:error, :unsupported_algorithm}
     defp validate_mso(_mso), do: {:error, :invalid_mdoc}
+
+    # What the MSO authorizes the device key to sign. Read leniently: a part
+    # that is absent or not in the expected shape authorizes nothing, which
+    # only matters to a presentation that carries device-signed elements.
+    defp key_authorizations(%{"keyAuthorizations" => authorizations}) when is_map(authorizations) do
+      %{
+        name_spaces: authorized_name_spaces(Map.get(authorizations, "nameSpaces")),
+        data_elements: authorized_data_elements(Map.get(authorizations, "dataElements"))
+      }
+    end
+
+    defp key_authorizations(_device_key_info), do: %{name_spaces: [], data_elements: %{}}
+
+    defp authorized_name_spaces(name_spaces) when is_list(name_spaces), do: Enum.filter(name_spaces, &is_binary/1)
+    defp authorized_name_spaces(_other), do: []
+
+    defp authorized_data_elements(data_elements) when is_map(data_elements) and not is_struct(data_elements) do
+      for {namespace, elements} <- data_elements, is_binary(namespace), is_list(elements), into: %{} do
+        {namespace, Enum.filter(elements, &is_binary/1)}
+      end
+    end
+
+    defp authorized_data_elements(_other), do: %{}
+
+    # ISO/IEC 18013-5 §9.1.3.4: "An mdoc shall only authenticate response data
+    # elements in DeviceNameSpaces if the key it is using for mdoc
+    # authentication is authorized to authenticate these elements in the
+    # KeyAuthorizations structure in the MSO (see 9.1.2.4). The mdoc reader
+    # shall validate this authorization as part of validating the mdoc
+    # authentication." Every device-signed element must be covered, by its
+    # namespace in full or by name; an empty DeviceNameSpaces needs nothing.
+    defp check_device_authorizations(device_namespaces, %{name_spaces: name_spaces, data_elements: data_elements}) do
+      authorized? =
+        Enum.all?(device_namespaces, fn {namespace, elements} ->
+          namespace in name_spaces or
+            Enum.all?(Map.keys(elements), &(&1 in Map.get(data_elements, namespace, [])))
+        end)
+
+      if authorized?, do: :ok, else: {:error, :unauthorized_device_element}
+    end
 
     defp parse_validity(%{"signed" => signed, "validFrom" => valid_from, "validUntil" => valid_until}) do
       with {:ok, signed_unix} <- datetime_to_unix(signed),
@@ -681,15 +804,13 @@ if Code.ensure_loaded?(CBOR) do
       {:error, :invalid_mdoc}
     end
 
+    # `Attesto.StrictCBOR` refuses a map that repeats a key, at any depth, and
+    # input nested deeper than its bound.
     defp decode_complete(encoded) when is_binary(encoded) do
-      case CBOR.decode(encoded) do
-        {:ok, value, ""} -> {:ok, value}
-        _other -> {:error, :invalid_mdoc}
+      case Attesto.StrictCBOR.decode(encoded) do
+        {:ok, value} -> {:ok, value}
+        {:error, :invalid_cbor} -> {:error, :invalid_mdoc}
       end
-    rescue
-      _error -> {:error, :invalid_mdoc}
-    catch
-      _kind, _reason -> {:error, :invalid_mdoc}
     end
 
     defp bytes(value) when is_binary(value), do: %CBOR.Tag{tag: :bytes, value: value}

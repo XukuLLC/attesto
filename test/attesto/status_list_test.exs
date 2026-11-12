@@ -139,6 +139,35 @@ defmodule Attesto.StatusListTest do
       assert {:error, :invalid_status_list} = StatusList.verify(malformed, jwks)
     end
 
+    test "rejects a ZLIB stream cut short instead of reading it as a shorter list", %{jwks: jwks} do
+      # Incompressible data, so cutting the stream loses real entries.
+      statuses = :crypto.strong_rand_bytes(4_000)
+      stream = :zlib.compress(statuses)
+
+      token = fn lst ->
+        StatusList.sign(TestKeystore, %{
+          "sub" => @uri,
+          "iat" => 1_700_000_000,
+          "status_list" => %{"bits" => 1, "lst" => JWS.encode64(lst)}
+        })
+      end
+
+      assert {:ok, %{statuses_binary: ^statuses}} = StatusList.verify(token.(stream), jwks)
+
+      for keep <- [byte_size(stream) - 1, byte_size(stream) - 4, div(byte_size(stream), 2), 10] do
+        assert {:error, :invalid_status_list} =
+                 StatusList.verify(token.(binary_part(stream, 0, keep)), jwks),
+               "a stream cut to #{keep} of #{byte_size(stream)} bytes was accepted"
+      end
+
+      # A complete stream whose checksum does not match its content.
+      <<head::binary-size(byte_size(stream) - 1), last>> = stream
+      assert {:error, :invalid_status_list} = StatusList.verify(token.(head <> <<Bitwise.bxor(last, 1)>>), jwks)
+
+      # Bytes after the end of a complete stream are not part of the list.
+      assert {:ok, %{statuses_binary: ^statuses}} = StatusList.verify(token.(stream <> "trailing"), jwks)
+    end
+
     test "rejects a signed zlib decompression bomb without inflating it whole", %{jwks: jwks} do
       # A tiny compressed payload that inflates past the cap (17 MiB of zeros ->
       # a few KB compressed). The status issuer signs it, so it passes signature

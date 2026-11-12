@@ -358,15 +358,14 @@ if Code.ensure_loaded?(CBOR) do
       {:error, :invalid_cose}
     end
 
+    # `Attesto.StrictCBOR` refuses a map that repeats a key, at any depth: RFC
+    # 9052 §3 says a message in which a header label appears more than once
+    # MUST be rejected as malformed.
     defp decode_complete(encoded) do
-      case CBOR.decode(encoded) do
-        {:ok, value, ""} -> {:ok, value}
-        _other -> {:error, :invalid_cose}
+      case Attesto.StrictCBOR.decode(encoded) do
+        {:ok, value} -> {:ok, value}
+        {:error, :invalid_cbor} -> {:error, :invalid_cose}
       end
-    rescue
-      _error -> {:error, :invalid_cose}
-    catch
-      _kind, _reason -> {:error, :invalid_cose}
     end
 
     defp bytes(value) when is_binary(value), do: %CBOR.Tag{tag: :bytes, value: value}

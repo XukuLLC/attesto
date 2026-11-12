@@ -104,6 +104,93 @@ defmodule Attesto.CoseTest do
     assert {:error, :invalid_cose} = Cose.verify1(unprotected_crit, public, [])
   end
 
+  # A COSE_Sign1 assembled from raw header bytes, so a header map can carry
+  # what `CBOR.encode/1` cannot produce: the same label twice.
+  defp sign_with_raw_headers(pem, payload, protected_bytes, unprotected_bytes) do
+    signing_input = CBOR.encode(["Signature1", bytes(protected_bytes), bytes(""), bytes(payload)])
+    private_key = pem |> JOSE.JWK.from_pem() |> JOSE.JWK.to_key() |> elem(1)
+    der_signature = :public_key.sign(signing_input, :sha256, private_key)
+    {:"ECDSA-Sig-Value", r, s} = :public_key.der_decode(:"ECDSA-Sig-Value", der_signature)
+    signature = <<r::unsigned-big-size(256), s::unsigned-big-size(256)>>
+
+    <<0x84>> <>
+      CBOR.encode(bytes(protected_bytes)) <>
+      unprotected_bytes <> CBOR.encode(bytes(payload)) <> CBOR.encode(bytes(signature))
+  end
+
+  describe "a header label that appears more than once (RFC 9052 §3)" do
+    # {1: -7}
+    @alg_once <<0xA1, 0x01, 0x26>>
+    @empty_map <<0xA0>>
+
+    test "the control with each label once is accepted" do
+      {pem, public} = keypair()
+      assert {:ok, "payload"} = Cose.verify1(sign_with_raw_headers(pem, "payload", @alg_once, @empty_map), public, [])
+    end
+
+    test "is refused in the protected header, whether or not the two values agree" do
+      {pem, public} = keypair()
+
+      for {label, protected} <- [
+            # {1: -7, 1: -7}
+            same_value: <<0xA2, 0x01, 0x26, 0x01, 0x26>>,
+            # {1: -7, 1: -35}: ES256 first, ES384 second
+            es256_then_other: <<0xA2, 0x01, 0x26, 0x01, 0x38, 0x22>>,
+            # {1: -35, 1: -7}: the general-purpose decoder keeps the last value
+            other_then_es256: <<0xA2, 0x01, 0x38, 0x22, 0x01, 0x26>>,
+            # {1: -7, 0x1801: -7}: the second key is 1 in a non-minimal encoding
+            non_minimal_repeat: <<0xA2, 0x01, 0x26, 0x18, 0x01, 0x26>>,
+            # indefinite-length map {1: -7, 1: -7}
+            indefinite_length: <<0xBF, 0x01, 0x26, 0x01, 0x26, 0xFF>>,
+            # {1: -7, 99: "a", 99: "b"}: a repeated label other than alg
+            other_label: <<0xA3, 0x01, 0x26, 0x18, 0x63, 0x61, 0x61, 0x18, 0x63, 0x61, 0x62>>
+          ] do
+        cose = sign_with_raw_headers(pem, "payload", protected, @empty_map)
+        assert {:error, :invalid_cose} = Cose.verify1(cose, public, []), "#{label} was accepted"
+      end
+    end
+
+    test "is refused in the unprotected header" do
+      {pem, public} = keypair()
+      # {33: h'01', 33: h'02'}
+      unprotected = <<0xA2, 0x18, 0x21, 0x41, 0x01, 0x18, 0x21, 0x41, 0x02>>
+
+      assert {:error, :invalid_cose} =
+               Cose.verify1(sign_with_raw_headers(pem, "payload", @alg_once, unprotected), public, [])
+    end
+
+    test "is refused when the label is in both the protected and the unprotected header" do
+      {pem, public} = keypair()
+      # protected {1: -7, 99: "a"}, unprotected {99: "b"}
+      protected = <<0xA2, 0x01, 0x26, 0x18, 0x63, 0x61, 0x61>>
+      unprotected = <<0xA1, 0x18, 0x63, 0x61, 0x62>>
+
+      assert {:error, :invalid_cose} =
+               Cose.verify1(sign_with_raw_headers(pem, "payload", protected, unprotected), public, [])
+    end
+
+    test "is refused for a detached-payload COSE_Sign1 as well" do
+      {pem, public} = keypair()
+      payload = "detached"
+      [_protected, unprotected, nil, _signature] = Cose.sign1_detached(pem, payload, []) |> decode!()
+      assert unprotected == %{}
+
+      duplicate = <<0xA2, 0x01, 0x26, 0x01, 0x26>>
+      signing_input = CBOR.encode(["Signature1", bytes(duplicate), bytes(""), bytes(payload)])
+      private_key = pem |> JOSE.JWK.from_pem() |> JOSE.JWK.to_key() |> elem(1)
+
+      {:"ECDSA-Sig-Value", r, s} =
+        :public_key.der_decode(:"ECDSA-Sig-Value", :public_key.sign(signing_input, :sha256, private_key))
+
+      cose =
+        <<0x84>> <>
+          CBOR.encode(bytes(duplicate)) <>
+          <<0xA0, 0xF6>> <> CBOR.encode(bytes(<<r::unsigned-big-size(256), s::unsigned-big-size(256)>>))
+
+      assert {:error, :invalid_cose} = Cose.verify1_detached(cose, payload, public, [])
+    end
+  end
+
   test "rejects a tagged value where COSE requires a plain unprotected-header map" do
     {pem, public} = keypair()
     payload = "payload"

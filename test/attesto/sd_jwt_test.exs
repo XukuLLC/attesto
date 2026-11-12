@@ -271,6 +271,54 @@ defmodule Attesto.SdJwtTest do
                )
     end
 
+    test "enforces exp and nbf when the key binding carries them (RFC 7519 §4.1.4, §4.1.5)", ctx do
+      now = System.system_time(:second)
+
+      verify = fn extra ->
+        kb =
+          kb_jwt(
+            ctx.holder_pem,
+            Map.merge(
+              %{
+                "nonce" => "n-123",
+                "aud" => "https://verifier.example",
+                "iat" => now,
+                "sd_hash" => sd_hash(ctx.issuance, [0])
+              },
+              extra
+            )
+          )
+
+        {:ok, verified} = SdJwt.verify(present(ctx.issuance, [0], kb), ctx.issuer_jwk)
+
+        SdJwt.verify_key_binding(verified, ctx.holder_jwk,
+          nonce: "n-123",
+          audience: "https://verifier.example",
+          now: now
+        )
+      end
+
+      # Absent, or present and satisfied: accepted. The claims are optional.
+      assert :ok = verify.(%{})
+      assert :ok = verify.(%{"exp" => now + 120, "nbf" => now - 5})
+      # Within the 60-second clock allowance on either side.
+      assert :ok = verify.(%{"exp" => now - 30})
+      assert :ok = verify.(%{"nbf" => now + 30})
+
+      # A fresh `iat` does not rescue an expired or not-yet-valid binding.
+      assert {:error, :invalid_key_binding} = verify.(%{"exp" => now - 86_400})
+      assert {:error, :invalid_key_binding} = verify.(%{"exp" => now - 61})
+      assert {:error, :invalid_key_binding} = verify.(%{"nbf" => now + 86_400})
+      assert {:error, :invalid_key_binding} = verify.(%{"nbf" => now + 61})
+
+      # RFC 7519: the value MUST be a number. A string, a float, null, a
+      # negative number and a container are each refused, not ignored.
+      for claim <- ["exp", "nbf"], bad <- [Integer.to_string(now + 120), now + 120.5, nil, -1, [now + 120], %{}] do
+        assert {:error, :invalid_key_binding} = verify.(%{claim => bad}),
+               "#{claim}=#{inspect(bad)} was accepted"
+      end
+    end
+
     test "uses the signed _sd_alg for a non-SHA-256 key-binding hash", ctx do
       now = System.system_time(:second)
       {issuer_pem, issuer_jwk} = keypair()
