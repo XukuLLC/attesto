@@ -146,6 +146,16 @@ defmodule Attesto.IDToken do
   @reserved_claims ~w(iss sub aud exp iat nonce azp auth_time acr amr at_hash c_hash sid)
 
   @doc """
+  The longest ID Token lifetime `mint/4` issues, in seconds.
+
+  It is also the default: `mint/4`'s `:lifetime` option may only shorten it.
+  A layer that exposes the lifetime as configuration validates against this
+  value, so a longer setting is refused where it is configured.
+  """
+  @spec max_lifetime_seconds() :: pos_integer()
+  def max_lifetime_seconds, do: @default_lifetime_seconds
+
+  @doc """
   Mint a signed OpenID Connect ID Token for `subject`, addressed to the
   Relying Party identified by `client_id`.
 

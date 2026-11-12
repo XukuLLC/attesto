@@ -57,6 +57,12 @@ defmodule Attesto.ProtectedResourceMetadata do
     signed_metadata
   )a
 
+  # RFC 9728 §3.2: "Parameters with zero values MUST be omitted from the
+  # response." §2 makes one exception: for `bearer_methods_supported` "the empty
+  # array [] can be used to indicate that no bearer methods are supported", so
+  # an empty list there is a statement and is published.
+  @empty_array_fields [:bearer_methods_supported]
+
   @doc """
   Build the protected-resource metadata document for `config`.
 
@@ -97,6 +103,11 @@ defmodule Attesto.ProtectedResourceMetadata do
 
   The accepted host fields are the RFC 9728 §2 allowlist in `@host_fields`; the
   enumeration above is illustrative. Any other opt key is ignored.
+
+  An empty list is omitted, the same as `nil` (RFC 9728 §3.2: "Parameters with
+  zero values MUST be omitted from the response"). The exception is
+  `:bearer_methods_supported`, where §2 gives `[]` a meaning of its own: no
+  bearer methods are supported.
   """
   @spec metadata(Config.t(), keyword()) :: %{required(String.t()) => term()}
   @spec metadata(Config.t()) :: %{required(String.t()) => term()}
@@ -117,6 +128,7 @@ defmodule Attesto.ProtectedResourceMetadata do
     Enum.reduce(@host_fields, base, fn field, acc ->
       case Keyword.get(opts, field) do
         nil -> acc
+        [] when field not in @empty_array_fields -> acc
         value -> Map.put(acc, Atom.to_string(field), value)
       end
     end)

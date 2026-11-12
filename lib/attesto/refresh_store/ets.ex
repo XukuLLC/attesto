@@ -74,6 +74,11 @@ defmodule Attesto.RefreshStore.ETS do
   @impl Attesto.RefreshStore
   def revoke_family(family_id) when is_binary(family_id), do: GenServer.call(__MODULE__, {:revoke_family, family_id})
 
+  @impl Attesto.RefreshStore
+  def revoke_families(criteria) do
+    GenServer.call(__MODULE__, {:revoke_families, Attesto.RevocationCriteria.new!(criteria)})
+  end
+
   @impl GenServer
   def handle_call({:insert, record}, _from, state) do
     reply =
@@ -105,6 +110,23 @@ defmodule Attesto.RefreshStore.ETS do
   def handle_call({:revoke_family, family_id}, _from, state) do
     revoke_family_rows(family_id)
     {:reply, :ok, state}
+  end
+
+  # A family is selected when any of its retained tokens matches. The scan and
+  # the revocations run in the owner process, serialized with insert and
+  # rotate, so no token of a selected family can be inserted in between.
+  def handle_call({:revoke_families, criteria}, _from, state) do
+    families =
+      :ets.foldl(
+        fn {_token_hash, family_id, _expires_at, record}, acc ->
+          if Attesto.RevocationCriteria.match?(criteria, record.data), do: MapSet.put(acc, family_id), else: acc
+        end,
+        MapSet.new(),
+        @table
+      )
+
+    Enum.each(families, &revoke_family_rows/1)
+    {:reply, {:ok, MapSet.size(families)}, state}
   end
 
   defp rotate_with_validated_now(parent_hash, child, successor, opts) do

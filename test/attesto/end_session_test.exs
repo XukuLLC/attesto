@@ -42,6 +42,39 @@ defmodule Attesto.EndSessionTest do
       _ = tampered
     end
 
+    test "on_invalid_hint: :discard keeps nothing that came with a failed hint", %{config: config, hint: hint} do
+      params = %{
+        "id_token_hint" => hint <> "garbage",
+        "client_id" => @client_id,
+        "post_logout_redirect_uri" => "https://rp.example/after",
+        "state" => "xyz",
+        "ui_locales" => "fr"
+      }
+
+      assert {:error, :invalid_id_token_hint} = EndSession.parse(config, params, on_invalid_hint: :reject)
+      assert {:ok, request} = EndSession.parse(config, params, on_invalid_hint: :discard)
+
+      assert %EndSession{
+               id_token_hint: :invalid,
+               client_id: nil,
+               subject: nil,
+               sid: nil,
+               post_logout_redirect_uri: nil,
+               state: nil,
+               ui_locales: "fr"
+             } = request
+
+      assert {:ok, :no_redirect} = EndSession.confirm_redirect(request, ["https://rp.example/after"])
+    end
+
+    test "reports whether a hint was verified or absent", %{config: config, hint: hint} do
+      assert {:ok, %EndSession{id_token_hint: :verified}} = EndSession.parse(config, %{"id_token_hint" => hint})
+      assert {:ok, %EndSession{id_token_hint: :absent}} = EndSession.parse(config, %{"client_id" => @client_id})
+
+      assert {:ok, %EndSession{id_token_hint: :absent}} =
+               EndSession.parse(config, %{"client_id" => @client_id}, on_invalid_hint: :discard)
+    end
+
     test "a present non-string hint is :invalid_id_token_hint", %{config: config} do
       for invalid <- [false, 123, %{}] do
         assert {:error, :invalid_id_token_hint} = EndSession.parse(config, %{"id_token_hint" => invalid})

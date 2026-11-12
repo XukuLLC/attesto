@@ -177,6 +177,55 @@ defmodule Attesto.RefreshStore.ETSTest do
     assert Process.alive?(pid)
   end
 
+  describe "revoke_families/1" do
+    defp grant(subject, client_id, sid) do
+      %{subject: subject, client_id: client_id, scope: [], claims: %{"host.session" => sid}}
+    end
+
+    setup do
+      :ok = ETS.insert(record("u1-a", family_id: "fam-u1-a", data: grant("usr_1", "client_a", "s1")))
+      :ok = ETS.insert(record("u1-b", family_id: "fam-u1-b", data: grant("usr_1", "client_b", "s2")))
+      :ok = ETS.insert(record("u2-a", family_id: "fam-u2-a", data: grant("usr_2", "client_a", "s3")))
+      :ok
+    end
+
+    test "revokes every family with a matching token and reports the family count" do
+      assert {:ok, 2} = ETS.revoke_families(subject: "usr_1")
+
+      assert :error = ETS.get("u1-a")
+      assert :error = ETS.get("u1-b")
+      assert {:ok, _} = ETS.get("u2-a")
+    end
+
+    test "the revocation is sticky, exactly as revoke_family/1" do
+      assert {:ok, 1} = ETS.revoke_families(client_id: "client_b")
+
+      assert {:error, :family_revoked} =
+               ETS.insert(
+                 record("u1-b-again", family_id: "fam-u1-b", generation: 1, data: grant("usr_1", "client_b", "s2"))
+               )
+    end
+
+    test "criteria are ANDed, and sid_claim names where the session is recorded" do
+      assert {:ok, 0} = ETS.revoke_families(sid: "s3")
+      assert {:ok, 1} = ETS.revoke_families(sid: "s3", sid_claim: "host.session")
+      assert {:ok, 1} = ETS.revoke_families(subject: "usr_1", client_id: "client_a")
+      assert {:ok, _} = ETS.get("u1-b")
+    end
+
+    test "a family with several matching tokens counts once" do
+      :ok =
+        ETS.insert(record("u1-a-gen1", family_id: "fam-u1-a", generation: 1, data: grant("usr_1", "client_a", "s1")))
+
+      assert {:ok, 1} = ETS.revoke_families(client_id: "client_a", subject: "usr_1")
+    end
+
+    test "empty criteria are refused" do
+      assert_raise ArgumentError, fn -> ETS.revoke_families([]) end
+      assert {:ok, _} = ETS.get("u1-a")
+    end
+  end
+
   test "revoke_family removes every record sharing a family_id, leaving others" do
     assert :ok = ETS.insert(record("tok-fam1-a", family_id: "fam-1", generation: 0))
     assert :ok = ETS.insert(record("tok-fam1-b", family_id: "fam-1", generation: 1))

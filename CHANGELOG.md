@@ -6,6 +6,92 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Changed
+
+- `Attesto.AuthorizationRequest.supported_response_modes/0` includes
+  `"form_post"` (OAuth 2.0 Form Post Response Mode), after `"query"`.
+  `validate/2` accepts `response_mode=form_post` unless
+  `:response_modes_supported` leaves it out; it used to answer a redirectable
+  `invalid_request`. Rendering the form is the authorization endpoint's work.
+  Plain `fragment` stays unsupported.
+
+### Fixed
+
+- `Attesto.ProtectedResourceMetadata.metadata/2` omits a member whose value is
+  an empty list. It used to publish the empty array, and RFC 9728 §3.2 says
+  "Parameters with zero values MUST be omitted from the response".
+  `bearer_methods_supported` is the exception and is still published as `[]`:
+  §2 gives that value a meaning of its own, that no bearer methods are
+  supported.
+
+### Added
+
+- `Attesto.PairwiseSubject` holds the two pairwise subject identifier rules
+  of OpenID Connect Core §8.1: `sector_identifier/1` (the one host a client's
+  redirect URIs share; `sector_identifier_uri` is not implemented) and
+  `derive/3` (HMAC-SHA256 of the sector identifier and local subject under a
+  salt of at least 32 bytes).
+- `Attesto.OpenIDDiscovery.metadata/2` accepts `:subject_types_supported`
+  (default `["public"]`) and `:userinfo_signing_alg_values_supported`, and
+  `Attesto.OpenIDDiscovery.signing_algs/1` is public.
+- `Attesto.SignedUserInfo.response_jwt/4` signs a UserInfo response for a
+  client that registered `userinfo_signed_response_alg`, with `iss` and `aud`
+  (OpenID Connect Core §5.3.2). It refuses any algorithm other than the
+  current signing key's.
+- `Attesto.Plug.Authenticate.accepts_dpop?/1` reports whether a plug built
+  from the given options can accept a DPoP request: `:replay_check` is wired,
+  or `dpop_replay_unprotected_acknowledged?: true` is set. It is the rule the
+  plug already applied, now public so resource metadata can advertise DPoP
+  only where the plug accepts it.
+- `Attesto.CodeStore` has an optional `delete_unconsumed/1` callback and
+  `Attesto.RefreshStore` an optional `revoke_families/1` callback. Each takes
+  criteria (`:subject`, `:client_id` and/or `:sid`, ANDed) and returns
+  `{:ok, count}`: the unredeemed codes deleted, or the families revoked.
+  `Attesto.CodeStore.ETS` and `Attesto.RefreshStore.ETS` implement them.
+  Redeemed codes keep their reuse markers. Neither callback touches access
+  tokens already issued; a self-contained JWT access token stays valid until
+  it expires unless the protected resource consults introspection or a
+  denylist.
+- `Attesto.RevocationCriteria` validates those criteria and decides whether a
+  stored grant matches them. Empty criteria are refused. `:sid_claim` names
+  the claims member that holds the session identifier (default `"sid"`).
+- `Attesto.EndSession.parse/3` takes `on_invalid_hint: :discard`. An
+  `id_token_hint` that fails verification then yields a request with
+  `id_token_hint: :invalid` and no client, subject, `sid`,
+  `post_logout_redirect_uri` or `state`, so the OP can ask the End-User
+  whether to log out and never redirects for it (RP-Initiated Logout 1.0 §2,
+  §4). The default, `:reject`, returns `{:error, :invalid_id_token_hint}` as
+  before.
+- `%Attesto.EndSession{}` has an `:id_token_hint` field: `:verified`,
+  `:absent` or `:invalid`.
+- `Attesto.AuthorizationRequest.check_auth_time/4` checks an authentication
+  event against a validated request's `max_age` (OIDC Core §3.1.2.1). It
+  returns `:ok`, or `{:error, :auth_time_required | :invalid_auth_time |
+  :max_age_exceeded}`. `:allowance` adds seconds to `max_age` for an
+  authorization server that re-authenticated the End-User and came back to
+  finish the same request; `:future_skew` bounds an `auth_time` ahead of the
+  clock. A request without `max_age` always returns `:ok`.
+- `Attesto.AuthorizationRequest.validate/2` accepts
+  `:response_modes_supported`, a non-empty subset of
+  `supported_response_modes/0`. A request for a mode outside the list is a
+  redirectable `invalid_request`. A request with no `response_mode` asks for
+  `query`, so it is refused the same way when `"query"` is not listed. A
+  redirectable error is delivered in the requested mode only when that mode is
+  in the list. Without the option every supported mode is accepted, as
+  before. `response_modes!/1` checks such a list and raises `ArgumentError`
+  for a bad one.
+- `Attesto.AuthorizationRequest` carries `id_token_hint` and `login_hint`
+  (OIDC Core §3.1.2.1) as the client sent them, `nil` when absent. After a
+  pushed authorization request the raw parameters hold only `request_uri`, so
+  the validated request was the only place a host could not read them.
+  `id_token_hint` is not verified by `validate/2`; a host that acts on it
+  verifies it first.
+- `Attesto.IDToken.max_lifetime_seconds/0` returns the longest ID Token
+  lifetime `mint/4` issues (3600 seconds), so a layer that exposes the
+  lifetime as configuration can validate against it.
+
 ## [2.12.0] - 2026-11-09
 
 ### Security

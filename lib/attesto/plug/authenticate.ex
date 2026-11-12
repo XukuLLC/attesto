@@ -141,6 +141,24 @@ if Code.ensure_loaded?(Plug.Conn) do
     @default_bearer_methods [:header]
     @supported_bearer_methods [:header, :body]
 
+    @doc """
+    Whether a plug built from `opts` can accept a DPoP-scheme request.
+
+    It can when `:replay_check` is a 2-arity function or
+    `dpop_replay_unprotected_acknowledged?: true` is set. Without either, every
+    DPoP request is refused with `replay_check_unconfigured`, so the resource
+    accepts Bearer (and mTLS-bound) tokens only.
+
+    Resource metadata uses this to decide whether to advertise
+    `dpop_signing_alg_values_supported` (RFC 9728 §2), so the advertisement and
+    the plug's behavior come from the same rule.
+    """
+    @spec accepts_dpop?(keyword()) :: boolean()
+    def accepts_dpop?(opts) when is_list(opts) do
+      is_function(Keyword.get(opts, :replay_check), 2) or
+        Keyword.get(opts, :dpop_replay_unprotected_acknowledged?, false) == true
+    end
+
     @impl Plug
     def init(opts) do
       # RFC 9449 §8: a `use_dpop_nonce` challenge is only actionable if it
@@ -457,7 +475,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     # still had its proof claimed, because by then the proof HAS been used
     # against a valid token and must not be replayable.
     defp verify_dpop_proof(conn, proof, token, opts) do
-      if replay_protected?(opts) do
+      if accepts_dpop?(opts) do
         case htu(conn, opts) do
           {:ok, http_uri} ->
             verify_dpop_signature(conn, proof, token, http_uri, opts)
@@ -526,16 +544,11 @@ if Code.ensure_loaded?(Plug.Conn) do
           end
 
         _ ->
-          # `replay_protected?/1` already allowed this request through on the
+          # `accepts_dpop?/1` already allowed this request through on the
           # host's explicit acknowledgement that it runs without replay
           # protection.
           :ok
       end
-    end
-
-    defp replay_protected?(opts) do
-      is_function(Keyword.get(opts, :replay_check), 2) or
-        Keyword.get(opts, :dpop_replay_unprotected_acknowledged?, false) == true
     end
 
     # ----- access token -----

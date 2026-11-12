@@ -658,6 +658,14 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert conn.assigns.attesto_claims["cnf"]["jkt"] == jkt
     end
 
+    test "accepts_dpop?/1 is true only with a replay check or the acknowledgement" do
+      refute Authenticate.accepts_dpop?([])
+      refute Authenticate.accepts_dpop?(replay_check: fn _key -> :ok end)
+      refute Authenticate.accepts_dpop?(dpop_replay_unprotected_acknowledged?: false)
+      assert Authenticate.accepts_dpop?(replay_check: fn _key, _ttl -> :ok end)
+      assert Authenticate.accepts_dpop?(dpop_replay_unprotected_acknowledged?: true)
+    end
+
     test "a DPoP request is REFUSED when :replay_check is not wired (fail closed)", %{config: config} do
       # RFC 9449 §11.1: without a replay check a captured proof is replayable
       # within the iat window. The plug must not silently authenticate an

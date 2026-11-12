@@ -129,6 +129,26 @@ defmodule Attesto.ProtectedResourceMetadataTest do
       assert meta["signed_metadata"] == "eyJ.signed.jwt"
     end
 
+    test "an empty list is omitted, except for bearer_methods_supported (RFC 9728 §3.2, §2)" do
+      meta =
+        PRM.metadata(config(),
+          authorization_servers: [],
+          scopes_supported: [],
+          dpop_signing_alg_values_supported: [],
+          resource_signing_alg_values_supported: [],
+          bearer_methods_supported: []
+        )
+
+      for field <- ~w(authorization_servers scopes_supported dpop_signing_alg_values_supported
+                      resource_signing_alg_values_supported) do
+        refute Map.has_key?(meta, field), "expected #{field} to be omitted"
+      end
+
+      # §2: "The empty array [] can be used to indicate that no bearer methods
+      # are supported."
+      assert meta["bearer_methods_supported"] == []
+    end
+
     test "fields not supplied are absent, not nil" do
       meta = PRM.metadata(config())
 

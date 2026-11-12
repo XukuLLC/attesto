@@ -220,4 +220,25 @@ defmodule Attesto.RefreshStore do
   already-revoked or unknown family is a no-op `:ok`.
   """
   @callback revoke_family(family_id()) :: :ok
+
+  @doc """
+  OPTIONAL. Revoke every family that has a token whose grant matches
+  `criteria` (see `Attesto.RevocationCriteria`): `:subject`, `:client_id`
+  and/or `:sid`, ANDed. Returns `{:ok, count}` with the number of families
+  revoked.
+
+  Each selected family is revoked exactly as `revoke_family/1` revokes it:
+  every token removed and the sticky marker recorded, serialized with inserts
+  and rotations. A store that does not implement it is detected with
+  `function_exported?/3`.
+
+  This does nothing to access tokens already issued from those families. A
+  self-contained JWT access token stays valid until it expires unless the
+  protected resource consults introspection or a denylist.
+
+  Raises `ArgumentError` for invalid or empty criteria.
+  """
+  @callback revoke_families(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks revoke_families: 1
 end

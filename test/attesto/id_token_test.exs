@@ -271,6 +271,19 @@ defmodule Attesto.IDTokenTest do
     end
   end
 
+  describe "max_lifetime_seconds/0" do
+    test "is the ceiling mint/4 applies to :lifetime", %{config: config} do
+      max = IDToken.max_lifetime_seconds()
+      assert max == 3600
+
+      for {requested, expected} <- [{300, 300}, {max, max}, {max + 1, max}] do
+        {:ok, token} = IDToken.mint(config, "user-1", @client_id, lifetime: requested)
+        {:ok, claims} = IDToken.verify(config, token, client_id: @client_id)
+        assert claims["exp"] - claims["iat"] == expected
+      end
+    end
+  end
+
   describe "mint/4 validation" do
     test "rejects an empty or non-binary subject", %{config: config} do
       assert {:error, :invalid_subject} = IDToken.mint(config, "", @client_id)

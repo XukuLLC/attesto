@@ -27,8 +27,8 @@ defmodule Attesto.OpenIDDiscovery do
   Attesto fills the fields it can derive or fix by protocol:
 
     * `issuer`, `token_endpoint`, and `jwks_uri` via `Attesto.Discovery`.
-    * `subject_types_supported` is `["public"]` - Attesto does not mint
-      pairwise subject identifiers.
+    * `subject_types_supported` is `["public"]` unless the host layer passes
+      `:subject_types_supported` (see `Attesto.PairwiseSubject`).
     * `id_token_signing_alg_values_supported` defaults to the algorithms
       of the configured verification keys (RSA defaults to RS256).
     * `claim_types_supported` is `["normal"]` - Attesto returns claims
@@ -80,6 +80,7 @@ defmodule Attesto.OpenIDDiscovery do
     claims_parameter_supported
     request_uri_parameter_supported
     require_request_uri_registration
+    userinfo_signing_alg_values_supported
     op_policy_uri
     op_tos_uri
   )a
@@ -103,11 +104,14 @@ defmodule Attesto.OpenIDDiscovery do
       `:display_values_supported`, `:claims_locales_supported`,
       `:ui_locales_supported`, `:claims_parameter_supported`,
       `:request_uri_parameter_supported`,
-      `:require_request_uri_registration`, `:op_policy_uri`,
+      `:require_request_uri_registration`,
+      `:userinfo_signing_alg_values_supported`, `:op_policy_uri`,
       `:op_tos_uri` - included only if given.
 
-  `subject_types_supported`, `id_token_signing_alg_values_supported`, and
-  `claim_types_supported` are fixed by protocol and always present.
+  `id_token_signing_alg_values_supported` and `claim_types_supported` are
+  fixed by protocol and always present. `subject_types_supported` is always
+  present too: `["public"]` unless `:subject_types_supported` gives another
+  non-empty list drawn from `Attesto.PairwiseSubject.subject_types/0`.
 
   Any other opt key is ignored.
   """
@@ -127,7 +131,7 @@ defmodule Attesto.OpenIDDiscovery do
 
     oidc_base =
       base
-      |> Map.put("subject_types_supported", @subject_types)
+      |> Map.put("subject_types_supported", subject_types(opts))
       |> Map.put("id_token_signing_alg_values_supported", algs)
       |> Map.put("claim_types_supported", @claim_types)
       |> Map.put(
@@ -162,10 +166,42 @@ defmodule Attesto.OpenIDDiscovery do
     end
   end
 
-  defp signing_algs(%Config{keystore: keystore}) do
+  @doc """
+  The signing algorithms this provider advertises for the tokens it signs:
+  the algorithms of the keystore's verification keys, or `["RS256"]` when the
+  keystore yields none. The default for
+  `id_token_signing_alg_values_supported`, and the list
+  `Attesto.SignedUserInfo.signing_algs/1` reports. Takes the configuration or
+  its keystore module.
+  """
+  @spec signing_algs(Config.t() | module()) :: [String.t()]
+  def signing_algs(%Config{keystore: keystore}), do: signing_algs(keystore)
+
+  def signing_algs(keystore) when is_atom(keystore) do
     case SigningAlg.keystore_algs(keystore) do
       [] -> @id_token_signing_alg_values
       algs -> algs
+    end
+  end
+
+  # OIDC Core §8: the subject identifier types the provider issues. The host
+  # layer names them; anything outside the known set is a configuration fault.
+  defp subject_types(opts) do
+    case Keyword.get(opts, :subject_types_supported) do
+      nil ->
+        @subject_types
+
+      [_ | _] = types ->
+        if types -- Attesto.PairwiseSubject.subject_types() == [] and types == Enum.uniq(types) do
+          types
+        else
+          raise ArgumentError,
+                "subject_types_supported must be a non-empty list drawn from " <>
+                  "#{inspect(Attesto.PairwiseSubject.subject_types())} without repeats; got #{inspect(types)}"
+        end
+
+      other ->
+        raise ArgumentError, "subject_types_supported must be a non-empty list; got #{inspect(other)}"
     end
   end
 end

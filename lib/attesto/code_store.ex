@@ -179,5 +179,24 @@ defmodule Attesto.CodeStore do
   """
   @callback get(code_hash()) :: {:ok, entry()} | :error
 
-  @optional_callbacks mark_consumed: 2, get: 1
+  @doc """
+  OPTIONAL. Delete every code that has not been redeemed and whose grant
+  matches `criteria` (see `Attesto.RevocationCriteria`): `:subject`,
+  `:client_id` and/or `:sid`, ANDed. Returns `{:ok, count}` with the number of
+  codes deleted.
+
+  Used when a subject, a client, or a session is cut off, so a code issued
+  before that point cannot be redeemed after it. A deleted code is simply
+  absent: a later `take/1` of it returns `:error`.
+
+  Redeemed codes are not touched; their reuse markers and access-token links
+  stay in place. This does nothing to access tokens already issued. A
+  self-contained JWT access token stays valid until it expires unless the
+  protected resource consults introspection or a denylist.
+
+  Raises `ArgumentError` for invalid or empty criteria.
+  """
+  @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks mark_consumed: 2, get: 1, delete_unconsumed: 1
 end

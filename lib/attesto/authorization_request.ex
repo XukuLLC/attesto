@@ -49,6 +49,7 @@ defmodule Attesto.AuthorizationRequest do
   module only classifies.
   """
 
+  alias Attesto.NumericDate
   alias Attesto.Options
   alias Attesto.PKCE
   alias Attesto.RedirectURI
@@ -64,13 +65,17 @@ defmodule Attesto.AuthorizationRequest do
 
   # OAuth 2.0 Multiple Response Type Encoding Practices + JWT Secured
   # Authorization Response Mode (JARM §2.3): the response modes this
-  # authorization-code server supports. `query` is the RFC 6749 default; the
-  # JARM modes (`jwt`, and the `.jwt`-suffixed variants) return the response as
-  # a single signed JWT (FAPI 2.0 Message Signing §5.4). `jwt` is the shorthand
-  # for the response_type's default JWT mode, which for `code` is `query.jwt`
-  # (JARM §2.3.2). Plain `fragment`/`form_post` are intentionally unsupported -
-  # the code flow returns its parameters in the query, signed or not.
-  @supported_response_modes ["query", "jwt", "query.jwt", "fragment.jwt", "form_post.jwt"]
+  # authorization-code server supports. `query` is the RFC 6749 default.
+  # `form_post` (OAuth 2.0 Form Post Response Mode) delivers the same
+  # parameters as an auto-submitted HTML form POST to the redirect URI, so they
+  # appear in no URL. The JARM modes (`jwt`, and the `.jwt`-suffixed variants)
+  # return the response as a single signed JWT (FAPI 2.0 Message Signing
+  # §5.4). `jwt` is the shorthand for the response_type's default JWT mode,
+  # which for `code` is `query.jwt` (JARM §2.3.2). Plain `fragment` is
+  # intentionally unsupported: it is the default for the implicit and hybrid
+  # response types, which this server does not offer.
+  @supported_response_modes ["query", "form_post", "jwt", "query.jwt", "fragment.jwt", "form_post.jwt"]
+  @default_response_mode "query"
 
   # OIDC Core §3.1.2.1: the complete, fixed set of prompt values. Any token
   # outside this set is an invalid_request.
@@ -113,6 +118,8 @@ defmodule Attesto.AuthorizationRequest do
           authorization_details: [map()],
           acr_values: [String.t()],
           response_mode: String.t() | nil,
+          id_token_hint: String.t() | nil,
+          login_hint: String.t() | nil,
           dpop_jkt: String.t() | nil
         }
 
@@ -143,13 +150,15 @@ defmodule Attesto.AuthorizationRequest do
     scope: [],
     resource: [],
     response_mode: nil,
-    dpop_jkt: nil
+    dpop_jkt: nil,
+    id_token_hint: nil,
+    login_hint: nil
   ]
 
   @typedoc """
   A redirectable authorization error (RFC 6749 §4.1.2.1).
 
-  Errors raised once the client is trusted (from `validate_redirectable/5`) also
+  Errors raised once the client is trusted (from `validate_redirectable/4`) also
   carry `:response_mode` (the requested JARM mode, or `nil`) and `:client_id`,
   so the transport can return the error in the requested response mode
   (JARM §2.3); earlier errors omit them.
@@ -220,6 +229,14 @@ defmodule Attesto.AuthorizationRequest do
       regardless of this flag - presence means the client opted into PKCE, so a
       downgrade is always rejected.
 
+    * `:response_modes_supported` (optional, default
+      `supported_response_modes/0`) - the response modes this authorization
+      server accepts, a non-empty subset of `supported_response_modes/0`. A
+      request for a mode outside the list is a redirectable `invalid_request`.
+      A request with no `response_mode` asks for the default, `query`, so it is
+      refused the same way when `"query"` is not listed. Anything other than a
+      non-empty subset raises `ArgumentError`; see `response_modes!/1`.
+
     * `:request_object_policy` (optional, default `%Attesto.RequestObject.Policy{}`)
       - the JAR verification policy for a signed `request` object (RFC 9101),
       threaded into `Attesto.RequestObject.verify/3`. The default is the generic
@@ -241,6 +258,7 @@ defmodule Attesto.AuthorizationRequest do
     matching = redirect_uri_matching(opts)
     require_nonce_policy = boolean_option!(opts, :require_nonce, @default_require_nonce)
     require_pkce = boolean_option!(opts, :require_pkce, @default_require_pkce)
+    response_modes = response_modes_option(opts)
 
     with {:ok, params} <- merge_request_object(params, opts),
          {:ok, client_id} <- validate_client_id(params),
@@ -255,7 +273,8 @@ defmodule Attesto.AuthorizationRequest do
 
       # From here on, redirect_uri is trusted: report further errors by
       # redirecting to it (RFC 6749 §4.1.2.1).
-      validate_redirectable(params, client_id, redirect_uri, require_nonce, require_pkce)
+      policy = %{require_nonce: require_nonce, require_pkce: require_pkce, response_modes: response_modes}
+      validate_redirectable(params, client_id, redirect_uri, policy)
     end
   end
 
@@ -272,6 +291,89 @@ defmodule Attesto.AuthorizationRequest do
   """
   @spec supported_response_modes() :: [String.t()]
   def supported_response_modes, do: @supported_response_modes
+
+  @doc """
+  Check a host's choice of response modes: a non-empty list drawn from
+  `supported_response_modes/0`, without repeats. Returns the list, or raises
+  `ArgumentError`.
+
+  `validate/2` applies it to `:response_modes_supported`. A layer that takes
+  the same list as configuration calls it at boot, so a bad list fails there
+  and not on the first request.
+  """
+  @spec response_modes!(term()) :: [String.t()]
+  def response_modes!(modes) do
+    if is_list(modes) and modes != [] and modes -- @supported_response_modes == [] and Enum.uniq(modes) == modes do
+      modes
+    else
+      raise ArgumentError,
+            "response_modes_supported must be a non-empty list drawn from " <>
+              "#{inspect(@supported_response_modes)} without repeats; got #{inspect(modes)}"
+    end
+  end
+
+  defp response_modes_option(opts) do
+    case Keyword.fetch(opts, :response_modes_supported) do
+      {:ok, modes} -> response_modes!(modes)
+      :error -> @supported_response_modes
+    end
+  end
+
+  @typedoc "Why an authentication event does not satisfy a request's `max_age`."
+  @type auth_time_error :: :auth_time_required | :invalid_auth_time | :max_age_exceeded
+
+  @doc """
+  Check an authentication event against the request's `max_age`
+  (OIDC Core §3.1.2.1).
+
+  `auth_time` is the Unix time the End-User was last actively authenticated,
+  as the authorization server established it for this request, or `nil` when
+  it has none. `now` is the current Unix time.
+
+  A request without `max_age` returns `:ok` whatever `auth_time` is. With
+  `max_age`:
+
+    * `{:error, :auth_time_required}` - there is no `auth_time`. OIDC Core
+      §3.1.2.1: when `max_age` is used the ID Token MUST carry `auth_time`, so
+      a response cannot be issued without one.
+    * `{:error, :invalid_auth_time}` - `auth_time` is not a non-negative
+      integer, or lies further in the future than `:future_skew` allows.
+    * `{:error, :max_age_exceeded}` - more than `max_age` seconds have elapsed
+      since `auth_time`, so the End-User must be actively re-authenticated.
+
+  Options:
+
+    * `:allowance` - non-negative seconds added to `max_age` before an
+      authentication counts as too old. Default `0`. An authorization server
+      that re-authenticated the End-User and then came back to finish the same
+      request passes the time that round trip may take; a request that could
+      not have involved a re-authentication (`prompt=none`) passes nothing.
+    * `:future_skew` - seconds an `auth_time` may lie ahead of `now`. Default
+      `Attesto.NumericDate.default_clock_skew_seconds/0`.
+  """
+  @spec check_auth_time(t(), term(), integer(), keyword()) :: :ok | {:error, auth_time_error()}
+  def check_auth_time(request, auth_time, now, opts \\ [])
+
+  def check_auth_time(%__MODULE__{max_age: nil}, _auth_time, now, opts) when is_integer(now) and is_list(opts), do: :ok
+
+  def check_auth_time(%__MODULE__{}, nil, now, opts) when is_integer(now) and is_list(opts),
+    do: {:error, :auth_time_required}
+
+  def check_auth_time(%__MODULE__{max_age: max_age}, auth_time, now, opts)
+      when is_integer(max_age) and is_integer(now) and is_list(opts) do
+    allowance = Keyword.get(opts, :allowance, 0)
+    future_skew = Keyword.get(opts, :future_skew, NumericDate.default_clock_skew_seconds())
+
+    if NumericDate.valid?(auth_time) do
+      case NumericDate.fresh?(auth_time, now, future_skew: future_skew, max_age: max_age + allowance) do
+        :ok -> :ok
+        :stale -> {:error, :max_age_exceeded}
+        _future_or_invalid -> {:error, :invalid_auth_time}
+      end
+    else
+      {:error, :invalid_auth_time}
+    end
+  end
 
   defp merge_request_object(%{"request" => request} = params, opts) when is_binary(request) and request != "" do
     policy = Keyword.get(opts, :request_object_policy, %Policy{})
@@ -348,7 +450,7 @@ defmodule Attesto.AuthorizationRequest do
   # missing/invalid client_id or an unregistered redirect_uri non-redirectable
   # (direct). Once both are trusted, enrich the error with the requested JARM
   # response_mode and the client_id audience (JARM §2.3 / §5.4) so the transport
-  # can return the error as a signed JWT, exactly as validate_redirectable/5
+  # can return the error as a signed JWT, exactly as validate_redirectable/4
   # does for the checks it owns. response_mode is read from the top-level
   # parameters: an invalid object's signed contents are untrusted, so a mode
   # carried only inside it is unknowable and the transport falls back to query.
@@ -362,7 +464,8 @@ defmodule Attesto.AuthorizationRequest do
            ) do
       state = string_or_nil(Map.get(params, "state"))
       {:redirect, base} = redirect_error(error, description, redirect_uri, state)
-      {:error, {:redirect, Map.merge(base, redirect_error_context(params, client_id))}}
+      context = redirect_error_context(params, client_id, response_modes_option(opts))
+      {:error, {:redirect, Map.merge(base, context)}}
     end
   end
 
@@ -418,7 +521,8 @@ defmodule Attesto.AuthorizationRequest do
 
   # --- Redirectable checks (RFC 6749 §4.1.2.1) ---
 
-  defp validate_redirectable(params, client_id, redirect_uri, require_nonce, require_pkce) do
+  defp validate_redirectable(params, client_id, redirect_uri, policy) do
+    %{require_nonce: require_nonce, require_pkce: require_pkce, response_modes: response_modes} = policy
     state = string_or_nil(Map.get(params, "state"))
 
     with :ok <- validate_request_object_params(params, redirect_uri, state),
@@ -432,7 +536,7 @@ defmodule Attesto.AuthorizationRequest do
          {:ok, authorization_details} <- validate_authorization_details(params, redirect_uri, state),
          {:ok, nonce} <- validate_nonce(params, require_nonce, redirect_uri, state),
          {:ok, dpop_jkt} <- validate_dpop_jkt(params, redirect_uri, state),
-         {:ok, response_mode} <- validate_response_mode(params, redirect_uri, state) do
+         {:ok, response_mode} <- validate_response_mode(params, response_modes, redirect_uri, state) do
       {:ok,
        %__MODULE__{
          response_type: @response_type_code,
@@ -451,6 +555,11 @@ defmodule Attesto.AuthorizationRequest do
          authorization_details: authorization_details,
          acr_values: parse_space_list(Map.get(params, "acr_values")),
          response_mode: response_mode,
+         # OIDC Core §3.1.2.1: the two hints are carried as the client sent
+         # them. `id_token_hint` is NOT verified here; a host that acts on it
+         # verifies it first.
+         id_token_hint: string_or_nil(Map.get(params, "id_token_hint")),
+         login_hint: string_or_nil(Map.get(params, "login_hint")),
          # RFC 9449 §10: the DPoP key thumbprint to bind the issued code to,
          # read from the EFFECTIVE params - so a signed request object's
          # `dpop_jkt` is authoritative and an unsigned outer-query `dpop_jkt` is
@@ -467,16 +576,17 @@ defmodule Attesto.AuthorizationRequest do
       # response_mode is itself unsupported never reaches here as a JWT mode, so
       # such errors fall back to the default (query) at the transport.
       {:error, {:redirect, error}} ->
-        {:error, {:redirect, Map.merge(error, redirect_error_context(params, client_id))}}
+        {:error, {:redirect, Map.merge(error, redirect_error_context(params, client_id, response_modes))}}
     end
   end
 
-  # Only a supported JARM response_mode is carried onto an error; an absent or
-  # unsupported value leaves it nil so the transport uses its default encoding.
-  defp redirect_error_context(params, client_id) do
+  # Only a response_mode this server accepts is carried onto an error; an
+  # absent or unaccepted value leaves it nil so the transport uses its default
+  # encoding.
+  defp redirect_error_context(params, client_id, response_modes) do
     response_mode =
       case Map.get(params, "response_mode") do
-        mode when mode in @supported_response_modes -> mode
+        mode when is_binary(mode) -> if mode in response_modes, do: mode
         _ -> nil
       end
 
@@ -487,22 +597,24 @@ defmodule Attesto.AuthorizationRequest do
   # the response_type's default (`query` for code), surfaced here as nil so the
   # transport applies its default. A supported value is carried through; an
   # unsupported or non-string value is a redirectable invalid_request.
-  defp validate_response_mode(params, redirect_uri, state) do
-    case Map.get(params, "response_mode") do
-      nil ->
-        {:ok, nil}
+  #
+  # `response_modes` is the host's accepted subset. An absent parameter asks for
+  # `query`, so it is refused like any other unlisted mode when the host does
+  # not accept `query`.
+  defp validate_response_mode(params, response_modes, redirect_uri, state) do
+    requested = Map.get(params, "response_mode")
+    effective = if is_nil(requested), do: @default_response_mode, else: requested
 
-      mode when mode in @supported_response_modes ->
-        {:ok, mode}
-
-      _ ->
-        {:error,
-         redirect_error(
-           "invalid_request",
-           "unsupported response_mode",
-           redirect_uri,
-           state
-         )}
+    if is_binary(effective) and effective in response_modes do
+      {:ok, requested}
+    else
+      {:error,
+       redirect_error(
+         "invalid_request",
+         "unsupported response_mode",
+         redirect_uri,
+         state
+       )}
     end
   end
 

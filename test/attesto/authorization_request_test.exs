@@ -435,7 +435,7 @@ defmodule Attesto.AuthorizationRequestTest do
 
     test "an unsupported response_mode redirects with invalid_request" do
       assert {:error, {:redirect, err}} =
-               validate(base_params(%{"response_mode" => "form_post"}))
+               validate(base_params(%{"response_mode" => "fragment"}))
 
       assert err.error == "invalid_request"
       assert err.redirect_uri == @redirect_uri
@@ -731,6 +731,132 @@ defmodule Attesto.AuthorizationRequestTest do
       assert {:error, {:redirect, err}} = validate(base_params(%{"claims" => ~s(["name"])}))
       assert err.error == "invalid_request"
       assert err.error_description =~ "claims"
+    end
+  end
+
+  describe "validate/2 :response_modes_supported" do
+    defp validate_modes(params, modes) do
+      AuthorizationRequest.validate(params,
+        registered_redirect_uris: @registered,
+        response_modes_supported: modes
+      )
+    end
+
+    test "a listed mode is accepted and an unlisted one is a redirectable invalid_request" do
+      modes = ["query", "query.jwt"]
+
+      assert {:ok, %{response_mode: "query.jwt"}} =
+               validate_modes(base_params(%{"response_mode" => "query.jwt"}), modes)
+
+      assert {:ok, %{response_mode: nil}} = validate_modes(base_params(), modes)
+
+      assert {:error, {:redirect, error}} =
+               validate_modes(base_params(%{"response_mode" => "form_post.jwt"}), modes)
+
+      assert error.error == "invalid_request"
+      assert error.error_description == "unsupported response_mode"
+      # The refused mode is not used to deliver the error.
+      assert is_nil(error.response_mode)
+    end
+
+    test "an absent response_mode asks for query, so it is refused when query is not listed" do
+      assert {:error, {:redirect, %{error: "invalid_request", response_mode: nil}}} =
+               validate_modes(base_params(), ["query.jwt"])
+
+      assert {:ok, %{response_mode: "query.jwt"}} =
+               validate_modes(base_params(%{"response_mode" => "query.jwt"}), ["query.jwt"])
+    end
+
+    test "another error is delivered in the requested mode only when that mode is accepted" do
+      bad_scope = %{"scope" => ~s(open"id), "response_mode" => "query.jwt"}
+
+      assert {:error, {:redirect, %{response_mode: "query.jwt"}}} =
+               validate_modes(base_params(bad_scope), ["query", "query.jwt"])
+
+      assert {:error, {:redirect, %{response_mode: nil}}} =
+               validate_modes(base_params(bad_scope), ["query"])
+    end
+
+    test "the option must be a non-empty subset of the supported modes without repeats" do
+      for bad <- [[], ["fragment"], ["query", "query"], "query", nil, [:query]] do
+        assert_raise ArgumentError, ~r/response_modes_supported must be a non-empty list/, fn ->
+          validate_modes(base_params(), bad)
+        end
+      end
+
+      assert AuthorizationRequest.response_modes!(["jwt"]) == ["jwt"]
+    end
+  end
+
+  describe "validate/2 id_token_hint and login_hint (OIDC Core §3.1.2.1)" do
+    test "carries both hints as sent, and nil when absent or empty" do
+      assert {:ok, %{id_token_hint: nil, login_hint: nil}} = validate(base_params())
+
+      assert {:ok, %{id_token_hint: "eyJ.hint.jwt", login_hint: "alice@example.com"}} =
+               validate(base_params(%{"id_token_hint" => "eyJ.hint.jwt", "login_hint" => "alice@example.com"}))
+
+      assert {:ok, %{id_token_hint: nil, login_hint: nil}} =
+               validate(base_params(%{"id_token_hint" => "", "login_hint" => ["a", "b"]}))
+    end
+  end
+
+  describe "check_auth_time/4 (OIDC Core §3.1.2.1)" do
+    @now 1_800_000_000
+
+    defp request_with_max_age(max_age) do
+      params = if max_age, do: base_params(%{"max_age" => Integer.to_string(max_age)}), else: base_params()
+      {:ok, request} = validate(params)
+      request
+    end
+
+    test "a request without max_age accepts any auth_time, including none" do
+      request = request_with_max_age(nil)
+
+      assert :ok = AuthorizationRequest.check_auth_time(request, nil, @now)
+      assert :ok = AuthorizationRequest.check_auth_time(request, @now - 86_400, @now)
+    end
+
+    test "max_age requires an auth_time" do
+      assert {:error, :auth_time_required} =
+               AuthorizationRequest.check_auth_time(request_with_max_age(300), nil, @now)
+    end
+
+    test "accepts an authentication no older than max_age, boundary included" do
+      request = request_with_max_age(300)
+
+      assert :ok = AuthorizationRequest.check_auth_time(request, @now, @now)
+      assert :ok = AuthorizationRequest.check_auth_time(request, @now - 300, @now)
+    end
+
+    test "rejects an authentication older than max_age" do
+      assert {:error, :max_age_exceeded} =
+               AuthorizationRequest.check_auth_time(request_with_max_age(300), @now - 301, @now)
+
+      assert {:error, :max_age_exceeded} =
+               AuthorizationRequest.check_auth_time(request_with_max_age(0), @now - 1, @now)
+    end
+
+    test ":allowance extends max_age by the round trip a re-authentication takes" do
+      request = request_with_max_age(0)
+
+      assert :ok = AuthorizationRequest.check_auth_time(request, @now - 30, @now, allowance: 30)
+
+      assert {:error, :max_age_exceeded} =
+               AuthorizationRequest.check_auth_time(request, @now - 31, @now, allowance: 30)
+    end
+
+    test "rejects a malformed or future auth_time" do
+      request = request_with_max_age(300)
+
+      for bad <- [-1, 1.5, "1800000000", :now] do
+        assert {:error, :invalid_auth_time} = AuthorizationRequest.check_auth_time(request, bad, @now)
+      end
+
+      assert :ok = AuthorizationRequest.check_auth_time(request, @now + 60, @now)
+      assert {:error, :invalid_auth_time} = AuthorizationRequest.check_auth_time(request, @now + 61, @now)
+
+      assert {:error, :invalid_auth_time} =
+               AuthorizationRequest.check_auth_time(request, @now + 1, @now, future_skew: 0)
     end
   end
 

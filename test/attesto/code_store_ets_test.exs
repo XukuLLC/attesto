@@ -37,6 +37,45 @@ defmodule Attesto.CodeStore.ETSTest do
     assert :error = ETS.take("hash-never-stored")
   end
 
+  describe "delete_unconsumed/1" do
+    defp grant(subject, client_id, sid), do: %{subject: subject, client_id: client_id, claims: %{"sid" => sid}}
+
+    setup do
+      :ok = ETS.put(record("u1-a-s1", data: grant("usr_1", "client_a", "s1")))
+      :ok = ETS.put(record("u1-b-s2", data: grant("usr_1", "client_b", "s2")))
+      :ok = ETS.put(record("u2-a-s3", data: grant("usr_2", "client_a", "s3")))
+      :ok
+    end
+
+    test "deletes the matching unredeemed codes and reports the count" do
+      assert {:ok, 2} = ETS.delete_unconsumed(subject: "usr_1")
+
+      assert :error = ETS.take("u1-a-s1")
+      assert :error = ETS.take("u1-b-s2")
+      assert {:ok, _} = ETS.take("u2-a-s3")
+    end
+
+    test "criteria are ANDed, and sid matches the recorded session" do
+      assert {:ok, 1} = ETS.delete_unconsumed(subject: "usr_1", client_id: "client_a")
+      assert {:ok, 1} = ETS.delete_unconsumed(sid: "s3")
+      assert {:ok, 0} = ETS.delete_unconsumed(sid: "s1")
+      assert {:ok, _} = ETS.take("u1-b-s2")
+    end
+
+    test "a redeemed code keeps its reuse marker" do
+      assert {:ok, _} = ETS.take("u1-a-s1")
+      assert :ok = ETS.mark_consumed("u1-a-s1", %{family_id: "fam-1", subject: "usr_1", replay_retain_until: nil})
+
+      assert {:ok, 1} = ETS.delete_unconsumed(subject: "usr_1")
+      assert {:error, :consumed, %{family_id: "fam-1"}} = ETS.take("u1-a-s1")
+    end
+
+    test "empty criteria are refused, so a bug cannot clear the store" do
+      assert_raise ArgumentError, fn -> ETS.delete_unconsumed([]) end
+      assert {:ok, _} = ETS.take("u1-a-s1")
+    end
+  end
+
   test "reset clears all stored records" do
     assert :ok = ETS.put(record("hash-a"))
     assert :ok = ETS.put(record("hash-b"))

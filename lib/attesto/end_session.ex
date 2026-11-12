@@ -46,6 +46,9 @@ defmodule Attesto.EndSession do
       opaque state, echoed back only after the URI is confirmed registered.
     * `:logout_hint` / `:ui_locales` - passthrough hints (RP-Initiated Logout
       §2) for the host's logout-confirmation UI.
+    * `:id_token_hint` - what became of the request's `id_token_hint`:
+      `:verified`, `:absent`, or `:invalid`. `:invalid` appears only when
+      `parse/3` was asked to discard a hint that failed verification.
   """
   @type t :: %__MODULE__{
           client_id: String.t() | nil,
@@ -54,7 +57,8 @@ defmodule Attesto.EndSession do
           post_logout_redirect_uri: String.t() | nil,
           state: String.t() | nil,
           logout_hint: String.t() | nil,
-          ui_locales: String.t() | nil
+          ui_locales: String.t() | nil,
+          id_token_hint: :verified | :absent | :invalid
         }
 
   defstruct [
@@ -64,7 +68,8 @@ defmodule Attesto.EndSession do
     :post_logout_redirect_uri,
     :state,
     :logout_hint,
-    :ui_locales
+    :ui_locales,
+    id_token_hint: :absent
   ]
 
   @type parse_error :: :invalid_id_token_hint | :client_id_mismatch
@@ -85,9 +90,20 @@ defmodule Attesto.EndSession do
   identifies the RP.
 
   Returns `{:ok, %Attesto.EndSession{}}` or `{:error, reason}`.
+
+  ## Options
+
+    * `:on_invalid_hint` - `:reject` (the default) returns
+      `{:error, :invalid_id_token_hint}` for a hint that fails verification.
+      `:discard` returns a request with `id_token_hint: :invalid` so the OP can
+      ask the End-User whether to log out (RP-Initiated Logout §2, §4). Nothing
+      that came with the failed hint is used: `:client_id`, `:subject`, `:sid`,
+      `:post_logout_redirect_uri` and `:state` are nil, so
+      `confirm_redirect/2` always answers `:no_redirect` for it. `:logout_hint`
+      and `:ui_locales` are kept; they only shape the confirmation page.
   """
-  @spec parse(Config.t(), map()) :: {:ok, t()} | {:error, parse_error()}
-  def parse(%Config{} = config, params) when is_map(params) do
+  @spec parse(Config.t(), map(), keyword()) :: {:ok, t()} | {:error, parse_error()}
+  def parse(%Config{} = config, params, opts \\ []) when is_map(params) and is_list(opts) do
     client_id_param = param(params, "client_id")
 
     with {:ok, hint} <- id_token_hint(params),
@@ -101,9 +117,29 @@ defmodule Attesto.EndSession do
          post_logout_redirect_uri: param(params, "post_logout_redirect_uri"),
          state: param(params, "state"),
          logout_hint: param(params, "logout_hint"),
-         ui_locales: param(params, "ui_locales")
+         ui_locales: param(params, "ui_locales"),
+         id_token_hint: if(map_size(claims) == 0, do: :absent, else: :verified)
        }}
+    else
+      {:error, :invalid_id_token_hint} = error ->
+        case Keyword.get(opts, :on_invalid_hint, :reject) do
+          :reject -> error
+          :discard -> {:ok, hintless(params)}
+        end
+
+      error ->
+        error
     end
+  end
+
+  # RP-Initiated Logout §4: a request whose hint failed validation carries no
+  # usable client, session, or return target.
+  defp hintless(params) do
+    %__MODULE__{
+      logout_hint: param(params, "logout_hint"),
+      ui_locales: param(params, "ui_locales"),
+      id_token_hint: :invalid
+    }
   end
 
   @doc """
