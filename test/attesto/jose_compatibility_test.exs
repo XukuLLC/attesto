@@ -78,7 +78,7 @@ defmodule Attesto.JOSECompatibilityTest do
       sign = fn claims ->
         JWT.sign_compact(
           Attesto.Key.signing_jwk(pem),
-          %{"alg" => Attesto.Token.signing_alg(), "kid" => Attesto.Key.kid(pem)},
+          %{"alg" => Attesto.Token.signing_alg(), "kid" => Attesto.Key.kid(pem), "typ" => "at+jwt"},
           claims
         )
       end

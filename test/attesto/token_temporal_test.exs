@@ -54,7 +54,7 @@ defmodule Attesto.TokenTemporalTest do
   # genuine, so verify can only fail on the claim content.
   defp resign(pem, claims) do
     jwk = Key.signing_jwk(pem)
-    JWT.sign_compact(jwk, %{"alg" => Token.signing_alg(), "kid" => Key.kid(pem)}, claims)
+    JWT.sign_compact(jwk, %{"alg" => Token.signing_alg(), "kid" => Key.kid(pem), "typ" => "at+jwt"}, claims)
   end
 
   # Override a single claim on the baseline and re-sign.

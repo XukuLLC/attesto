@@ -245,6 +245,16 @@ defmodule Attesto.AuthorizationRequest do
       and set `:request_object_audience` to the AS issuer. Has no effect unless a
       `request` object is present.
 
+    * `:request_objects_supported` (optional, default `true`) - whether this
+      server supports the `request` parameter at all. With `false`, a request
+      carrying a Request Object is answered `request_not_supported` (OIDC Core
+      §3.1.2.6). With `true`, an object that cannot be verified, including one
+      from a client with no usable keys, stays `invalid_request_object`.
+
+  A `request` given more than once (a list or map value) is a redirectable
+  `invalid_request` (RFC 6749 §3.1). An empty `request` counts as omitted, as
+  that section requires.
+
   Returns `{:ok, %Attesto.AuthorizationRequest{}}` or `{:error, error()}`, where
   `error()` is classified per the moduledoc.
 
@@ -376,6 +386,43 @@ defmodule Attesto.AuthorizationRequest do
   end
 
   defp merge_request_object(%{"request" => request} = params, opts) when is_binary(request) and request != "" do
+    if Keyword.get(opts, :request_objects_supported, true) do
+      verify_request_object(request, params, opts)
+    else
+      # OIDC Core §3.1.2.6 / §6.1: a server that does not support the `request`
+      # parameter answers `request_not_supported`. That is a statement about
+      # the server, distinct from a client of a supporting server presenting an
+      # object it has no keys for, which stays `invalid_request_object`.
+      redirect_request_object_error(params, "request_not_supported", "request object is not supported", opts)
+    end
+  end
+
+  # RFC 6749 §3.1: request parameters MUST NOT be included more than once. A
+  # `request` that arrives as a list or a map (`request[]=...`, `request[a]=...`)
+  # is a repeated or structured parameter, not one Request Object; ignoring it
+  # would process the outer parameters as though no object had been sent.
+  defp merge_request_object(%{"request" => request} = params, opts)
+       when not is_binary(request) and not is_nil(request) do
+    redirect_request_object_error(params, "invalid_request", "request must be a single value", opts)
+  end
+
+  # No `request` object present, or an empty one: RFC 6749 §3.1 says a
+  # parameter sent without a value MUST be treated as if it were omitted.
+  # RFC 9101 / FAPI 2.0 Message Signing §5.3.1: when the policy requires a
+  # signed request object, a request carrying none is rejected (redirectable
+  # invalid_request); otherwise the plain parameters stand (generic OpenID
+  # Connect §6.1).
+  defp merge_request_object(params, opts) do
+    policy = Keyword.get(opts, :request_object_policy, %Policy{})
+
+    if Policy.require_request_object?(policy) do
+      require_present_request_object(params, opts)
+    else
+      {:ok, params}
+    end
+  end
+
+  defp verify_request_object(request, params, opts) do
     policy = Keyword.get(opts, :request_object_policy, %Policy{})
 
     with {:ok, jwks} <- fetch_request_object_jwks(opts),
@@ -396,20 +443,6 @@ defmodule Attesto.AuthorizationRequest do
 
       _ ->
         redirect_request_object_error(params, "invalid_request_object", "request object is invalid", opts)
-    end
-  end
-
-  # No (or empty) `request` object present. RFC 9101 / FAPI 2.0 Message Signing
-  # §5.3.1: when the policy requires a signed request object, a request carrying
-  # none is rejected (redirectable invalid_request); otherwise the plain
-  # parameters stand (generic OpenID Connect §6.1).
-  defp merge_request_object(params, opts) do
-    policy = Keyword.get(opts, :request_object_policy, %Policy{})
-
-    if Policy.require_request_object?(policy) do
-      require_present_request_object(params, opts)
-    else
-      {:ok, params}
     end
   end
 

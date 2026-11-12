@@ -31,6 +31,36 @@ defmodule Attesto.RefreshToken do
   be protected as described by
   `c:Attesto.RefreshStore.rotate/4`.
 
+  ## A consumed token presented under another client
+
+  The client check has two outcomes, and which one applies depends on whether
+  the presented token has already been rotated.
+
+  A token that has not been rotated and is presented with the wrong
+  `:client_id` fails with `:client_mismatch` and is left untouched. Nothing is
+  consumed and nothing is revoked, so a misrouted request costs the real
+  client nothing.
+
+  A token that has already been rotated is different. Presenting it again is
+  reuse, and reuse revokes the family (RFC 9700 §4.14.2) whichever client the
+  request names. The client is not consulted first, on purpose:
+
+    * For a public client there is no credential behind `client_id`. Whoever
+      holds a leaked consumed token can name the owning client as easily as
+      any other, so refusing a replay "from another client" would stop
+      nothing.
+    * For a confidential client, a consumed token arriving under a different
+      client is the signal reuse detection exists for: the token has left the
+      party it was issued to. Revoking the family is the intended response.
+
+  The consequence is that anyone who obtains a consumed refresh token can end
+  that family, and the legitimate client has to authorize again. That is the
+  cost RFC 9700 accepts for detecting theft. It is bounded to the one family,
+  and it needs a token that has leaked. An issuer mismatch is the one case
+  checked first: a consumed token sent to a different issuer of a
+  multi-issuer deployment fails with `:issuer_mismatch` and revokes nothing,
+  because that is routing, not a leak.
+
   `:ttl` bounds inactivity between refreshes. An optional `:family_ttl` on
   initial issuance also fixes an absolute family deadline, which every
   successor inherits. Rotation and lost-response retries cannot extend it

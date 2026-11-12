@@ -13,6 +13,101 @@ defmodule Attesto.OutboundTargetTest do
     end
   end
 
+  describe "allowed_cidrs" do
+    test "a destination inside a listed block is pinned, and one outside stays refused" do
+      opts = [allowed_cidrs: ["10.20.0.0/16", "fd12:3456::/32"]]
+
+      assert {:ok, %{url: "https://10.20.3.4/token", host: "idp.internal", authority: "idp.internal"}} =
+               OutboundTarget.screen("https://idp.internal/token", [resolver: resolver([{10, 20, 3, 4}])] ++ opts)
+
+      assert {:ok, %{host: "idp.internal"}} =
+               OutboundTarget.screen(
+                 "https://idp.internal/token",
+                 [resolver: resolver([], [{0xFD12, 0x3456, 0, 0, 0, 0, 0, 7}])] ++ opts
+               )
+
+      for blocked <- [{10, 21, 3, 4}, {192, 168, 1, 1}, {169, 254, 169, 254}, {127, 0, 0, 1}] do
+        assert {:error, {:blocked_ip, ^blocked}} =
+                 OutboundTarget.screen("https://idp.internal/token", [resolver: resolver([blocked])] ++ opts)
+      end
+    end
+
+    test "every resolved address must pass: one outside the list refuses the target" do
+      assert {:error, {:blocked_ip, {192, 168, 1, 1}}} =
+               OutboundTarget.screen("https://idp.internal/token",
+                 resolver: resolver([{10, 20, 3, 4}, {192, 168, 1, 1}]),
+                 allowed_cidrs: ["10.20.0.0/16"]
+               )
+    end
+
+    test "a public destination needs no listing, and the default list allows nothing private" do
+      assert {:ok, _target} =
+               OutboundTarget.screen("https://rp.example/x",
+                 resolver: resolver([{93, 184, 216, 34}]),
+                 allowed_cidrs: ["10.20.0.0/16"]
+               )
+
+      assert {:error, {:blocked_ip, {10, 20, 3, 4}}} =
+               OutboundTarget.screen("https://idp.internal/token", resolver: resolver([{10, 20, 3, 4}]))
+    end
+
+    test "the list is validated before anything is resolved" do
+      for invalid <- [["10.20.0.0"], ["0.0.0.0/0"], ["10.20.0.1/16"], "10.20.0.0/16", [:private]] do
+        assert_raise ArgumentError, fn ->
+          OutboundTarget.screen("https://idp.internal/token",
+            resolver: fn _host, _family -> flunk("resolved before validating :allowed_cidrs") end,
+            allowed_cidrs: invalid
+          )
+        end
+      end
+    end
+
+    test "an allowed block never carries plain http" do
+      assert {:error, :insecure_or_hostless_url} =
+               OutboundTarget.screen("http://idp.internal/token",
+                 resolver: resolver([{10, 20, 3, 4}]),
+                 allowed_cidrs: ["10.20.0.0/16"]
+               )
+
+      assert {:error, {:blocked_ip, {10, 20, 3, 4}}} =
+               OutboundTarget.screen("http://idp.internal/token",
+                 resolver: resolver([{10, 20, 3, 4}]),
+                 allowed_cidrs: ["10.20.0.0/16"],
+                 allow_loopback: true
+               )
+    end
+  end
+
+  describe "allow_loopback and http" do
+    test "http reaches loopback addresses only" do
+      assert {:ok, %{url: "http://127.0.0.1:4000/cb"}} =
+               OutboundTarget.screen("http://localhost:4000/cb",
+                 resolver: resolver([{127, 0, 0, 1}]),
+                 allow_loopback: true
+               )
+
+      # Before this rule, the development flag let plain http reach a public
+      # address.
+      assert {:error, {:blocked_ip, {93, 184, 216, 34}}} =
+               OutboundTarget.screen("http://rp.example/cb",
+                 resolver: resolver([{93, 184, 216, 34}]),
+                 allow_loopback: true
+               )
+
+      assert {:error, {:blocked_ip, {93, 184, 216, 34}}} =
+               OutboundTarget.screen("http://localhost/cb",
+                 resolver: resolver([{127, 0, 0, 1}, {93, 184, 216, 34}]),
+                 allow_loopback: true
+               )
+    end
+
+    test "a host with a percent-encoded character or an empty label is not a URL to dial" do
+      for url <- ["https://rp.example%20evil/x", "https://rp.example../x"] do
+        assert {:error, :invalid_url} = OutboundTarget.screen(url, resolver: resolver([{93, 184, 216, 34}]))
+      end
+    end
+  end
+
   describe "differential parity with SSRFGuard and Discovery.screen_endpoint" do
     test "produces identical targets and verdicts across URLs, resolvers, IPv4-mapped IPv6, and allow_loopback" do
       cases = [

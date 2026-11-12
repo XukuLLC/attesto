@@ -6,6 +6,79 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [Unreleased]
+
+### Changed
+
+- `Attesto.Token.verify/3` checks the JOSE header `typ` of an access token.
+  RFC 9068 §4 says a resource server MUST verify that the header `typ` is
+  `at+jwt` (or `application/at+jwt`) and reject any other value. Until now
+  only the `typ` claim was checked. The expected value is
+  `config.access_token_header_typ`, compared case-insensitively with an
+  optional `application/` prefix (RFC 7515 §4.1.9); a mismatch or a missing
+  header is `{:error, :invalid_typ}`. Refresh tokens carry no header `typ` and
+  are not held to one, and a configuration with
+  `access_token_header_typ: nil` skips the check.
+
+  Behaviour change: an access token without the header is refused. That is a
+  token minted by a release from before the header existed, a token minted
+  while `access_token_header_typ` was `nil` and verified after it was set,
+  or a hand-built token that never carried one. `Attesto.Token.mint/3` sets
+  the header by default (`access_token_header_typ: "at+jwt"`). Access tokens
+  live 15 minutes by default, so refusals of older tokens stop within one
+  token lifetime of the upgrade.
+- `Attesto.OutboundTarget.screen/2` with `allow_loopback: true` accepts
+  `http` only when every address the host resolves to is a loopback address.
+  The option was documented as a development escape hatch for loopback, but
+  it also let plain `http` reach a public address.
+- `Attesto.URI.https_identifier?/2` refuses a host that contains a
+  percent-encoded character (`https://auth.example%20evil/`) or an empty
+  label (`https://auth.example../`). Neither is a name any issuer or endpoint
+  metadata carries, and a host that reads as a name only after decoding is
+  not the name it appears to be. One trailing dot, the fully qualified form,
+  is still accepted. An upper-case scheme (`HTTPS://`) was and is accepted:
+  it is lower-cased when the value is parsed (RFC 3986 §3.1).
+  `Attesto.OutboundTarget.screen/2` applies the same host rule and returns
+  `{:error, :invalid_url}`. An OpenID Federation Entity Identifier with such
+  a host is no longer an identifier, so an Entity Statement naming one cannot
+  be built.
+- `Attesto.AuthorizationRequest.validate/2` answers a `request` parameter
+  given more than once (a list or map value) with a redirectable
+  `invalid_request` (RFC 6749 §3.1). It used to ignore the parameter and
+  process the outer parameters as though no Request Object had been sent. An
+  empty `request` is still treated as omitted, as that section requires.
+
+### Added
+
+- `Attesto.AuthorizationRequest.validate/2` takes
+  `request_objects_supported: false` for a server that does not support the
+  `request` parameter. A request carrying a Request Object is then answered
+  `request_not_supported` (OIDC Core §3.1.2.6). The default, `true`, keeps
+  `invalid_request_object` for an object that cannot be verified, including
+  one from a client with no usable keys.
+- `Attesto.OutboundTarget.screen/2` takes `allowed_cidrs:`, a list of CIDR
+  blocks naming non-public networks a destination may resolve into, for a
+  service reachable only at a private address. Every resolved address must be
+  public or inside a listed block. There is no host-name form: allowing a
+  name would trust its DNS answer. The list is an SSRF exception the operator
+  takes on, and it never applies to plain `http`.
+- `Attesto.IPAddress.parse_cidrs!/1` and `in_any_cidr?/2`. Parsing refuses a
+  malformed block, a block with host bits set, and a zero-length prefix,
+  which would match every address.
+- `Attesto.URI.valid_host?/1` and `loopback_host?/1`, and the
+  `allow_loopback_http: true` option of `https_identifier?/2`, which accepts
+  `http` only for `localhost` and literal loopback addresses.
+
+### Documentation
+
+- `Attesto.RefreshToken` states what happens when a consumed refresh token is
+  presented under another client: the family is revoked, as for any reuse
+  (RFC 9700 §4.14.2), and the client is not consulted first. A public client
+  has no credential behind `client_id`, so a check would stop nothing, and
+  for a confidential client a consumed token under another client is the
+  leak signal reuse detection exists for. An unconsumed token presented with
+  the wrong client still fails with `:client_mismatch` and is left untouched.
+
 ## [2.13.0] - 2026-11-11
 
 ### Changed

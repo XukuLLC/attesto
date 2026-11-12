@@ -52,7 +52,7 @@ defmodule Attesto.SecurityNegativeTest do
     jwk = Key.signing_jwk(pem)
 
     header =
-      %{"alg" => Token.signing_alg()}
+      %{"alg" => Token.signing_alg(), "typ" => "at+jwt"}
       |> maybe_put_kid(Keyword.get(opts, :kid, Key.kid(pem)))
       |> Map.merge(Keyword.get(opts, :header, %{}))
 

@@ -215,12 +215,29 @@ defmodule Attesto.Federation.TrustChainTest do
     # `intermediate.b%61d.example` names `intermediate.bad.example` to HTTP
     # clients that decode the host, and `evil.test%2F.example` ends in
     # `.example` only as a string.
+    #
+    # A percent-encoded host is no longer an identifier at all
+    # (`Attesto.URI.valid_host?/1`), so such an Entity Statement cannot be
+    # built.
     for {entity, naming_constraints} <- [
           {"https://intermediate.bad%2eexample", %{"excluded" => [".bad.example"]}},
           {"https://intermediate%2Ebad.example", %{"excluded" => [".bad.example"]}},
           {"https://intermediate.b%61d.example", %{"excluded" => [".bad.example"]}},
           {"https://b%61d.example", %{"excluded" => ["bad.example"]}},
-          {"https://evil.test%2F.example", %{"permitted" => [".example"]}},
+          {"https://evil.test%2F.example", %{"permitted" => [".example"]}}
+        ] do
+      refute Attesto.URI.https_identifier?(entity)
+
+      assert_raise ArgumentError, fn ->
+        chain_fixture(
+          intermediate_entity: entity,
+          authority_hints: [entity],
+          anchor_constraints: %{"max_path_length" => 1, "naming_constraints" => naming_constraints}
+        )
+      end
+    end
+
+    for {entity, naming_constraints} <- [
           {"https://evil.test,.example", %{"permitted" => [".example"]}}
         ] do
       fixture =

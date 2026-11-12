@@ -39,6 +39,85 @@ defmodule Attesto.IPAddress do
 
   def public_fetch_destination?(_address), do: false
 
+  @typedoc "A parsed CIDR block: the network address and its prefix length."
+  @type cidr :: {ip_address(), non_neg_integer()}
+
+  @doc """
+  Parse a list of CIDR strings (`"10.20.0.0/16"`, `"fd12:3456::/32"`) into
+  blocks for `in_any_cidr?/2`.
+
+  Raises `ArgumentError` unless the value is a list of well-formed blocks.
+  Each entry must be an address, a slash and a prefix length; the address's
+  host bits must be zero (`"10.20.0.1/16"` is refused, since it usually means
+  the writer intended another block); and a prefix length of `0` is refused.
+  A zero-length prefix matches every address of its family, which would turn
+  a list of named networks into "allow everything", and the callers of this
+  list use it to make exceptions to an SSRF screen.
+  """
+  @spec parse_cidrs!(term()) :: [cidr()]
+  def parse_cidrs!(cidrs) when is_list(cidrs), do: Enum.map(cidrs, &parse_cidr!/1)
+
+  def parse_cidrs!(other) do
+    raise ArgumentError, "CIDR allow-list must be a list of CIDR strings; got #{inspect(other)}"
+  end
+
+  defp parse_cidr!(cidr) when is_binary(cidr) do
+    with [address, prefix] <- String.split(cidr, "/"),
+         {:ok, ip} <- :inet.parse_strict_address(String.to_charlist(address)),
+         {length, ""} <- Integer.parse(prefix),
+         true <- prefix == Integer.to_string(length),
+         true <- length >= 1 and length <= address_bits(ip),
+         true <- network_address?(ip, length) do
+      {ip, length}
+    else
+      _invalid -> invalid_cidr!(cidr)
+    end
+  end
+
+  defp parse_cidr!(other), do: invalid_cidr!(other)
+
+  defp invalid_cidr!(cidr) do
+    raise ArgumentError,
+          "invalid CIDR #{inspect(cidr)}: expected a network address and a prefix length of at least 1, " <>
+            ~s(such as "10.20.0.0/16" or "fd12:3456::/32", with no host bits set)
+  end
+
+  @doc """
+  Whether `address` falls inside any of the parsed `cidrs`.
+
+  An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is matched as its IPv4
+  address, so one IPv4 block covers both spellings of the same destination.
+  A block matches addresses of its own family only.
+  """
+  @spec in_any_cidr?(term(), [cidr()]) :: boolean()
+  def in_any_cidr?(address, cidrs) when is_list(cidrs) do
+    address = unmap_ipv4(address)
+    Enum.any?(cidrs, &in_cidr?(address, &1))
+  end
+
+  defp in_cidr?(address, {network, length}) when is_tuple(address) and tuple_size(address) == tuple_size(network) do
+    shift = address_bits(network) - length
+    Bitwise.bsr(address_integer(address), shift) == Bitwise.bsr(address_integer(network), shift)
+  end
+
+  defp in_cidr?(_address, _cidr), do: false
+
+  defp unmap_ipv4({0, 0, 0, 0, 0, 0xFFFF, high, low}), do: embedded_ipv4(high, low)
+  defp unmap_ipv4(address), do: address
+
+  defp network_address?(ip, length) do
+    host_bits = address_bits(ip) - length
+    Bitwise.band(address_integer(ip), Bitwise.bsl(1, host_bits) - 1) == 0
+  end
+
+  defp address_bits({_a, _b, _c, _d}), do: 32
+  defp address_bits({_a, _b, _c, _d, _e, _f, _g, _h}), do: 128
+
+  defp address_integer({a, b, c, d}), do: Enum.reduce([a, b, c, d], 0, &(Bitwise.bsl(&2, 8) + &1))
+
+  defp address_integer({a, b, c, d, e, f, g, h}),
+    do: Enum.reduce([a, b, c, d, e, f, g, h], 0, &(Bitwise.bsl(&2, 16) + &1))
+
   # IANA carves two globally reachable anycast addresses out of the otherwise
   # non-global 192.0.0.0/24 protocol-assignment block.
   defp public_ipv4?({192, 0, 0, last}) when last in [9, 10], do: true

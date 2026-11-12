@@ -41,7 +41,10 @@ defmodule Attesto.TokenVerifyTest do
     kid = Keyword.get(opts, :kid, Attesto.Key.kid(pem))
     alg = Keyword.get(opts, :alg, Token.signing_alg())
 
-    JWT.sign_compact(jwk, %{"alg" => alg, "kid" => kid}, with_defaults)
+    header = Map.merge(%{"alg" => alg, "kid" => kid, "typ" => "at+jwt"}, Keyword.get(opts, :header, %{}))
+    header = header |> Enum.reject(fn {_k, v} -> v == :__drop__ end) |> Map.new()
+
+    JWT.sign_compact(jwk, header, with_defaults)
   end
 
   defp put_default(map, key, value) do
@@ -477,6 +480,45 @@ defmodule Attesto.TokenVerifyTest do
     test "a garbage typ value fails with :invalid_typ", %{config: config, pem: pem} do
       forged = forge(pem, client_claims(%{"typ" => "bearer"}))
       assert {:error, :invalid_typ} = Token.verify(config, forged)
+    end
+  end
+
+  describe "verify/3 JOSE header typ (RFC 9068 §4)" do
+    test "a minted access token carries the header and verifies", %{config: config} do
+      {:ok, %{access_token: jwt}} =
+        Token.mint(config, %{kind: "client", sub: "oc_abc123", scopes: [], claims: %{"client_id" => "oc_abc123"}})
+
+      assert {:ok, %{"typ" => "at+jwt"}} = Attesto.JWS.protected_header(jwt)
+      assert {:ok, _claims} = Token.verify(config, jwt)
+    end
+
+    test "an access token without the header, or with another type, is refused", %{config: config, pem: pem} do
+      for header <- [%{"typ" => :__drop__}, %{"typ" => "JWT"}, %{"typ" => "jwt+at"}, %{"typ" => ""}, %{"typ" => 1}] do
+        forged = forge(pem, client_claims(), header: header)
+        assert {:error, :invalid_typ} = Token.verify(config, forged), "accepted header #{inspect(header)}"
+      end
+    end
+
+    test "the comparison ignores case and an application/ prefix (RFC 7515 §4.1.9)", %{config: config, pem: pem} do
+      for typ <- ["at+jwt", "AT+JWT", "application/at+jwt", "Application/AT+JWT"] do
+        forged = forge(pem, client_claims(), header: %{"typ" => typ})
+        assert {:ok, _claims} = Token.verify(config, forged), "refused header typ #{typ}"
+      end
+    end
+
+    test "the expected value is the configured one, and nil turns the check off", %{config: config, pem: pem} do
+      custom = %{config | access_token_header_typ: "example+jwt"}
+      assert {:ok, _} = Token.verify(custom, forge(pem, client_claims(), header: %{"typ" => "example+jwt"}))
+      assert {:error, :invalid_typ} = Token.verify(custom, forge(pem, client_claims()))
+
+      off = %{config | access_token_header_typ: nil}
+      assert {:ok, _} = Token.verify(off, forge(pem, client_claims(), header: %{"typ" => :__drop__}))
+      assert {:ok, _} = Token.verify(off, forge(pem, client_claims(), header: %{"typ" => "JWT"}))
+    end
+
+    test "a refresh token carries no header typ and is not held to one", %{config: config, pem: pem} do
+      refresh = forge(pem, client_claims(%{"typ" => "refresh"}), header: %{"typ" => :__drop__})
+      assert {:ok, _} = Token.verify(config, refresh, expected_typ: "refresh")
     end
   end
 

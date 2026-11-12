@@ -305,7 +305,13 @@ defmodule Attesto.Token do
     9. **Per-kind claims.** The kind's `required_claims` are all present
        with the right shape; otherwise `:invalid_claims`.
    10. **`typ`** is a known value AND equals the expected purpose
-       (`:expected_typ`, default `"access"`).
+       (`:expected_typ`, default `"access"`). For an access token, the JOSE
+       header `typ` must also equal `config.access_token_header_typ`
+       (`"at+jwt"` by default) when that is set, compared case-insensitively
+       with an optional `application/` prefix (RFC 9068 §4, RFC 7515 §4.1.9);
+       otherwise `:invalid_typ`. A configuration with
+       `access_token_header_typ: nil`, and a refresh token, carry no header
+       `typ` and are not held to one.
    11. **Binding.** A DPoP-bound token requires a matching `:dpop_jkt`; an
        mTLS-bound token a matching `:mtls_cert_thumbprint`; an unbound
        token requires neither. The cross-scheme option MUST be absent.
@@ -357,7 +363,7 @@ defmodule Attesto.Token do
   def verify(%Config{} = config, jwt, opts) when is_binary(jwt) and is_list(opts) do
     _require_confirmation_binding = require_confirmation_binding!(opts)
 
-    with {:ok, claims} <- verify_signature(config, jwt),
+    with {:ok, claims, header} <- verify_signature_with_header(config, jwt),
          :ok <- check_confirmation_shape(claims),
          :ok <- check_issuer(config, claims),
          :ok <- check_audience_before_claim_validation(config, claims, opts),
@@ -368,6 +374,7 @@ defmodule Attesto.Token do
          {:ok, kind} <- check_principal(config, claims),
          :ok <- check_principal_identity_claims(kind, claims),
          :ok <- check_typ(claims, opts),
+         :ok <- check_header_typ(config, claims, header),
          # Audience before binding, deliberately. `maybe_check_confirmation_binding/2`
          # emits `[:attesto, :token, :sender_constraint_mismatch]`, an event
          # documented as evidence that a token has left its holder. Evaluating
@@ -630,13 +637,20 @@ defmodule Attesto.Token do
   # extension parameters, so any `crit` member is fatal. An empty `crit` is
   # itself malformed. Tokens Attesto mints never carry `crit`.
   defp verify_signature(config, jwt) do
+    with {:ok, claims, _header} <- verify_signature_with_header(config, jwt), do: {:ok, claims}
+  end
+
+  # The protected header is returned with the claims so `verify/3` can check
+  # the header `typ` once it knows the token's purpose.
+  defp verify_signature_with_header(config, jwt) do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_token,
              crit_error: :unsupported_critical_header,
              max_compact_bytes: @max_token_bytes
-           ) do
-      verify_against_trusted(config, jwt, header)
+           ),
+         {:ok, claims} <- verify_against_trusted(config, jwt, header) do
+      {:ok, claims, header}
     end
   end
 
@@ -884,6 +898,34 @@ defmodule Attesto.Token do
   end
 
   defp check_typ(_claims, _opts), do: {:error, :invalid_typ}
+
+  # RFC 9068 §4: the resource server MUST verify that the JOSE header `typ` is
+  # `at+jwt` (or `application/at+jwt`) and reject any other value. The expected
+  # value is the one this configuration mints with
+  # (`config.access_token_header_typ`); RFC 7515 §4.1.9 lets a media type omit
+  # the `application/` prefix and makes the comparison case-insensitive.
+  #
+  # The rule follows `access_token_header_typ/2`, which decides the header at
+  # mint: it applies to access tokens only, and only when the configuration
+  # sets a header `typ`. Refresh tokens deliberately carry none, and a
+  # configuration with `access_token_header_typ: nil` mints none, so neither is
+  # held to one.
+  defp check_header_typ(config, claims, header) do
+    case access_token_header_typ(config, claims) do
+      nil -> :ok
+      expected -> matching_header_typ(Map.get(header, "typ"), expected)
+    end
+  end
+
+  defp matching_header_typ(typ, expected) when is_binary(typ) do
+    if media_type(typ) == media_type(expected), do: :ok, else: {:error, :invalid_typ}
+  end
+
+  defp matching_header_typ(_absent_or_invalid, _expected), do: {:error, :invalid_typ}
+
+  defp media_type(typ) do
+    typ |> String.downcase() |> String.replace_prefix("application/", "")
+  end
 
   # ----- internal: helpers -----
 

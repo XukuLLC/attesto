@@ -144,4 +144,61 @@ defmodule Attesto.IPAddressTest do
       refute IPAddress.public_fetch_destination?(address), inspect(address)
     end
   end
+
+  describe "parse_cidrs!/1 and in_any_cidr?/2" do
+    test "matches addresses inside the listed blocks only" do
+      cidrs = IPAddress.parse_cidrs!(["10.20.0.0/16", "192.168.7.4/32", "fd12:3456::/32"])
+
+      for inside <- [{10, 20, 0, 1}, {10, 20, 255, 255}, {192, 168, 7, 4}, {0xFD12, 0x3456, 0, 0, 0, 0, 0, 9}] do
+        assert IPAddress.in_any_cidr?(inside, cidrs), inspect(inside)
+      end
+
+      for outside <- [
+            {10, 21, 0, 1},
+            {10, 19, 255, 255},
+            {192, 168, 7, 5},
+            {0xFD12, 0x3457, 0, 0, 0, 0, 0, 9},
+            {127, 0, 0, 1},
+            {169, 254, 169, 254},
+            :not_an_address
+          ] do
+        refute IPAddress.in_any_cidr?(outside, cidrs), inspect(outside)
+      end
+
+      refute IPAddress.in_any_cidr?({10, 20, 0, 1}, [])
+    end
+
+    test "an IPv4-mapped IPv6 address matches its IPv4 block, and families do not cross" do
+      v4 = IPAddress.parse_cidrs!(["10.20.0.0/16"])
+      assert IPAddress.in_any_cidr?({0, 0, 0, 0, 0, 0xFFFF, 0x0A14, 0x0001}, v4)
+      refute IPAddress.in_any_cidr?({0, 0, 0, 0, 0, 0xFFFF, 0x0A15, 0x0001}, v4)
+      refute IPAddress.in_any_cidr?({0x0A14, 0, 0, 0, 0, 0, 0, 1}, v4)
+    end
+
+    test "refuses malformed blocks, host bits, and catch-all prefixes" do
+      for invalid <- [
+            "10.20.0.0",
+            "10.20.0.0/",
+            "10.20.0.0/33",
+            "10.20.0.0/-1",
+            "10.20.0.0/16/1",
+            "10.20.0.0/016",
+            "10.20.0.0/16 ",
+            "10.20.0.1/16",
+            "fd12:3456::1/32",
+            "0.0.0.0/0",
+            "::/0",
+            "internal.example/16",
+            "10.20.0.0/sixteen",
+            "",
+            nil,
+            {10, 20, 0, 0}
+          ] do
+        assert_raise ArgumentError, ~r/invalid CIDR/, fn -> IPAddress.parse_cidrs!([invalid]) end
+      end
+
+      assert_raise ArgumentError, ~r/must be a list/, fn -> IPAddress.parse_cidrs!("10.20.0.0/16") end
+      assert IPAddress.parse_cidrs!([]) == []
+    end
+  end
 end

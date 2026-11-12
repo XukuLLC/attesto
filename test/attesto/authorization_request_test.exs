@@ -507,6 +507,54 @@ defmodule Attesto.AuthorizationRequestTest do
       assert err.state == "xyz"
     end
 
+    test "a server without request-object support answers request_not_supported" do
+      opts = [registered_redirect_uris: @registered, request_objects_supported: false]
+
+      assert {:error, {:redirect, err}} =
+               AuthorizationRequest.validate(base_params(%{"request" => "any.compact.jws"}), opts)
+
+      assert err.error == "request_not_supported"
+      assert err.redirect_uri == @redirect_uri
+      assert err.state == "xyz"
+
+      # Nothing to refuse when no object was sent.
+      assert {:ok, _request} = AuthorizationRequest.validate(base_params(), opts)
+    end
+
+    test "a supporting server answers a client without keys invalid_request_object" do
+      assert {:error, {:redirect, %{error: "invalid_request_object"}}} =
+               AuthorizationRequest.validate(base_params(%{"request" => "any.compact.jws"}),
+                 registered_redirect_uris: @registered
+               )
+    end
+
+    test "a repeated or structured request parameter is invalid_request" do
+      for request <- [["a.b.c", "d.e.f"], ["a.b.c"], [], %{"0" => "a.b.c"}] do
+        assert {:error, {:redirect, err}} =
+                 AuthorizationRequest.validate(base_params(%{"request" => request}),
+                   registered_redirect_uris: @registered
+                 )
+
+        assert err.error == "invalid_request"
+        assert err.redirect_uri == @redirect_uri
+      end
+    end
+
+    test "a repeated request with an untrusted redirect_uri does not redirect" do
+      assert {:error, {:direct, _reason}} =
+               AuthorizationRequest.validate(
+                 base_params(%{"request" => ["a.b.c"], "redirect_uri" => "https://evil.example/cb"}),
+                 registered_redirect_uris: @registered
+               )
+    end
+
+    test "an empty request counts as omitted (RFC 6749 §3.1)" do
+      assert {:ok, _request} =
+               AuthorizationRequest.validate(base_params(%{"request" => ""}),
+                 registered_redirect_uris: @registered
+               )
+    end
+
     test "invalid request object with an untrusted redirect_uri does not redirect" do
       params =
         base_params(%{

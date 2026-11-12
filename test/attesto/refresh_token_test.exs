@@ -777,6 +777,24 @@ defmodule Attesto.RefreshTokenTest do
                RefreshToken.rotate(RefreshStore.ETS, t1, now: now)
     end
 
+    test "a consumed token replayed under another client revokes the family; an unconsumed one does not" do
+      owner = context(%{client_id: "client_a"})
+
+      {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, owner)
+
+      # Not yet rotated: the wrong client is refused and nothing is touched.
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b")
+
+      {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_a", now: 1_000)
+
+      # Already rotated: the replay is reuse whichever client it names, inside
+      # the retry window or after it.
+      assert {:error, :reuse_detected} =
+               RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b", now: 1_001)
+
+      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client_a", now: 1_002)
+    end
+
     test "strict mode keeps immediate replay as reuse detection" do
       {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, context())
       {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0)

@@ -5,23 +5,43 @@ defmodule Attesto.URI do
   The validator rejects userinfo, fragments, hostless identifiers, whitespace,
   control characters, and malformed percent escapes before callers advertise
   or dereference a URL.
+
+  ## Hosts
+
+  A host is refused when it contains a percent-encoded character
+  (`auth.example%20evil`) or an empty label (`auth.example..`, `.example`,
+  `a..b`). RFC 3986 §3.2.2 allows percent-encoding in a registered name, but a
+  DNS name never needs it, and no issuer or endpoint metadata carries one; a
+  host that only reads as a name after decoding is not the name it appears to
+  be. One trailing dot is kept: `auth.example.` is the fully qualified form of
+  `auth.example` and resolves to the same host.
+
+  ## Schemes
+
+  A scheme is case-insensitive (RFC 3986 §3.1). `HTTPS://auth.example` is
+  accepted: the scheme is lower-cased when the value is parsed, before it is
+  compared.
   """
 
   @doc """
   Returns whether `value` is an absolute HTTPS identifier.
 
   Set `:allow_http` to `true` only for a caller that deliberately supports an
-  HTTP development endpoint. Every other structural check remains active.
+  HTTP development endpoint. `allow_loopback_http: true` is the narrower form:
+  `http` is accepted only when the host is `localhost` or a literal loopback
+  address (`loopback_host?/1`), and `https` is still required for every other
+  host. Every other structural check remains active.
   """
   @spec https_identifier?(term(), keyword()) :: boolean()
   def https_identifier?(value, opts \\ [])
 
   def https_identifier?(value, opts) when is_binary(value) and is_list(opts) do
     allow_http? = Keyword.get(opts, :allow_http, false)
+    allow_loopback_http? = Keyword.get(opts, :allow_loopback_http, false)
 
-    is_boolean(allow_http?) and value != "" and String.valid?(value) and
+    is_boolean(allow_http?) and is_boolean(allow_loopback_http?) and value != "" and String.valid?(value) and
       valid_percent_encoding?(value) and
-      valid_identifier?(value, allow_http?)
+      valid_identifier?(value, http_policy(allow_http?, allow_loopback_http?))
   end
 
   def https_identifier?(_value, _opts), do: false
@@ -42,10 +62,68 @@ defmodule Attesto.URI do
 
   def valid_port?(_value, _port), do: false
 
-  defp valid_identifier?(value, allow_http?) do
+  @doc """
+  Whether `host` is a usable URI host: non-empty, with no percent-encoded
+  character and no empty label. See "Hosts" in the moduledoc.
+
+  An IP literal is accepted as given; IPv6 literals arrive without their
+  brackets from `URI.new/1`.
+  """
+  @spec valid_host?(term()) :: boolean()
+  def valid_host?(host) when is_binary(host) and host != "" do
+    cond do
+      String.contains?(host, "%") -> false
+      String.contains?(host, ":") -> true
+      true -> host |> strip_root_dot() |> non_empty_labels?()
+    end
+  end
+
+  def valid_host?(_host), do: false
+
+  # Exactly one trailing dot is the DNS root label; a second one is an empty
+  # label and is left in place for the label check to refuse.
+  defp strip_root_dot(host) do
+    if String.ends_with?(host, "."), do: binary_part(host, 0, byte_size(host) - 1), else: host
+  end
+
+  defp non_empty_labels?(name), do: name |> String.split(".") |> Enum.all?(&(&1 != ""))
+
+  @doc """
+  Whether `host` names the local machine without a DNS lookup: `localhost`
+  (any case, optional trailing dot) or a literal loopback address
+  (`127.0.0.0/8`, `::1`).
+
+  A name that merely resolves to a loopback address is not a loopback host;
+  resolution is the caller's concern (`Attesto.OutboundTarget`).
+  """
+  @spec loopback_host?(term()) :: boolean()
+  def loopback_host?(host) when is_binary(host) do
+    host
+    |> String.downcase()
+    |> String.trim_trailing(".")
+    |> case do
+      "localhost" ->
+        true
+
+      literal ->
+        case :inet.parse_strict_address(String.to_charlist(literal)) do
+          {:ok, {127, _b, _c, _d}} -> true
+          {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
+          _other -> false
+        end
+    end
+  end
+
+  def loopback_host?(_host), do: false
+
+  defp http_policy(true, _allow_loopback_http?), do: :any
+  defp http_policy(false, true), do: :loopback
+  defp http_policy(false, false), do: :none
+
+  defp valid_identifier?(value, http_policy) do
     with {:ok, %Elixir.URI{} = uri} <- Elixir.URI.new(value),
-         true <- accepted_scheme?(uri.scheme, allow_http?),
-         true <- is_binary(uri.host) and uri.host != "",
+         true <- valid_host?(uri.host),
+         true <- accepted_scheme?(uri.scheme, http_policy, uri.host),
          true <- is_nil(uri.userinfo),
          true <- is_nil(uri.fragment),
          true <- valid_port?(value, uri.port) do
@@ -59,9 +137,10 @@ defmodule Attesto.URI do
     _kind, _reason -> false
   end
 
-  defp accepted_scheme?("https", _allow_http?), do: true
-  defp accepted_scheme?("http", true), do: true
-  defp accepted_scheme?(_scheme, _allow_http?), do: false
+  defp accepted_scheme?("https", _http_policy, _host), do: true
+  defp accepted_scheme?("http", :any, _host), do: true
+  defp accepted_scheme?("http", :loopback, host), do: loopback_host?(host)
+  defp accepted_scheme?(_scheme, _http_policy, _host), do: false
 
   defp valid_percent_encoding?(value), do: not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value)
 end
