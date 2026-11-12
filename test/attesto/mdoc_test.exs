@@ -3,6 +3,7 @@ defmodule Attesto.MdocTest do
   use ExUnit.Case, async: true
 
   alias Attesto.{Cose, Mdoc, Thumbprint}
+  alias Attesto.Test.{CoseFixture, X509Fixture}
 
   @doc_type "org.iso.18013.5.1.mDL"
   @mdl_namespace "org.iso.18013.5.1"
@@ -207,6 +208,95 @@ defmodule Attesto.MdocTest do
     assert Enum.map(unprotected[33], fn %CBOR.Tag{tag: :bytes, value: der} -> der end) == chain
   end
 
+  describe "issuerAuth algorithm policy" do
+    @issuer_algs ["ES256", "ES384", "ES512"]
+    @issuer_pairs [{-7, "ES256", "P-256"}, {-35, "ES384", "P-384"}, {-36, "ES512", "P-521"}]
+
+    setup ctx do
+      {:ok, issued} = Mdoc.issue(ctx.opts)
+      %{issuer_signed: issued |> Base.url_decode64!(padding: false) |> decode!(), root: X509Fixture.root()}
+    end
+
+    for {alg, name, curve} <- @issuer_pairs do
+      @alg alg
+      @name name
+      @curve curve
+
+      test "accepts #{@name}/#{@curve} with JWK, JOSE key and PEM when configured", ctx do
+        key = JOSE.JWK.generate_key({:ec, @curve})
+        signed = ctx.issuer_signed |> CoseFixture.resign_issuer(key, @alg) |> CBOR.encode()
+        public_key = JOSE.JWK.to_public(key)
+
+        for trusted <- [public_key, elem(JOSE.JWK.to_public_map(key), 1), elem(JOSE.JWK.to_pem(public_key), 1)] do
+          assert {:ok, result} = Mdoc.verify(signed, trusted, now: ctx.now, accepted_algs: @issuer_algs)
+          assert result.namespaces[@mdl_namespace]["given_name"] == "Jane"
+        end
+
+        if @name != "ES256" do
+          assert {:error, :unsupported_algorithm} = Mdoc.verify(signed, public_key, now: ctx.now)
+
+          assert {:error, :unsupported_algorithm} =
+                   Mdoc.verify(signed, public_key, now: ctx.now, accepted_algs: ["ES256"])
+        end
+
+        assert {:error, :unsupported_algorithm} = Mdoc.verify(signed, public_key, accepted_algs: [])
+      end
+
+      test "accepts #{@name}/#{@curve} from the validated certificate leaf", ctx do
+        issuer = algorithm_certificate(ctx.root, @curve)
+
+        signed =
+          ctx.issuer_signed
+          |> CoseFixture.resign_issuer(issuer.key, @alg, unprotected: %{33 => Enum.map(issuer.chain, &bytes/1)})
+          |> CBOR.encode()
+
+        opts = [trusted_certificates: issuer.anchors, now: ctx.now, accepted_algs: @issuer_algs]
+        assert {:ok, _} = Mdoc.verify(signed, nil, opts)
+
+        if @name != "ES256" do
+          assert {:error, :unsupported_algorithm} =
+                   Mdoc.verify(signed, nil, Keyword.put(opts, :accepted_algs, ["ES256"]))
+        end
+      end
+    end
+
+    for {alg, name, expected_curve} <- @issuer_pairs,
+        {_other_alg, _other_name, curve} <- @issuer_pairs,
+        curve != expected_curve do
+      @alg alg
+      @name name
+      @curve curve
+
+      test "refuses #{@name}/#{@curve} with a pairing error for supplied and leaf keys", ctx do
+        issuer = algorithm_certificate(ctx.root, @curve)
+
+        signed =
+          ctx.issuer_signed
+          |> CoseFixture.resign_issuer(issuer.key, @alg, unprotected: %{33 => Enum.map(issuer.chain, &bytes/1)})
+          |> CBOR.encode()
+
+        # A misleading JWK alg cannot override its actual EC curve.
+        public = Map.put(issuer.public_key, "alg", @name)
+        assert {:error, :algorithm_key_mismatch} = Mdoc.verify(signed, public, accepted_algs: @issuer_algs)
+
+        assert {:error, :algorithm_key_mismatch} =
+                 Mdoc.verify(signed, nil, trusted_certificates: issuer.anchors, accepted_algs: @issuer_algs)
+
+        assert {:error, :algorithm_key_mismatch} = Mdoc.verify(signed, public)
+      end
+    end
+
+    defp algorithm_certificate(root, curve) do
+      oid =
+        Map.fetch!(
+          %{"P-256" => {1, 2, 840, 10_045, 3, 1, 7}, "P-384" => {1, 3, 132, 0, 34}, "P-521" => {1, 3, 132, 0, 35}},
+          curve
+        )
+
+      X509Fixture.chain(root, peer: [key: {:namedCurve, oid}, extensions: [X509Fixture.signer_usage()]])
+    end
+  end
+
   describe "issue/1 :key_authorizations" do
     setup do
       {issuer_pem, issuer_public} = keypair()
@@ -331,7 +421,9 @@ defmodule Attesto.MdocTest do
       device_auth = Keyword.get(overrides, :device_auth)
       status = Keyword.get(overrides, :status, 0)
 
-      session_transcript = session_transcript(client_id, nonce, response_uri, jwk_thumbprint)
+      session_transcript =
+        Keyword.get(overrides, :session_transcript, session_transcript(client_id, nonce, response_uri, jwk_thumbprint))
+
       device_namespaces_tagged = tagged(device_namespaces)
 
       device_auth =
@@ -668,6 +760,128 @@ defmodule Attesto.MdocTest do
 
       assert {:error, :invalid_key} =
                Mdoc.session_transcript(context(ctx, response_encryption_jwk: %{"kty" => "EC"}))
+    end
+
+    test "DC API transcript matches the OpenID4VP 1.0 B.2.6.2 published example" do
+      # https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html#section-b.2.6.2
+      jwk = %{
+        "kty" => "EC",
+        "crv" => "P-256",
+        "x" => "DxiH5Q4Yx3UrukE2lWCErq8N8bqC9CHLLrAwLz5BmE0",
+        "y" => "XtLM4-3h5o3HUH0MHVJV0kyq0iBlrBwlh8qEDMZ4-Pc",
+        "alg" => "ECDH-ES",
+        "use" => "enc",
+        "kid" => "1"
+      }
+
+      assert {:ok, transcript} =
+               Mdoc.session_transcript(
+                 dc_api_origin: "https://example.com",
+                 nonce: "exc7gBkxjx1rdc9udRrveKvSsJIq80avlXeLHhGwqtA",
+                 response_encryption_jwk: jwk
+               )
+
+      expected =
+        "83f6f682764f70656e4944345650444341504948616e646f7665725820fbece366f4" <>
+          "212f9762c74cfdbf83b8c69e371d5d68cea09cb4c48ca6daab761a"
+
+      assert CBOR.encode(transcript) == Base.decode16!(expected, case: :lower)
+    end
+
+    test "DC API binds exact origins, nonce and flow with independent device signatures", ctx do
+      origin = "https://verifier.example.com"
+      dc_context = [dc_api_origin: origin, nonce: ctx.nonce]
+      transcript = dc_api_transcript(origin, ctx.nonce, nil)
+      assert {:ok, ^transcript} = Mdoc.session_transcript(dc_context)
+      dc_presentation = build_device_response(ctx, session_transcript: transcript)
+      redirect_presentation = build_device_response(ctx)
+
+      assert {:ok, [_]} = Mdoc.verify_device_response(dc_presentation, dc_context, ctx.issuer_public, now: ctx.now)
+
+      for altered <- [
+            Keyword.put(dc_context, :dc_api_origin, "https://other.example.com"),
+            Keyword.put(dc_context, :nonce, "different"),
+            context(ctx)
+          ] do
+        assert {:error, :invalid_signature} =
+                 Mdoc.verify_device_response(dc_presentation, altered, ctx.issuer_public, now: ctx.now)
+      end
+
+      assert {:error, :invalid_signature} =
+               Mdoc.verify_device_response(redirect_presentation, dc_context, ctx.issuer_public, now: ctx.now)
+
+      prefixed = build_device_response(ctx, session_transcript: dc_api_transcript("origin:" <> origin, ctx.nonce, nil))
+
+      assert {:error, :invalid_signature} =
+               Mdoc.verify_device_response(prefixed, dc_context, ctx.issuer_public, now: ctx.now)
+
+      assert {:error, :invalid_context} =
+               Mdoc.session_transcript(Keyword.put(dc_context, :dc_api_origin, "origin:" <> origin))
+    end
+
+    test "DC API accepts serialized non-default ports and platform application origins", ctx do
+      for origin <- [
+            "https://verifier.example.com:8443",
+            "http://localhost:8080",
+            "https://[::1]:8443",
+            "platform:pkg-key-hash:Z4OFzVVSZrzTRa3eg79hUuHy12MVW0vzPDf4q4zaPs0"
+          ] do
+        assert {:ok, transcript} = Mdoc.session_transcript(dc_api_origin: origin, nonce: ctx.nonce)
+        assert transcript == dc_api_transcript(origin, ctx.nonce, nil)
+      end
+
+      for bad <- [
+            nil,
+            "",
+            "origin:https://verifier.example.com",
+            "https://verifier.example.com/",
+            "https://verifier.example.com:443",
+            "http://localhost:80",
+            "https://verifier.example.com?q=1",
+            "https://user@verifier.example.com",
+            "https://VERIFIER.example.com",
+            "https://verifier.example.com#x",
+            "https://verifier.example.com:65536",
+            "https://[invalid]",
+            "https://verifier%2eexample.com",
+            "https://verifier.example.com\n",
+            <<255>>,
+            :invalid
+          ] do
+        assert {:error, :invalid_context} = Mdoc.session_transcript(dc_api_origin: bad, nonce: ctx.nonce)
+      end
+
+      assert {:error, :invalid_context} = Mdoc.session_transcript(dc_api_origin: "https://example.com")
+      assert {:error, :invalid_context} = Mdoc.session_transcript([:not_a_keyword])
+
+      assert {:error, :invalid_key} =
+               Mdoc.session_transcript(
+                 dc_api_origin: "https://example.com",
+                 nonce: ctx.nonce,
+                 response_encryption_jwk: %{}
+               )
+    end
+
+    test "issuer algorithm acceptance does not broaden device authentication", ctx do
+      transcript = session_transcript(ctx.client_id, ctx.nonce, ctx.response_uri, nil)
+      payload = device_authentication_bytes(transcript, @doc_type, tagged(%{}))
+      holder = JOSE.JWK.from_pem(ctx.holder_pem)
+
+      for alg <- [-35, -36] do
+        signature = CoseFixture.sign1(payload, holder, alg, detached: true)
+        presentation = build_device_response(ctx, device_auth: {"deviceSignature", signature})
+
+        assert {:error, :algorithm_key_mismatch} =
+                 Mdoc.verify_device_response(presentation, context(ctx), ctx.issuer_public,
+                   now: ctx.now,
+                   accepted_algs: ["ES256", "ES384", "ES512"]
+                 )
+      end
+    end
+
+    defp dc_api_transcript(origin, nonce, thumbprint) do
+      digest = :crypto.hash(:sha256, CBOR.encode([origin, nonce, thumbprint]))
+      [nil, nil, ["OpenID4VPDCAPIHandover", bytes(digest)]]
     end
 
     test "missing required context values are rejected", ctx do

@@ -3,6 +3,7 @@ defmodule Attesto.CoseTest do
   use ExUnit.Case, async: true
 
   alias Attesto.Cose
+  alias Attesto.Test.CoseFixture
 
   defp keypair do
     jwk = JOSE.JWK.generate_key({:ec, "P-256"})
@@ -74,6 +75,45 @@ defmodule Attesto.CoseTest do
     signed = Cose.sign1(pem, "payload", [])
 
     assert {:error, :invalid_signature} = Cose.verify1(signed, wrong_public, [])
+  end
+
+  for {alg, name, curve, size} <- [{-35, "ES384", "P-384", 96}, {-36, "ES512", "P-521", 132}] do
+    @alg alg
+    @alg_name name
+    @curve curve
+    @signature_size size
+
+    test "#{name} enforces signature width and verifies the payload", _ctx do
+      key = JOSE.JWK.generate_key({:ec, @curve})
+      public = JOSE.JWK.to_public(key)
+      [protected, headers, payload, signature] = CoseFixture.sign1("payload", key, @alg)
+      assert byte_size(signature.value) == @signature_size
+      opts = [accepted_algs: [@alg_name]]
+      assert {:ok, "payload"} = Cose.verify1(CBOR.encode([protected, headers, payload, signature]), public, opts)
+
+      for invalid <- [binary_part(signature.value, 0, @signature_size - 1), signature.value <> <<0>>] do
+        assert {:error, :invalid_cose} =
+                 Cose.verify1(CBOR.encode([protected, headers, payload, bytes(invalid)]), public, opts)
+      end
+
+      assert {:error, :invalid_signature} =
+               Cose.verify1(CBOR.encode([protected, headers, bytes("tampered"), signature]), public, opts)
+
+      assert {:error, :invalid_signature} =
+               Cose.verify1(
+                 CBOR.encode([protected, headers, payload, bytes(:binary.copy(<<0>>, @signature_size))]),
+                 public,
+                 opts
+               )
+
+      other = JOSE.JWK.generate_key({:ec, @curve})
+
+      assert {:error, :invalid_signature} =
+               Cose.verify1(CBOR.encode([protected, headers, payload, signature]), other, opts)
+
+      detached = "payload" |> CoseFixture.sign1(key, @alg, detached: true) |> CBOR.encode()
+      assert {:error, :unsupported_algorithm} = Cose.verify1_detached(detached, "payload", public, opts)
+    end
   end
 
   test "processes protected crit and rejects unknown critical headers" do

@@ -6,6 +6,21 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.17.0] - 2026-11-12
+
+### Added
+
+- `Attesto.VpToken.verify/2` and `Attesto.Mdoc.session_transcript/1` accept
+  `:dc_api_origin` to select the Digital Credentials API mdoc handover from
+  OpenID4VP 1.0 §B.2.6.2. It binds the exact origin without an `origin:` prefix,
+  nonce, and response encryption key thumbprint when present. Redirect
+  verification remains the default (§B.2.6.1).
+- mdoc issuerAuth verification accepts ES384/P-384 and ES512/P-521 through
+  `:accepted_algs`, following ISO/IEC 18013-5:2021 §9.1.2.4 and RFC 9053 §2.1.
+  ES256 remains the default. Algorithm/curve mismatches return
+  `:algorithm_key_mismatch`, including for validated X.509 leaf keys. Device
+  authentication remains ES256/P-256 only (§9.1.3.6).
+
 ## [2.16.0] - 2026-11-12
 
 ### Fixed

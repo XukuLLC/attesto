@@ -112,8 +112,9 @@ defmodule Attesto.PresentationSession do
   cannot widen that stored policy.
   Query values must be non-empty arrays. `:legacy_scalar_values` is forwarded
   to `Attesto.VpToken.verify/2` only when explicitly supplied by the caller.
-  `:accepted_algs` and `:enforce_fapi_alg_policy` apply to SD-JWT issuer
-  signatures and are also forwarded; holder-binding verification stays separate.
+  `:accepted_algs` applies to SD-JWT and mdoc issuer signatures and is forwarded;
+  mdoc defaults to ES256 and can opt into ES384 and ES512. Holder-binding
+  verification stays separate. `:enforce_fapi_alg_policy` applies only to SD-JWT.
   `:certificate_trust` and `:haip` are forwarded for certificate trust; the
   callback is not stored, and `:haip` defaults to `true`. Certificate anchors
   must be set in `:issuer_trust` at creation. Passing `:trusted_certificates`

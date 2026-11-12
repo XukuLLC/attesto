@@ -3,6 +3,7 @@ defmodule Attesto.VpTokenTest do
   use ExUnit.Case, async: true
 
   alias Attesto.{Cose, JWS, Mdoc, SdJwt, SdJwtVc, VpToken}
+  alias Attesto.Test.CoseFixture
 
   @doc_type "org.iso.18013.5.1.mDL"
   @mdl_namespace "org.iso.18013.5.1"
@@ -379,6 +380,11 @@ defmodule Attesto.VpTokenTest do
       |> Base.url_encode64(padding: false)
     end
 
+    defp mdoc_session_transcript(%{dc_api_origin: origin} = ctx) do
+      info = [origin, ctx.nonce, Map.get(ctx, :jwk_thumbprint)]
+      [nil, nil, ["OpenID4VPDCAPIHandover", mdoc_bytes(:crypto.hash(:sha256, CBOR.encode(info)))]]
+    end
+
     defp mdoc_session_transcript(ctx) do
       handover_info_hash =
         [ctx.client_id, ctx.nonce, nil, ctx.response_uri]
@@ -413,6 +419,146 @@ defmodule Attesto.VpTokenTest do
         },
         Map.new(opts)
       )
+    end
+
+    defp dc_api_mdoc_fixture(overrides \\ []) do
+      {issuer_pem, issuer_jwk} = mdoc_keypair()
+      {holder_pem, holder_jwk} = mdoc_keypair()
+      ctx = mdoc_context([dc_api_origin: "https://verifier.example.com"] ++ overrides)
+      issuer_signed = issue_mdoc(issuer_pem, holder_jwk, ctx.now, %{@mdl_namespace => %{"given_name" => "Jane"}})
+
+      opts = [
+        nonce: ctx.nonce,
+        audience: "origin:" <> ctx.dc_api_origin,
+        dc_api_origin: ctx.dc_api_origin,
+        issuer_jwks: issuer_jwk,
+        formats: %{"mdl" => "mso_mdoc"},
+        now: ctx.now
+      ]
+
+      %{
+        presentation: mdoc_device_response(issuer_signed, holder_pem, ctx),
+        opts: opts,
+        holder_pem: holder_pem,
+        issuer_signed: issuer_signed,
+        context: ctx
+      }
+    end
+
+    test "DC API verifies an independent origin-bound presentation without response_uri" do
+      fixture = dc_api_mdoc_fixture()
+      assert {:ok, %{"mdl" => [result]}} = VpToken.verify(%{"mdl" => [fixture.presentation]}, fixture.opts)
+      assert result.namespaces[@mdl_namespace]["given_name"] == "Jane"
+
+      assert {:error, {"mdl", :invalid_signature}} =
+               VpToken.verify(
+                 %{"mdl" => [fixture.presentation]},
+                 Keyword.put(fixture.opts, :dc_api_origin, "https://other.example.com")
+               )
+
+      assert {:error, {"mdl", :invalid_signature}} =
+               VpToken.verify(%{"mdl" => [fixture.presentation]}, Keyword.put(fixture.opts, :nonce, "other-nonce"))
+    end
+
+    test "DC API and redirect verification refuse presentations from the other flow" do
+      fixture = dc_api_mdoc_fixture()
+
+      redirect =
+        mdoc_device_response(fixture.issuer_signed, fixture.holder_pem, Map.delete(fixture.context, :dc_api_origin))
+
+      redirect_opts =
+        fixture.opts
+        |> Keyword.delete(:dc_api_origin)
+        |> Keyword.put(:audience, fixture.context.client_id)
+        |> Keyword.put(:response_uri, fixture.context.response_uri)
+
+      assert {:ok, _} = VpToken.verify(%{"mdl" => [redirect]}, redirect_opts)
+      assert {:error, {"mdl", :invalid_signature}} = VpToken.verify(%{"mdl" => [redirect]}, fixture.opts)
+      assert {:error, {"mdl", :invalid_signature}} = VpToken.verify(%{"mdl" => [fixture.presentation]}, redirect_opts)
+
+      prefixed_ctx = Map.update!(fixture.context, :dc_api_origin, &("origin:" <> &1))
+      prefixed = mdoc_device_response(fixture.issuer_signed, fixture.holder_pem, prefixed_ctx)
+      assert {:error, {"mdl", :invalid_signature}} = VpToken.verify(%{"mdl" => [prefixed]}, fixture.opts)
+    end
+
+    test "DC API encrypted handover binds the response encryption JWK thumbprint" do
+      {_pem, jwk} = mdoc_keypair()
+      {:ok, thumbprint} = Attesto.Thumbprint.of_jwk(jwk)
+      fixture = dc_api_mdoc_fixture(jwk_thumbprint: mdoc_bytes(Base.url_decode64!(thumbprint, padding: false)))
+      opts = Keyword.put(fixture.opts, :response_encryption_jwk, jwk)
+      assert {:ok, _} = VpToken.verify(%{"mdl" => [fixture.presentation]}, opts)
+
+      {_other_pem, other_jwk} = mdoc_keypair()
+
+      for wrong_opts <- [fixture.opts, Keyword.put(opts, :response_encryption_jwk, other_jwk)] do
+        assert {:error, {"mdl", :invalid_signature}} = VpToken.verify(%{"mdl" => [fixture.presentation]}, wrong_opts)
+      end
+
+      plain =
+        mdoc_device_response(fixture.issuer_signed, fixture.holder_pem, Map.delete(fixture.context, :jwk_thumbprint))
+
+      assert {:error, {"mdl", :invalid_signature}} = VpToken.verify(%{"mdl" => [plain]}, opts)
+    end
+
+    test "DC API options are validated before response parsing or issuer lookup" do
+      fixture = dc_api_mdoc_fixture()
+
+      opts =
+        fixture.opts
+        |> Keyword.delete(:issuer_jwks)
+        |> Keyword.put(:resolve_issuer, fn _ -> flunk("issuer lookup ran") end)
+
+      for origin <- [
+            nil,
+            false,
+            "",
+            "origin:https://verifier.example.com",
+            "https://verifier.example.com/",
+            "https://verifier.example.com:443",
+            "https://verifier.example.com/path",
+            "https://verifier.example.com?q=1",
+            "https://user@verifier.example.com",
+            "https://verifier.example.com#fragment",
+            <<255>>
+          ] do
+        for presentation <- [nil, %{"mdl" => [fixture.presentation]}] do
+          assert_raise ArgumentError, ~r/:dc_api_origin/, fn ->
+            VpToken.verify(presentation, Keyword.put(opts, :dc_api_origin, origin))
+          end
+        end
+      end
+
+      for key <- [%{}, "not a JWK", %{"kty" => "EC"}] do
+        assert_raise ArgumentError, ~r/:response_encryption_jwk/, fn ->
+          VpToken.verify(nil, Keyword.put(opts, :response_encryption_jwk, key))
+        end
+      end
+    end
+
+    for {alg, name, curve} <- [{-35, "ES384", "P-384"}, {-36, "ES512", "P-521"}] do
+      @alg alg
+      @alg_name name
+      @curve curve
+
+      test "VpToken forwards issuer policy for #{@alg_name} and searches mixed-curve key sets" do
+        fixture = dc_api_mdoc_fixture()
+        issuer = JOSE.JWK.generate_key({:ec, @curve})
+        public = issuer |> JOSE.JWK.to_public_map() |> elem(1)
+        issuer_signed = CoseFixture.resign_issuer(fixture.issuer_signed, issuer, @alg)
+        presentation = mdoc_device_response(issuer_signed, fixture.holder_pem, fixture.context)
+        opts = fixture.opts |> Keyword.put(:issuer_jwks, public) |> Keyword.put(:accepted_algs, [@alg_name])
+        assert {:ok, _} = VpToken.verify(%{"mdl" => [presentation]}, opts)
+
+        assert {:error, {"mdl", :unsupported_algorithm}} =
+                 VpToken.verify(%{"mdl" => [presentation]}, Keyword.put(opts, :accepted_algs, ["ES256"]))
+
+        # A P-256 candidate must not stop lookup before the matching curve.
+        candidates = %{"keys" => [Keyword.fetch!(fixture.opts, :issuer_jwks), public]}
+        assert {:ok, _} = VpToken.verify(%{"mdl" => [presentation]}, Keyword.put(opts, :issuer_jwks, candidates))
+
+        wrong_curve = Keyword.put(opts, :issuer_jwks, Keyword.fetch!(fixture.opts, :issuer_jwks))
+        assert {:error, {"mdl", :algorithm_key_mismatch}} = VpToken.verify(%{"mdl" => [presentation]}, wrong_curve)
+      end
     end
 
     defp tamper_mdoc_issuer_item(device_response) do

@@ -18,9 +18,47 @@ if Code.ensure_loaded?(CBOR) do
     ES256 `COSE_Sign1` (detached payload) over `DeviceAuthentication =
     ["DeviceAuthentication", SessionTranscript, DocType,
     DeviceNameSpacesBytes]`, where `SessionTranscript`'s `Handover` is OID4VP's
-    `OpenID4VPHandover` (redirect-flow form, per the OID4VP 1.0 "Handover and
-    SessionTranscript Definitions"). `COSE_Mac0` device authentication is not
-    supported.
+    `OpenID4VPHandover` by default, or `OpenID4VPDCAPIHandover` when
+    `:dc_api_origin` is supplied. `COSE_Mac0` device authentication is not
+    supported. Device signatures and device keys remain ES256/P-256 only.
+
+    ## Handover and issuer algorithms
+
+    [OpenID4VP 1.0 §B.2.6.2](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html#section-b.2.6.2)
+    says of the origin: "It MUST NOT be prefixed with `origin:`." The DC API
+    transcript hashes CBOR `[origin, nonce, jwkThumbprint]`, using a byte-string
+    SHA-256 JWK thumbprint for encrypted responses and `null` otherwise.
+    §2 defines web origins as scheme, host and non-default port; platform
+    application URIs are also permitted. Supply the exact platform origin,
+    without a path or trailing slash for web origins. No normalization occurs.
+    §B.2.6.1 continues to govern the default redirect transcript.
+
+    [ISO/IEC TS 18013-7:2025 §6.4.3.1, Table 1](https://standards.iteh.ai/catalog/standards/iso/fe4f4976-3fc0-4d1e-8d8e-157582eda4fd/iso-iec-ts-18013-7-2025)
+    distinguishes "OID4VP" (Annex B) from "Digital credentials API retrieval"
+    (Annex C). This module implements the OpenID4VP 1.0 handover, not the
+    separate ISO Annex C protocol; ISO §2 references OpenID4VP draft 18.
+
+    [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf#page=57)
+    requires readers to "support all of these signature algorithms and curves".
+    It permits ES256/P-256, ES384/P-384 and ES512/P-521 for issuerAuth.
+    §9.1.3.6 applies these pairings to device signatures too; §9.1.5.2,
+    Table 22 also requires EdDSA and brainpool support from readers. Those
+    additional curves are unimplemented, so this is a subset of ISO reader
+    functionality. §9.1.5.1 defines the underlying session transcript.
+
+    [HAIP 1.0 §7](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-7)
+    specifies ES256 "at a minimum", allowing ecosystem cryptographic suites.
+    It does not prohibit ES384 or ES512 issuer signatures. Its
+    [§5.2](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-5.2)
+    says the verifier "MUST use the Response Mode `dc_api.jwt`"; unencrypted DC API verification
+    here does not satisfy that flow profile. `:haip` controls certificate
+    policy only, not transport compliance.
+
+    Issuer verification accepts ES256 by default for compatibility. Opt into
+    `accepted_algs: ["ES256", "ES384", "ES512"]` on `verify/3`,
+    `verify_device_response/4`, or `Attesto.VpToken.verify/2`. A supported COSE
+    algorithm paired with the wrong EC curve returns `:algorithm_key_mismatch`,
+    including under certificate trust. See `Attesto.Cose` for RFC 9053 details.
 
     `peek_doc_type/1` reads an unverified `docType` out of a `DeviceResponse`
     for issuer-key resolution ahead of verification; see `Attesto.VpToken`.
@@ -59,6 +97,7 @@ if Code.ensure_loaded?(CBOR) do
     """
 
     alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint, X509}
+    alias Attesto.Mdoc.Origin
 
     @clock_skew_seconds NumericDate.default_clock_skew_seconds()
     @digest_algorithm "SHA-256"
@@ -88,7 +127,8 @@ if Code.ensure_loaded?(CBOR) do
           }
 
     @type verify_error ::
-            :digest_mismatch
+            :algorithm_key_mismatch
+            | :digest_mismatch
             | :expired
             | :invalid_cose
             | :invalid_key
@@ -140,6 +180,9 @@ if Code.ensure_loaded?(CBOR) do
     `trusted` is the issuer's public JWK or PEM. Set `:expected_doc_type` to
     bind verification to a requested credential type. A `:now` option may be
     supplied as Unix seconds or a `DateTime` for deterministic clock checks.
+    `:accepted_algs` defaults to `["ES256"]`; it can also include `"ES384"`
+    and `"ES512"`. An empty list denies all issuer algorithms. This option
+    does not change device authentication or issuance.
 
     With `:trusted_certificates` (DER trust anchors), `trusted` may be `nil`
     and is ignored. The issuerAuth unprotected header's `x5chain` (label 33)
@@ -176,6 +219,11 @@ if Code.ensure_loaded?(CBOR) do
     Verifier's public response-encryption key (present only for the
     `direct_post.jwt` Response Mode) and is folded in as the handover's JWK
     thumbprint; omit it for unencrypted `direct_post`.
+
+    Supplying `:dc_api_origin` instead selects the DC API flow. Only that
+    origin and `:nonce` are required; `:client_id` and `:response_uri` do not
+    enter this transcript. Include `:response_encryption_jwk` for `dc_api.jwt`
+    and omit it for `dc_api`. See `session_transcript/1`.
 
     `trusted` and `opts` verify each document's `IssuerSigned` structure
     exactly as in `verify/3` (`:expected_doc_type` and `:now` included).
@@ -248,7 +296,7 @@ if Code.ensure_loaded?(CBOR) do
     defp verify_issuer_signed(issuer_signed, trusted, opts) do
       with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
            {:ok, issuer_key} <- issuer_key(issuer_signed["issuerAuth"], trusted, opts),
-           {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, issuer_key, []),
+           {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, issuer_key, Keyword.take(opts, [:accepted_algs])),
            {:ok, mso} <- decode_embedded(mso_payload),
            {:ok, mso_parts} <- validate_mso(mso),
            :ok <- check_expected_doc_type(mso_parts.doc_type, opts),
@@ -420,6 +468,14 @@ if Code.ensure_loaded?(CBOR) do
     Verifier's public `:response_encryption_jwk`, whose JWK SHA-256 thumbprint
     becomes `jwkThumbprint`; without it `jwkThumbprint` is `null`.
 
+    Supplying `:dc_api_origin` explicitly selects §B.2.6.2's DC API flow:
+    the handover identifier is `"OpenID4VPDCAPIHandover"` and its hashed info
+    is `[origin, nonce, jwkThumbprint]`. The origin must be an exact serialized
+    HTTP(S) origin or a platform application URI, without an `origin:` prefix.
+    Web origins cannot contain a path, query, fragment, credentials, or an
+    explicit default port. The optional key represents `dc_api.jwt`; its
+    absence represents `dc_api`. Both transcript builders are pure functions.
+
     Returns the CBOR data item to pass to `device_authentication_bytes/3`. A
     Wallet signs over it and `verify_device_response/4` rebuilds it from the
     same request values, so both sides derive identical bytes. Errors are
@@ -428,21 +484,42 @@ if Code.ensure_loaded?(CBOR) do
     """
     @spec session_transcript(keyword()) :: {:ok, list()} | {:error, :invalid_context | :invalid_key}
     def session_transcript(context) when is_list(context) do
-      with {:ok, client_id} <- required_context_value(context, :client_id),
-           {:ok, nonce} <- required_context_value(context, :nonce),
-           {:ok, response_uri} <- required_context_value(context, :response_uri),
-           {:ok, jwk_thumbprint} <- handover_jwk_thumbprint(context) do
-        handover_info_hash =
-          [client_id, nonce, jwk_thumbprint, response_uri]
-          |> CBOR.encode()
-          |> then(&:crypto.hash(:sha256, &1))
-          |> bytes()
-
-        {:ok, [nil, nil, ["OpenID4VPHandover", handover_info_hash]]}
+      if Keyword.keyword?(context) do
+        if Keyword.has_key?(context, :dc_api_origin),
+          do: dc_api_session_transcript(context),
+          else: redirect_session_transcript(context)
+      else
+        {:error, :invalid_context}
       end
     end
 
     def session_transcript(_context), do: {:error, :invalid_context}
+
+    defp redirect_session_transcript(context) do
+      with {:ok, client_id} <- required_context_value(context, :client_id),
+           {:ok, nonce} <- required_context_value(context, :nonce),
+           {:ok, response_uri} <- required_context_value(context, :response_uri),
+           {:ok, jwk_thumbprint} <- handover_jwk_thumbprint(context) do
+        handover_transcript("OpenID4VPHandover", [client_id, nonce, jwk_thumbprint, response_uri])
+      end
+    end
+
+    defp dc_api_session_transcript(context) do
+      with {:ok, origin} <- required_context_value(context, :dc_api_origin),
+           true <- Origin.valid?(origin),
+           {:ok, nonce} <- required_context_value(context, :nonce),
+           {:ok, jwk_thumbprint} <- handover_jwk_thumbprint(context) do
+        handover_transcript("OpenID4VPDCAPIHandover", [origin, nonce, jwk_thumbprint])
+      else
+        false -> {:error, :invalid_context}
+        {:error, _reason} = error -> error
+      end
+    end
+
+    defp handover_transcript(identifier, info) do
+      hash = info |> CBOR.encode() |> then(&:crypto.hash(:sha256, &1)) |> bytes()
+      {:ok, [nil, nil, [identifier, hash]]}
+    end
 
     # The verifier's error vocabulary predates the public function: a request
     # context it cannot rebuild the transcript from is an invalid presentation.

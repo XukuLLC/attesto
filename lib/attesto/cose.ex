@@ -3,18 +3,34 @@ if Code.ensure_loaded?(CBOR) do
     @moduledoc """
     Minimal COSE helpers for ISO 18013-5 issuer authentication.
 
-    This slice supports `COSE_Sign1` with ES256 and EC2 P-256 `COSE_Key`
-    conversion. It intentionally does not implement general-purpose COSE.
+    Issuer `COSE_Sign1` verification supports ES256/P-256, ES384/P-384 and
+    ES512/P-521, with `:accepted_algs` defaulting to `["ES256"]`. Signing,
+    detached device verification, and EC2 `COSE_Key` conversion remain
+    ES256/P-256 only. This is not general-purpose COSE.
+
+    [RFC 9053 §2.1, Table 1](https://www.rfc-editor.org/rfc/rfc9053.html#section-2.1)
+    maps COSE -7/-35/-36 to SHA-256/384/512 and suggests, for example,
+    "SHA-384 be used only with curve P-384". Attesto enforces all three
+    recommended pairings strictly, returning `:algorithm_key_mismatch`
+    before signature verification for a different EC curve. The raw ECDSA
+    signature is two fixed-width integers: 32, 48 or 66 bytes each. P-521
+    therefore uses a 132-byte signature with SHA-512. See `Attesto.Mdoc`
+    for ISO/IEC 18013-5 and HAIP requirements and the unsupported curves.
     """
 
     alias Attesto.{Key, SigningAlg}
 
     @alg_es256 -7
     @coordinate_bytes 32
-    @ecdsa_signature_bytes 64
+    @algorithms %{
+      -7 => %{name: "ES256", curve: "P-256", hash: :sha256, coordinate_bytes: 32},
+      -35 => %{name: "ES384", curve: "P-384", hash: :sha384, coordinate_bytes: 48},
+      -36 => %{name: "ES512", curve: "P-521", hash: :sha512, coordinate_bytes: 66}
+    }
 
     @type verify_error ::
-            :invalid_cose
+            :algorithm_key_mismatch
+            | :invalid_cose
             | :invalid_key
             | :invalid_signature
             | :unsupported_algorithm
@@ -45,17 +61,24 @@ if Code.ensure_loaded?(CBOR) do
     end
 
     @doc """
-    Verify an ES256 `COSE_Sign1` against a supplied public JWK or PEM.
+    Verify an ECDSA `COSE_Sign1` against a supplied public JWK or PEM.
 
     Returns the signed payload byte string without decoding it.
+    `:accepted_algs` defaults to `["ES256"]`; supported additional values are
+    `"ES384"` and `"ES512"`. A disallowed or unknown algorithm returns
+    `:unsupported_algorithm`. A supported algorithm with a different EC curve
+    returns `:algorithm_key_mismatch`, regardless of the acceptance policy.
     """
     @spec verify1(binary(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
             {:ok, binary()} | {:error, verify_error()}
     def verify1(cose_sign1_bytes, jwk_or_pem, opts) when is_binary(cose_sign1_bytes) and is_list(opts) do
       with {:ok, protected, unprotected, payload, signature} <- decode_sign1(cose_sign1_bytes),
-           :ok <- validate_protected(protected, unprotected),
+           {:ok, algorithm} <- validate_protected(protected, unprotected),
            {:ok, jwk} <- verification_jwk(jwk_or_pem),
-           true <- verify_signature(jwk, protected, payload, signature) do
+           :ok <- validate_pairing(jwk, algorithm),
+           :ok <- accepted_algorithm(algorithm, Keyword.get(opts, :accepted_algs, ["ES256"])),
+           :ok <- validate_signature_length(signature, algorithm),
+           true <- verify_signature(jwk, protected, payload, signature, algorithm) do
         {:ok, payload}
       else
         false -> {:error, :invalid_signature}
@@ -106,9 +129,12 @@ if Code.ensure_loaded?(CBOR) do
     def verify1_detached(cose_sign1_bytes, external_payload, jwk_or_pem, opts)
         when is_binary(cose_sign1_bytes) and is_binary(external_payload) and is_list(opts) do
       with {:ok, protected, unprotected, signature} <- decode_detached_sign1(cose_sign1_bytes),
-           :ok <- validate_protected(protected, unprotected),
+           {:ok, algorithm} <- validate_protected(protected, unprotected),
            {:ok, jwk} <- verification_jwk(jwk_or_pem),
-           true <- verify_signature(jwk, protected, external_payload, signature) do
+           :ok <- validate_pairing(jwk, algorithm),
+           :ok <- accepted_algorithm(algorithm, ["ES256"]),
+           :ok <- validate_signature_length(signature, algorithm),
+           true <- verify_signature(jwk, protected, external_payload, signature, algorithm) do
         :ok
       else
         false -> {:error, :invalid_signature}
@@ -172,8 +198,7 @@ if Code.ensure_loaded?(CBOR) do
       with {:ok, [protected_value, unprotected, nil, signature_value]} <- decode_complete(encoded),
            true <- plain_map?(unprotected),
            {:ok, protected} <- byte_string(protected_value),
-           {:ok, signature} <- byte_string(signature_value),
-           true <- byte_size(signature) == @ecdsa_signature_bytes do
+           {:ok, signature} <- byte_string(signature_value) do
         {:ok, protected, unprotected, signature}
       else
         _other -> {:error, :invalid_cose}
@@ -185,8 +210,7 @@ if Code.ensure_loaded?(CBOR) do
            true <- plain_map?(unprotected),
            {:ok, protected} <- byte_string(protected_value),
            {:ok, payload} <- byte_string(payload_value),
-           {:ok, signature} <- byte_string(signature_value),
-           true <- byte_size(signature) == @ecdsa_signature_bytes do
+           {:ok, signature} <- byte_string(signature_value) do
         {:ok, protected, unprotected, payload, signature}
       else
         _other -> {:error, :invalid_cose}
@@ -197,8 +221,9 @@ if Code.ensure_loaded?(CBOR) do
       with {:ok, header} <- decode_complete(protected),
            true <- plain_map?(header),
            :ok <- validate_header_locations(header, unprotected),
-           :ok <- validate_algorithm(header) do
-        validate_critical_headers(header)
+           {:ok, algorithm} <- validate_algorithm(header),
+           :ok <- validate_critical_headers(header) do
+        {:ok, algorithm}
       else
         {:error, _reason} = error -> error
         _other -> {:error, :invalid_cose}
@@ -217,9 +242,27 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
-    defp validate_algorithm(%{1 => @alg_es256}), do: :ok
+    defp validate_algorithm(%{1 => alg}) when is_map_key(@algorithms, alg), do: {:ok, Map.fetch!(@algorithms, alg)}
     defp validate_algorithm(header) when is_map_key(header, 1), do: {:error, :unsupported_algorithm}
     defp validate_algorithm(_header), do: {:error, :invalid_cose}
+
+    defp accepted_algorithm(algorithm, accepted) when is_list(accepted) do
+      if algorithm.name in accepted, do: :ok, else: {:error, :unsupported_algorithm}
+    end
+
+    defp accepted_algorithm(_algorithm, _accepted), do: {:error, :unsupported_algorithm}
+
+    defp validate_pairing(jwk, algorithm) do
+      case public_jwk_map(jwk) do
+        %{"kty" => "EC", "crv" => curve} when curve == algorithm.curve -> :ok
+        %{"kty" => "EC"} -> {:error, :algorithm_key_mismatch}
+        _other -> {:error, :invalid_key}
+      end
+    end
+
+    defp validate_signature_length(signature, algorithm) do
+      if byte_size(signature) == 2 * algorithm.coordinate_bytes, do: :ok, else: {:error, :invalid_cose}
+    end
 
     defp validate_critical_headers(header) do
       case Map.fetch(header, 2) do
@@ -280,18 +323,21 @@ if Code.ensure_loaded?(CBOR) do
     defp verification_jwk(_other), do: {:error, :invalid_key}
 
     defp validate_verification_jwk(%JOSE.JWK{} = jwk) do
-      if SigningAlg.infer(jwk) == "ES256", do: {:ok, jwk}, else: {:error, :invalid_key}
+      case public_jwk_map(jwk) do
+        %{"kty" => "EC", "crv" => _curve} -> {:ok, jwk}
+        _other -> {:error, :invalid_key}
+      end
     rescue
       _error -> {:error, :invalid_key}
     end
 
     defp validate_verification_jwk(_other), do: {:error, :invalid_key}
 
-    defp verify_signature(jwk, protected, payload, raw_signature) do
+    defp verify_signature(jwk, protected, payload, raw_signature, algorithm) do
       :public_key.verify(
         signature_structure(protected, payload),
-        :sha256,
-        raw_to_der(raw_signature),
+        algorithm.hash,
+        raw_to_der(raw_signature, algorithm.coordinate_bytes),
         public_key(jwk)
       )
     rescue
@@ -320,7 +366,9 @@ if Code.ensure_loaded?(CBOR) do
       <<r::unsigned-big-size(256), s::unsigned-big-size(256)>>
     end
 
-    defp raw_to_der(<<r::unsigned-big-size(256), s::unsigned-big-size(256)>>) do
+    defp raw_to_der(signature, coordinate_bytes) do
+      r = signature |> binary_part(0, coordinate_bytes) |> :binary.decode_unsigned()
+      s = signature |> binary_part(coordinate_bytes, coordinate_bytes) |> :binary.decode_unsigned()
       :public_key.der_encode(:"ECDSA-Sig-Value", {:"ECDSA-Sig-Value", r, s})
     end
 

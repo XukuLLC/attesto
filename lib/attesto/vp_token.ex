@@ -32,15 +32,32 @@ defmodule Attesto.VpToken do
   An `mso_mdoc` entry additionally needs `:response_uri` — the OID4VP
   `response_uri` the wallet's `DeviceResponse` was bound to via its
   `OpenID4VPHandover` `SessionTranscript`. `:audience` doubles as the
-  handover's `client_id` and the shared `:nonce` as its nonce. Only
-  unencrypted `direct_post` is supported (the handover's JWK thumbprint is
-  always `nil`). SD-JWT-VC-only callers never need `:response_uri`; it is
+  handover's `client_id` and the shared `:nonce` as its nonce. The optional
+  `:response_encryption_jwk` binds encrypted responses to the encryption key.
+  SD-JWT-VC-only callers never need `:response_uri`; it is
   required only when the `vp_token` actually contains an `mso_mdoc` entry.
+
+  Set `:dc_api_origin` to select the mdoc Digital Credentials API flow instead.
+  It takes the exact platform origin, without an `origin:` prefix; serialized
+  HTTP(S) origins omit paths, trailing slashes and default ports. Platform
+  application URIs are also supported. `:response_uri` and `:audience` do not
+  enter the mdoc DC API transcript. `:audience` remains required and is still
+  used directly for SD-JWT Key Binding JWTs (use `"origin:" <> origin` for
+  those in a DC API response). Invalid DC API origin/key options raise before
+  response parsing or issuer resolution. Omit `:response_encryption_jwk` for
+  `dc_api`; supply the actual response encryption public key for `dc_api.jwt`.
+
+  [OpenID4VP 1.0 §B.2.6.2](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html#section-b.2.6.2)
+  requires `"OpenID4VPDCAPIHandover"` for this transcript. The full rules,
+  source quotations and HAIP §5.2 encryption requirement are documented in
+  `Attesto.Mdoc`. This function verifies presentations after the host has
+  decrypted any response envelope; it does not invoke the browser API.
   """
 
   # `Attesto.Mdoc` is referenced fully-qualified inside a `Code.ensure_loaded?/1`
   # guard (mdoc needs the optional `:cbor` dep), so it is deliberately not aliased.
   alias Attesto.{JWS, MapParams, PresentationRequest, SdJwt, SdJwtVc}
+  alias Attesto.Mdoc.Origin
   alias Attesto.VpToken.Query
 
   @separator "~"
@@ -89,8 +106,10 @@ defmodule Attesto.VpToken do
   `docType` (see `Attesto.Mdoc`). Certificate validity uses the system clock.
   The optional `:now` value is passed to both the VC/mdoc and holder-binding
   verifiers. See the moduledoc for `:formats` and `:response_uri`.
-  `:accepted_algs` and `:enforce_fapi_alg_policy` are forwarded to SD-JWT
-  issuer verification only, independently of the holder Key Binding JWT.
+  `:accepted_algs` is forwarded to SD-JWT and mdoc issuer verification,
+  independently of holder authentication. For mdoc it defaults to `["ES256"]`
+  and can include `"ES384"` and `"ES512"`, with strict EC curve pairing.
+  `:enforce_fapi_alg_policy` applies only to SD-JWT issuer verification.
   `:expected_query_ids` identifies individually required entries;
   `:permitted_query_ids` can include optional requested entries.
   `:required_credential_sets` carries DCQL's AND-of-ORs response rule as a list
@@ -140,6 +159,7 @@ defmodule Attesto.VpToken do
     opts = MapParams.ensure_keyword!(opts)
     nonce = required_option!(opts, :nonce)
     audience = required_option!(opts, :audience)
+    validate_dc_api_options!(opts)
     issuer_source = issuer_source!(opts)
     formats = formats!(opts)
     query = Query.normalize!(opts)
@@ -635,7 +655,7 @@ defmodule Attesto.VpToken do
           {:ok, _other} ->
             {:halt, {:error, :invalid_mdoc}}
 
-          {:error, reason} when reason in [:invalid_key, :invalid_signature] ->
+          {:error, reason} when reason in [:invalid_key, :invalid_signature, :algorithm_key_mismatch] ->
             {:cont, remember_mdoc_candidate_error(candidate_error, reason)}
 
           {:error, reason} ->
@@ -653,7 +673,11 @@ defmodule Attesto.VpToken do
     defp mdoc_key_candidates(_other), do: []
 
     defp remember_mdoc_candidate_error(:no_candidate, reason), do: {:error, reason}
-    defp remember_mdoc_candidate_error({:error, :invalid_key}, :invalid_signature), do: {:error, :invalid_signature}
+    defp remember_mdoc_candidate_error(_error, :invalid_signature), do: {:error, :invalid_signature}
+
+    defp remember_mdoc_candidate_error({:error, :invalid_key}, :algorithm_key_mismatch),
+      do: {:error, :algorithm_key_mismatch}
+
     defp remember_mdoc_candidate_error(error, _reason), do: error
 
     defp finalize_mdoc_candidate_result(:no_candidate), do: {:error, :invalid_signature}
@@ -680,6 +704,33 @@ defmodule Attesto.VpToken do
   end
 
   defp mdoc_context(nonce, audience, opts) do
+    if Keyword.has_key?(opts, :dc_api_origin) do
+      {:ok, [nonce: nonce] ++ Keyword.take(opts, [:dc_api_origin, :response_encryption_jwk])}
+    else
+      redirect_mdoc_context(nonce, audience, opts)
+    end
+  end
+
+  defp validate_dc_api_options!(opts) do
+    if Keyword.has_key?(opts, :dc_api_origin) do
+      if !Origin.valid?(Keyword.get(opts, :dc_api_origin)) do
+        raise ArgumentError, ":dc_api_origin must be an unprefixed serialized web origin or platform application URI"
+      end
+
+      case Keyword.get(opts, :response_encryption_jwk) do
+        nil -> :ok
+        jwk -> validate_dc_api_encryption_key!(jwk)
+      end
+    end
+  end
+
+  defp validate_dc_api_encryption_key!(jwk) do
+    if !match?({:ok, _thumbprint}, Attesto.Thumbprint.of_jwk(jwk)) do
+      raise ArgumentError, ":response_encryption_jwk must have a computable JWK thumbprint"
+    end
+  end
+
+  defp redirect_mdoc_context(nonce, audience, opts) do
     case Keyword.get(opts, :response_uri) do
       response_uri when is_binary(response_uri) and response_uri != "" ->
         context = [client_id: audience, nonce: nonce, response_uri: response_uri]
