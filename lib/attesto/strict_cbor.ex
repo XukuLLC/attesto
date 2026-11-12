@@ -91,10 +91,10 @@ if Code.ensure_loaded?(CBOR) do
     end
 
     # Major type 5: maps.
-    defp item(<<5::3, 31::5, rest::binary>>, depth), do: pairs_until_break(rest, depth - 1, MapSet.new())
+    defp item(<<5::3, 31::5, rest::binary>>, depth), do: pairs_until_break(rest, depth - 1, %{})
 
     defp item(<<5::3, info::5, rest::binary>>, depth) do
-      with {:ok, count, rest} <- argument(info, rest), do: pairs(rest, count, depth - 1, MapSet.new())
+      with {:ok, count, rest} <- argument(info, rest), do: pairs(rest, count, depth - 1, %{})
     end
 
     # Major type 6: a tag and the one item it applies to.
@@ -168,9 +168,9 @@ if Code.ensure_loaded?(CBOR) do
       with {:ok, after_key} <- item(bytes, depth),
            key_bytes = binary_part(bytes, 0, byte_size(bytes) - byte_size(after_key)),
            {:ok, key, ""} <- CBOR.decode(key_bytes),
-           false <- MapSet.member?(seen, key),
+           false <- is_map_key(seen, key),
            {:ok, rest} <- item(after_key, depth) do
-        {:ok, rest, MapSet.put(seen, key)}
+        {:ok, rest, Map.put(seen, key, true)}
       else
         _other -> :error
       end
