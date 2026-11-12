@@ -13,6 +13,11 @@ defmodule Attesto.VpToken do
   `cnf.jwk` or a valid Key Binding JWT cannot satisfy an OID4VP request. mdoc
   presentations carry their own device-signature binding instead.
 
+  Issuer trust comes from exactly one of `:issuer_jwks`, `:resolve_issuer`, or
+  `:trusted_certificates`. Certificate trust delegates chain validation to the
+  credential verifier and uses the validated leaf key without key lookup or
+  fallback. `:certificate_trust` adds host policy; `:haip` defaults to `true`.
+
   ## Format dispatch
 
   Each query ID's format is resolved via the optional `:formats` option — a
@@ -59,13 +64,30 @@ defmodule Attesto.VpToken do
 
   @type verify_result :: {:ok, map()} | {:error, term()}
 
+  @type issuer_trust ::
+          {:issuer_jwks, map() | list()}
+          | {:resolve_issuer, (String.t() -> term())}
+          | {:trusted_certificates, [binary()]}
+
+  @type certificate_option ::
+          {:certificate_trust, ([binary()] -> :ok | {:error, term()})}
+          | {:haip, boolean()}
+
   @doc """
   Verify an OID4VP `vp_token` carrying SD-JWT VC and/or `mso_mdoc` presentations.
 
   Required options are `:nonce`, `:audience`, and exactly one issuer trust
-  source: `:issuer_jwks` for static issuer keys or `:resolve_issuer` for a
-  callback receiving the presentation's (unverified) issuer identity. The
-  optional `:now` value is passed to both the VC/mdoc and holder-binding
+  source: `:issuer_jwks` for static issuer keys, `:resolve_issuer` for a
+  callback receiving the presentation's (unverified) issuer identity, or
+  `:trusted_certificates` for a non-empty list of DER trust-anchor binaries.
+  Certificate trust verifies each SD-JWT VC's `x5c` or mdoc's `x5chain` and
+  uses only the validated leaf key, with no issuer-key lookup or fallback.
+  `:certificate_trust` is an optional additional chain-policy callback (see
+  `Attesto.X509.verify/2`); `:haip` is a boolean, defaulting to `true`, which
+  refuses self-signed leaves and chains containing a configured anchor.
+  SD-JWT VC also binds the leaf to `iss`; mdoc does not bind certificates to
+  `docType` (see `Attesto.Mdoc`). Certificate validity uses the system clock.
+  The optional `:now` value is passed to both the VC/mdoc and holder-binding
   verifiers. See the moduledoc for `:formats` and `:response_uri`.
   `:accepted_algs` and `:enforce_fapi_alg_policy` are forwarded to SD-JWT
   issuer verification only, independently of the holder Key Binding JWT.
@@ -245,7 +267,7 @@ defmodule Attesto.VpToken do
   end
 
   defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts) do
-    verify_opts = Keyword.take(opts, [:now, :accepted_algs, :enforce_fapi_alg_policy])
+    verify_opts = Keyword.take(opts, [:now, :accepted_algs, :enforce_fapi_alg_policy, :certificate_trust, :haip])
 
     ctx = %{
       formats: formats,
@@ -507,6 +529,15 @@ defmodule Attesto.VpToken do
     end
   end
 
+  defp verify_one(presentation, {:certificates, anchors}, verify_opts, binding_opts) do
+    opts = Keyword.put(verify_opts, :trusted_certificates, anchors)
+
+    with {:ok, verified} <- SdJwtVc.verify(presentation, nil, opts),
+         :ok <- verify_holder_binding(verified, binding_opts) do
+      {:ok, verified}
+    end
+  end
+
   defp verify_holder_binding(%{cnf: %{"jwk" => holder_jwk}} = verified, binding_opts) when is_map(holder_jwk) do
     SdJwt.verify_key_binding(verified, holder_jwk, binding_opts)
   end
@@ -576,6 +607,16 @@ defmodule Attesto.VpToken do
       with {:ok, doc_type} <- Attesto.Mdoc.peek_doc_type(presentation),
            {:ok, jwks} <- resolve_mdoc_issuer_jwks(doc_type, resolver) do
         verify_mdoc_with_keys(presentation, mdoc_context, jwks, verify_opts)
+      end
+    end
+
+    defp verify_mdoc_one(presentation, {:certificates, anchors}, mdoc_context, verify_opts) do
+      opts = Keyword.put(verify_opts, :trusted_certificates, anchors)
+
+      case Attesto.Mdoc.verify_device_response(presentation, mdoc_context, nil, opts) do
+        {:ok, [document]} -> {:ok, safe_mdoc_result(document)}
+        {:ok, _other} -> {:error, :invalid_mdoc}
+        {:error, _reason} = error -> error
       end
     end
 
@@ -694,17 +735,14 @@ defmodule Attesto.VpToken do
   defp issuer_source!(opts) do
     has_static = Keyword.has_key?(opts, :issuer_jwks)
     has_resolver = Keyword.has_key?(opts, :resolve_issuer)
+    has_certificates = Keyword.has_key?(opts, :trusted_certificates)
 
-    case {has_static, has_resolver} do
-      {true, true} ->
+    case {has_static, has_resolver, has_certificates} do
+      {false, false, false} ->
         raise ArgumentError,
-              "Attesto.VpToken.verify/2 accepts exactly one of :issuer_jwks or :resolve_issuer"
+              "Attesto.VpToken.verify/2 requires :issuer_jwks or :resolve_issuer or :trusted_certificates"
 
-      {false, false} ->
-        raise ArgumentError,
-              "Attesto.VpToken.verify/2 requires :issuer_jwks or :resolve_issuer"
-
-      {true, false} ->
+      {true, false, false} ->
         jwks = Keyword.fetch!(opts, :issuer_jwks)
 
         if is_map(jwks) or is_list(jwks) do
@@ -714,7 +752,7 @@ defmodule Attesto.VpToken do
                 "Attesto.VpToken :issuer_jwks must be a JWK map or list; got #{inspect(jwks)}"
         end
 
-      {false, true} ->
+      {false, true, false} ->
         resolver = Keyword.fetch!(opts, :resolve_issuer)
 
         if is_function(resolver, 1) do
@@ -723,8 +761,37 @@ defmodule Attesto.VpToken do
           raise ArgumentError,
                 "Attesto.VpToken :resolve_issuer must be a unary function; got #{inspect(resolver)}"
         end
+
+      {false, false, true} ->
+        certificate_source!(opts)
+
+      _multiple ->
+        raise ArgumentError,
+              "Attesto.VpToken.verify/2 accepts exactly one of :issuer_jwks or :resolve_issuer or :trusted_certificates"
     end
   end
+
+  defp certificate_source!(opts) do
+    anchors = Keyword.fetch!(opts, :trusted_certificates)
+
+    if anchors == [] or not certificate_binaries?(anchors) do
+      raise ArgumentError, "Attesto.VpToken :trusted_certificates must be a non-empty list of DER binaries"
+    end
+
+    if !is_boolean(Keyword.get(opts, :haip, true)) do
+      raise ArgumentError, "Attesto.VpToken :haip must be a boolean"
+    end
+
+    if !(is_nil(Keyword.get(opts, :certificate_trust)) or is_function(Keyword.get(opts, :certificate_trust), 1)) do
+      raise ArgumentError, "Attesto.VpToken :certificate_trust must be a unary function"
+    end
+
+    {:certificates, anchors}
+  end
+
+  defp certificate_binaries?([]), do: true
+  defp certificate_binaries?([anchor | rest]) when is_binary(anchor), do: certificate_binaries?(rest)
+  defp certificate_binaries?(_anchors), do: false
 
   defp formats!(opts) do
     case Keyword.fetch(opts, :formats) do

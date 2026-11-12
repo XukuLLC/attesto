@@ -17,9 +17,10 @@ defmodule Attesto.PresentationSession do
 
   A `{:resolve_issuer, fun}` trust source contains an in-memory function and is
   therefore suitable only for in-memory stores such as the bundled ETS store.
-  Persistent stores must use static `{:issuer_jwks, jwks}` trust material (or
-  define their own serializable trust-reference convention outside this core
-  primitive).
+  Persistent stores can use static `{:issuer_jwks, jwks}` or
+  `{:trusted_certificates, anchors}` trust material: DER certificate binaries
+  are serializable. Both are validated on create and load. The optional
+  `:certificate_trust` callback is supplied to `verify_response/4`, never stored.
 
   DCQL alternatives can be stored in `:required_credential_sets` as an
   AND-of-ORs list. Each outer element is a required Credential Set Query and
@@ -42,7 +43,10 @@ defmodule Attesto.PresentationSession do
 
   @default_ttl_seconds 300
 
-  @type issuer_trust :: {:issuer_jwks, map() | list()} | {:resolve_issuer, (String.t() -> term())}
+  @type issuer_trust ::
+          {:issuer_jwks, map() | list()}
+          | {:resolve_issuer, (String.t() -> term())}
+          | {:trusted_certificates, [binary()]}
 
   @type create_attrs :: %{
           required(:audience) => String.t(),
@@ -63,6 +67,8 @@ defmodule Attesto.PresentationSession do
   The returned `id` is both the store key and the request's `state`; `nonce`
   belongs in the presentation request. Options are `:ttl` (default
   `#{@default_ttl_seconds}` seconds) and `:now` (a clock override).
+  `:issuer_trust` accepts static keys, a resolver, or a non-empty list of DER
+  trust-anchor binaries, using the tagged tuples in `t:issuer_trust/0`.
   """
   @spec create(module(), create_attrs(), keyword()) ::
           {:ok, %{id: String.t(), nonce: String.t()}} | {:error, :invalid_attrs}
@@ -108,6 +114,11 @@ defmodule Attesto.PresentationSession do
   to `Attesto.VpToken.verify/2` only when explicitly supplied by the caller.
   `:accepted_algs` and `:enforce_fapi_alg_policy` apply to SD-JWT issuer
   signatures and are also forwarded; holder-binding verification stays separate.
+  `:certificate_trust` and `:haip` are forwarded for certificate trust; the
+  callback is not stored, and `:haip` defaults to `true`. Certificate anchors
+  must be set in `:issuer_trust` at creation. Passing `:trusted_certificates`
+  here, or passing `:issuer_jwks` / `:resolve_issuer` for a certificate-trust
+  session, raises `ArgumentError` rather than silently ignoring a trust source.
   """
   @spec verify_response(module(), correlation(), map(), keyword()) ::
           {:ok, map()}
@@ -330,7 +341,14 @@ defmodule Attesto.PresentationSession do
 
   defp valid_issuer_trust?({:issuer_jwks, jwks}), do: is_map(jwks) or is_list(jwks)
   defp valid_issuer_trust?({:resolve_issuer, resolver}), do: is_function(resolver, 1)
+
+  defp valid_issuer_trust?({:trusted_certificates, anchors}), do: anchors != [] and certificate_binaries?(anchors)
+
   defp valid_issuer_trust?(_issuer_trust), do: false
+
+  defp certificate_binaries?([]), do: true
+  defp certificate_binaries?([anchor | rest]) when is_binary(anchor), do: certificate_binaries?(rest)
+  defp certificate_binaries?(_anchors), do: false
 
   defp non_empty_string?(value), do: is_binary(value) and value != ""
 
@@ -414,6 +432,13 @@ defmodule Attesto.PresentationSession do
   defp valid_optional_field?(data, key, validator), do: Record.optional_field?(data, key, validator)
 
   defp verify(vp_token, data, opts) do
+    runtime_keys? = Keyword.has_key?(opts, :issuer_jwks) or Keyword.has_key?(opts, :resolve_issuer)
+
+    if Keyword.has_key?(opts, :trusted_certificates) or
+         (match?({:trusted_certificates, _anchors}, data.issuer_trust) and runtime_keys?) do
+      raise ArgumentError, "Attesto.PresentationSession issuer trust must be set only in :issuer_trust at creation"
+    end
+
     verify_opts =
       [
         nonce: data.nonce,
@@ -427,7 +452,15 @@ defmodule Attesto.PresentationSession do
       |> Keyword.merge(permitted_query_ids_opts(data))
       |> Keyword.merge(required_credential_sets_opts(data))
       |> Keyword.merge(
-        Keyword.take(opts, [:now, :formats, :legacy_scalar_values, :accepted_algs, :enforce_fapi_alg_policy])
+        Keyword.take(opts, [
+          :now,
+          :formats,
+          :legacy_scalar_values,
+          :accepted_algs,
+          :enforce_fapi_alg_policy,
+          :certificate_trust,
+          :haip
+        ])
       )
 
     case VpToken.verify(vp_token, verify_opts) do
@@ -438,6 +471,7 @@ defmodule Attesto.PresentationSession do
 
   defp issuer_trust_opts({:issuer_jwks, jwks}), do: [issuer_jwks: jwks]
   defp issuer_trust_opts({:resolve_issuer, resolver}), do: [resolve_issuer: resolver]
+  defp issuer_trust_opts({:trusted_certificates, anchors}), do: [trusted_certificates: anchors]
 
   defp response_uri_opts(%{response_uri: response_uri}), do: [response_uri: response_uri]
   defp response_uri_opts(_data), do: []

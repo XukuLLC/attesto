@@ -24,9 +24,41 @@ if Code.ensure_loaded?(CBOR) do
 
     `peek_doc_type/1` reads an unverified `docType` out of a `DeviceResponse`
     for issuer-key resolution ahead of verification; see `Attesto.VpToken`.
+
+    ## Certificate trust
+
+    With `:trusted_certificates`, issuer authentication validates the leaf-first
+    `x5chain` in issuerAuth's unprotected header (COSE label 33), then uses only
+    that leaf's public key. The following text informs this path:
+
+    * [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf)
+      places the MSO signing certificate in `x5chain` as an "unprotected header
+      element". §9.3.3 requires "RFC 5280, section 6.1 basic path validation";
+      §9.3.1 steps 1–2 use the validated certificate key for issuerAuth.
+      Annex B.1.1 puts the document signer first and excludes the IACA root.
+    * [HAIP 1.0 §3.4](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-3.4)
+      leaves "authorization of an Issuer to issue certain types of credentials"
+      outside its scope. Its §6.1.1 issuer-key rules explicitly concern SD-JWT
+      VC. Attesto also defaults mdoc to `haip: true`, refusing a self-signed
+      leaf or an embedded configured anchor. `haip: false` disables these two
+      restrictions while retaining path validation.
+
+    There is no docType-to-certificate-name binding in these provisions.
+    §9.3.1 step 4 binds the MSO's docType to the presented document's docType,
+    which `verify_device_response/4` checks. Requested types are constrained
+    separately by `:expected_doc_type` or `Attesto.VpToken`'s DCQL checks.
+    Trust in a certificate does not itself establish authorization for every
+    document type; hosts supply their ecosystem's authorization policy.
+
+    This path uses `Attesto.X509` with `purpose: :mdoc_issuer`, recognizing the
+    critical document-signer extended key usage. It does not implement every
+    ISO certificate-profile rule: IACA country/state matching, revocation,
+    and the MSO signing-time check against certificate validity remain outside
+    this path. Hosts can add certificate policy via `:certificate_trust`.
+    No certificate or revocation data is fetched.
     """
 
-    alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint}
+    alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint, X509}
 
     @clock_skew_seconds NumericDate.default_clock_skew_seconds()
     @digest_algorithm "SHA-256"
@@ -66,6 +98,7 @@ if Code.ensure_loaded?(CBOR) do
             | :unauthorized_device_element
             | :unexpected_doc_type
             | :unsupported_algorithm
+            | X509.verify_error()
 
     @typedoc """
     What the issuer authorized the device key to sign, from the MSO's
@@ -107,8 +140,18 @@ if Code.ensure_loaded?(CBOR) do
     `trusted` is the issuer's public JWK or PEM. Set `:expected_doc_type` to
     bind verification to a requested credential type. A `:now` option may be
     supplied as Unix seconds or a `DateTime` for deterministic clock checks.
+
+    With `:trusted_certificates` (DER trust anchors), `trusted` may be `nil`
+    and is ignored. The issuerAuth unprotected header's `x5chain` (label 33)
+    must contain a DER byte string or a non-empty array of DER byte strings,
+    leaf first. `Attesto.X509.verify/2` validates it with `purpose: :mdoc_issuer`
+    before the signature is checked with the leaf key alone. Missing or
+    malformed chains return `:invalid_certificate`; path and policy errors
+    propagate from `Attesto.X509`. There is no fallback to `trusted`.
+    `:haip` defaults to `true`; `:certificate_trust` optionally adds host policy.
+    Certificate validity uses the system clock, independently of `:now`.
     """
-    @spec verify(binary(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
+    @spec verify(binary(), JOSE.JWK.t() | map() | String.t() | nil, keyword()) ::
             {:ok, verified()} | {:error, verify_error()}
     def verify(input, trusted, opts \\ [])
 
@@ -150,7 +193,7 @@ if Code.ensure_loaded?(CBOR) do
 
     Returns one verified result per document in the `DeviceResponse`.
     """
-    @spec verify_device_response(binary(), keyword(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
+    @spec verify_device_response(binary(), keyword(), JOSE.JWK.t() | map() | String.t() | nil, keyword()) ::
             {:ok, [verified_presentation()]} | {:error, verify_error()}
     def verify_device_response(device_response, context, trusted, opts \\ [])
 
@@ -204,7 +247,8 @@ if Code.ensure_loaded?(CBOR) do
 
     defp verify_issuer_signed(issuer_signed, trusted, opts) do
       with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
-           {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, trusted, []),
+           {:ok, issuer_key} <- issuer_key(issuer_signed["issuerAuth"], trusted, opts),
+           {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, issuer_key, []),
            {:ok, mso} <- decode_embedded(mso_payload),
            {:ok, mso_parts} <- validate_mso(mso),
            :ok <- check_expected_doc_type(mso_parts.doc_type, opts),
@@ -221,6 +265,38 @@ if Code.ensure_loaded?(CBOR) do
          }}
       end
     end
+
+    defp issuer_key(issuer_auth, trusted, opts) do
+      if Keyword.has_key?(opts, :trusted_certificates) do
+        trust_opts = opts |> Keyword.put_new(:haip, true) |> Keyword.put(:purpose, :mdoc_issuer)
+
+        with {:ok, chain} <- issuer_x5chain(issuer_auth),
+             {:ok, verified} <- X509.verify(chain, trust_opts) do
+          {:ok, verified.public_key}
+        end
+      else
+        {:ok, trusted}
+      end
+    end
+
+    defp issuer_x5chain([_protected, %{33 => chain}, _payload, _signature]), do: decode_x5chain(chain)
+    defp issuer_x5chain(_issuer_auth), do: {:error, :invalid_certificate}
+
+    defp decode_x5chain(%CBOR.Tag{tag: :bytes} = certificate), do: decode_x5chain([certificate])
+
+    defp decode_x5chain(chain) when is_list(chain) and length(chain) in 1..8 do
+      if Enum.all?(chain, &certificate_bytes?/1) do
+        {:ok, Enum.map(chain, & &1.value)}
+      else
+        {:error, :invalid_certificate}
+      end
+    end
+
+    defp decode_x5chain(_chain), do: {:error, :invalid_certificate}
+
+    defp certificate_bytes?(%CBOR.Tag{tag: :bytes, value: der}) when is_binary(der), do: byte_size(der) in 1..65_536
+
+    defp certificate_bytes?(_certificate), do: false
 
     defp device_response_documents(%{"documents" => documents, "status" => 0, "version" => "1.0"})
          when is_list(documents) and documents != [] do

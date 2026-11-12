@@ -6,6 +6,32 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.16.0] - 2026-11-12
+
+### Fixed
+
+- In 2.15.0, `:trusted_certificates` was reachable only through
+  `Attesto.SdJwtVc.verify/3`. `Attesto.VpToken.verify/2` and
+  `Attesto.PresentationSession` ignored it and verified with the configured
+  issuer keys instead, without error. Certificate trust combined with issuer
+  keys or an issuer-key resolver now raises `ArgumentError`.
+
+### Added
+
+- `Attesto.VpToken.verify/2` accepts `:trusted_certificates` as a third,
+  mutually exclusive issuer trust source, with `:certificate_trust` and
+  `:haip` options. `Attesto.PresentationSession` stores DER anchors as
+  `{:trusted_certificates, anchors}` and forwards those two verification
+  options without storing the callback.
+- `Attesto.Mdoc` validates issuerAuth's `x5chain` (COSE label 33) against
+  configured anchors and verifies the signature using only the validated
+  leaf key (ISO/IEC 18013-5:2021 §§9.1.2.4, 9.3.1–9.3.3). A missing or
+  malformed chain is an error. No certificate-name binding to docType is
+  imposed; the MSO-to-document docType check remains (§9.3.1 step 4).
+  The default `haip: true` refuses self-signed leaves and embedded anchors;
+  HAIP 1.0 §6.1.1 directly specifies these restrictions for SD-JWT VC,
+  while ISO Annex B.1.1 excludes the IACA root from mdoc `x5chain`.
+
 ## [2.15.0] - 2026-11-12
 
 ### Security
