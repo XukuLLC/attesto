@@ -1,5 +1,10 @@
 defmodule Attesto.CodeStore do
   @moduledoc """
+  SQL transactions touching both stores must lock authorization-code rows
+  before refresh families. Lock refresh families in ascending family-id order,
+  taking each family's advisory lock before its rows, and lock refresh rows
+  in ascending id order within a family. See `Attesto.RefreshStore`.
+
   Storage seam for authorization codes.
 
   `Attesto.AuthorizationCode` is pure: it generates a code, hashes it, and

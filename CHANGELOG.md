@@ -6,6 +6,24 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.18.0] - 2026-11-12
+
+### Added
+
+- `Attesto.AuthorizationRequest.check_prompt_login/4` checks whether a host's
+  `auth_time` satisfies `prompt=login` against a supplied request or park time,
+  with explicit allowance, current-time, and future-skew options. The function
+  has no clock or store side effects (OpenID Connect Core §3.1.2.1, §3.1.2.3).
+- `Attesto.EndSession.parse/3` and `Attesto.IDToken.verify_logout_hint/3` accept
+  `require_typ: true`, off by default. Missing required types use the existing
+  invalid-hint/type errors. JWT media types `JWT` and `application/jwt` are
+  accepted case-insensitively by ID Token verification (RFC 8725 §3.11;
+  RFC 7515 §4.1.9).
+- Optional `Attesto.RefreshStore.with_family_lock/2` callback serializes retry
+  recovery with rotation and revocation. Recovery re-reads the parent and
+  successor under the lock when available (RFC 9700 §4.14.2; RFC 7009 §2.1).
+  Store behaviours document the code/refresh-table and family lock order.
+
 ## [2.17.0] - 2026-11-12
 
 ### Added

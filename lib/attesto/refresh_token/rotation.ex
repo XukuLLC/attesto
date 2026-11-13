@@ -82,6 +82,52 @@ defmodule Attesto.RefreshToken.Rotation do
   end
 
   defp maybe_idempotent_retry_or_reuse(store, record, opts) do
+    if function_exported?(store, :with_family_lock, 2),
+      do: serialized_retry(store, record, opts),
+      else: retry_locked(store, record, opts)
+  end
+
+  defp serialized_retry(store, record, opts) do
+    case store.with_family_lock(record.family_id, fn -> reload_retry(store, record, opts) end) do
+      {:ok, result} -> result
+      {:error, _rollback} -> {:error, :temporarily_unavailable}
+    end
+  end
+
+  # Revocation may have committed after the initial lookup. Never recover
+  # from that stale record; get/1 hides revoked families. Keep the same store
+  # contract and exception handling as the initial lookup.
+  defp reload_retry(store, original, opts) do
+    case call_store_callback(fn -> store.get(original.token_hash) end) do
+      {:returned, {:ok, current}} ->
+        validate_retry_record(store, original, current, opts)
+
+      {:returned, :error} ->
+        {:error, :invalid_grant}
+
+      {:returned, invalid} ->
+        fail_initial_lookup(store, invalid, original.token_hash)
+
+      {:failed, kind, value, stacktrace} ->
+        emit_rotation_state_preserving_original(%{
+          operation: :lookup,
+          reason: store_failure_reason(kind),
+          revocation: :not_attempted
+        })
+
+        :erlang.raise(kind, value, stacktrace)
+    end
+  end
+
+  defp validate_retry_record(store, original, current, opts) do
+    if TokenRecord.loaded?(current, original.token_hash) and current.family_id == original.family_id do
+      with :ok <- check_issuer(current.data, opts), do: retry_locked(store, current, opts)
+    else
+      fail_initial_lookup(store, current, original.token_hash)
+    end
+  end
+
+  defp retry_locked(store, record, opts) do
     case retry_window(record, opts) do
       :inside -> recover_successor_or_reuse(store, record, opts)
       :outside -> revoke_and_report_reuse(store, record)

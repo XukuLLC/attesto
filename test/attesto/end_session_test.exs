@@ -17,6 +17,56 @@ defmodule Attesto.EndSessionTest do
     {:ok, config: config, hint: hint}
   end
 
+  describe "require_typ" do
+    defp hint_with_type(config, typ) do
+      header = if typ == :absent, do: %{"alg" => "RS256"}, else: %{"alg" => "RS256", "typ" => typ}
+      now = System.system_time(:second)
+      claims = %{"iss" => config.issuer, "sub" => @subject, "aud" => @client_id, "iat" => now, "exp" => now + 300}
+
+      config.keystore.signing_pem()
+      |> JOSE.JWK.from_pem()
+      |> JOSE.JWS.sign(JSON.encode!(claims), header)
+      |> JOSE.JWS.compact()
+      |> elem(1)
+    end
+
+    test "missing type remains optional and can be required or discarded", %{config: config} do
+      params = %{
+        "id_token_hint" => hint_with_type(config, :absent),
+        "post_logout_redirect_uri" => "https://rp.example/after",
+        "state" => "secret"
+      }
+
+      assert {:ok, _} = EndSession.parse(config, params)
+      assert {:error, :invalid_id_token_hint} = EndSession.parse(config, params, require_typ: true)
+      assert {:ok, discarded} = EndSession.parse(config, params, require_typ: true, on_invalid_hint: :discard)
+      assert discarded.id_token_hint == :invalid
+      assert discarded.post_logout_redirect_uri == nil
+      assert discarded.state == nil
+      assert {:ok, %{id_token_hint: :absent}} = EndSession.parse(config, %{}, require_typ: true)
+    end
+
+    test "accepts JWT media types case-insensitively and rejects other types", %{config: config} do
+      for typ <- ["JWT", "jwt", "jWt", "application/jwt", "Application/JWT"], required <- [true, false] do
+        assert {:ok, _} =
+                 EndSession.parse(config, %{"id_token_hint" => hint_with_type(config, typ)}, require_typ: required)
+      end
+
+      for typ <- [nil, "at+jwt", "logout+jwt", "", 42], required <- [true, false] do
+        assert {:error, :invalid_id_token_hint} =
+                 EndSession.parse(config, %{"id_token_hint" => hint_with_type(config, typ)}, require_typ: required)
+      end
+    end
+
+    test "validates the option even without a hint", %{config: config} do
+      for value <- [nil, "true", 1] do
+        assert_raise ArgumentError, ~r/:require_typ must be true or false/, fn ->
+          EndSession.parse(config, %{}, require_typ: value)
+        end
+      end
+    end
+  end
+
   describe "parse/2 with id_token_hint" do
     test "extracts client_id, subject and sid from a valid hint", %{config: config, hint: hint} do
       assert {:ok, request} = EndSession.parse(config, %{"id_token_hint" => hint})

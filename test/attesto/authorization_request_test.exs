@@ -848,6 +848,40 @@ defmodule Attesto.AuthorizationRequestTest do
     end
   end
 
+  describe "check_prompt_login/4" do
+    test "requires a fresh authentication only for login, with inclusive boundaries" do
+      request = struct(AuthorizationRequest, prompt: ["login"])
+      assert :ok = AuthorizationRequest.check_prompt_login(%{request | prompt: []}, nil, 1000)
+      assert :ok = AuthorizationRequest.check_prompt_login(request, 1000, 1000)
+      assert {:error, :reauthentication_required} = AuthorizationRequest.check_prompt_login(request, 999, 1000)
+      assert :ok = AuthorizationRequest.check_prompt_login(request, 940, 1000, allowance: 60)
+
+      assert {:error, :reauthentication_required} =
+               AuthorizationRequest.check_prompt_login(request, 939, 1000, allowance: 60)
+
+      assert :ok = AuthorizationRequest.check_prompt_login(request, 2000, 1000, now: 2000, future_skew: 0)
+
+      assert {:error, :invalid_auth_time} =
+               AuthorizationRequest.check_prompt_login(request, 2001, 1000, now: 2000, future_skew: 0)
+
+      assert {:error, :auth_time_required} = AuthorizationRequest.check_prompt_login(request, nil, 1000)
+
+      for invalid <- [-1, "1000", 1000.0, %{}] do
+        assert {:error, :invalid_auth_time} = AuthorizationRequest.check_prompt_login(request, invalid, 1000)
+      end
+    end
+
+    test "validates allowance, future skew, and now options" do
+      request = struct(AuthorizationRequest, prompt: ["login"])
+
+      for key <- [:allowance, :future_skew, :now], value <- [-1, nil, "60", 1.5] do
+        assert_raise ArgumentError, fn ->
+          AuthorizationRequest.check_prompt_login(request, 1000, 1000, [{key, value}])
+        end
+      end
+    end
+  end
+
   describe "check_auth_time/4 (OIDC Core §3.1.2.1)" do
     @now 1_800_000_000
 

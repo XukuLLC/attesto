@@ -236,9 +236,26 @@ defmodule Attesto.RefreshStore do
   self-contained JWT access token stays valid until it expires unless the
   protected resource consults introspection or a denylist.
 
+  SQL lock order: authorization-code rows first, then refresh families in
+  ascending family-id order, then refresh rows in ascending id order within
+  each family. Take the family advisory lock before its row locks. A host
+  combining stores in one transaction must follow this order; multiple bulk
+  calls must order the union of their families, not each batch independently.
+
   Raises `ArgumentError` for invalid or empty criteria.
   """
   @callback revoke_families(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
 
-  @optional_callbacks revoke_families: 1
+  @doc """
+  OPTIONAL. Execute `work` while holding the same family lock as `rotate/4`
+  and `revoke_family/1`. Return `{:ok, work_result}` only when the enclosing
+  transaction succeeds, or `{:error, reason}` after rollback. Nested calls
+  on the same connection must be reentrant. Retry recovery re-reads the
+  parent and successor under this lock. Interface packages may also use it
+  around their refresh completion callback. Stores without this callback
+  retain their existing retry semantics.
+  """
+  @callback with_family_lock(family_id(), (-> term())) :: {:ok, term()} | {:error, term()}
+
+  @optional_callbacks revoke_families: 1, with_family_lock: 2
 end

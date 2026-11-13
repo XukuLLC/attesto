@@ -93,6 +93,12 @@ defmodule Attesto.EndSession do
 
   ## Options
 
+    * `:require_typ` - boolean, default `false`. Require the hint's JOSE
+      `typ` header (RFC 8725 §3.11). Accept `JWT` and `application/jwt`,
+      case-insensitive. A missing required header is `:invalid_id_token_hint`
+      and follows `:on_invalid_hint` just like any other invalid hint. This
+      option does not require a hint when the request has none.
+
     * `:on_invalid_hint` - `:reject` (the default) returns
       `{:error, :invalid_id_token_hint}` for a hint that fails verification.
       `:discard` returns a request with `id_token_hint: :invalid` so the OP can
@@ -104,10 +110,11 @@ defmodule Attesto.EndSession do
   """
   @spec parse(Config.t(), map(), keyword()) :: {:ok, t()} | {:error, parse_error()}
   def parse(%Config{} = config, params, opts \\ []) when is_map(params) and is_list(opts) do
+    require_typ = Attesto.Options.boolean!(opts, :require_typ, false)
     client_id_param = param(params, "client_id")
 
     with {:ok, hint} <- id_token_hint(params),
-         {:ok, claims} <- verify_hint(config, hint),
+         {:ok, claims} <- verify_hint(config, hint, require_typ),
          {:ok, client_id} <- resolve_client_id(claims, client_id_param) do
       {:ok,
        %__MODULE__{
@@ -175,11 +182,11 @@ defmodule Attesto.EndSession do
 
   # ----- internal -----
 
-  defp verify_hint(_config, nil), do: {:ok, %{}}
-  defp verify_hint(_config, ""), do: {:ok, %{}}
+  defp verify_hint(_config, nil, _require_typ), do: {:ok, %{}}
+  defp verify_hint(_config, "", _require_typ), do: {:ok, %{}}
 
-  defp verify_hint(config, hint) when is_binary(hint) do
-    case IDToken.verify_logout_hint(config, hint) do
+  defp verify_hint(config, hint, require_typ) when is_binary(hint) do
+    case IDToken.verify_logout_hint(config, hint, require_typ: require_typ) do
       {:ok, claims} -> {:ok, claims}
       {:error, _reason} -> {:error, :invalid_id_token_hint}
     end

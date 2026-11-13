@@ -299,6 +299,12 @@ defmodule Attesto.RefreshToken do
   unexpected returns still trigger family cleanup because they may have
   committed.
 
+  When the store implements `c:Attesto.RefreshStore.with_family_lock/2`,
+  retry recovery re-reads the parent and successor under the same family lock
+  as rotation and revocation. A revocation that wins the lock prevents
+  recovery. This does not make the later network response atomic with
+  revocation or invalidate access tokens already minted.
+
   A `get/1` exception or contract violation emits the operational
   `[:attesto, :refresh_token, :rotation_state_failed]` event with
   `operation: :lookup`. The original callback exception or constant contract

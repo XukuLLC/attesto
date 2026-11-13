@@ -385,6 +385,36 @@ defmodule Attesto.AuthorizationRequest do
     end
   end
 
+  @doc """
+  Check that `prompt=login` produced a new authentication (OIDC Core
+  §3.1.2.1, §3.1.2.3). `since` is the Unix time the request arrived or was
+  parked. Requests without `login` need no authentication timestamp.
+
+  `:allowance` permits that many seconds before `since` (default `0`).
+  `:now` defaults to `since`; pass the current Unix time for a resumed request.
+  `:future_skew` defaults to `Attesto.NumericDate.default_clock_skew_seconds/0`.
+  Missing or invalid timestamps return `:auth_time_required` or
+  `:invalid_auth_time`; an older authentication returns `:reauthentication_required`.
+  These timestamps establish freshness, not proof that a host displayed UI.
+  """
+  @spec check_prompt_login(t(), term(), non_neg_integer(), keyword()) ::
+          :ok | {:error, :auth_time_required | :invalid_auth_time | :reauthentication_required}
+  def check_prompt_login(request, auth_time, since, opts \\ [])
+      when is_integer(since) and since >= 0 and is_list(opts) do
+    allowance = Options.non_negative_integer!(opts, :allowance, 0)
+    future_skew = Options.non_negative_integer!(opts, :future_skew, NumericDate.default_clock_skew_seconds())
+    now = Options.non_negative_integer!(opts, :now, since)
+
+    cond do
+      "login" not in request.prompt -> :ok
+      is_nil(auth_time) -> {:error, :auth_time_required}
+      not NumericDate.valid?(auth_time) -> {:error, :invalid_auth_time}
+      auth_time > now + future_skew -> {:error, :invalid_auth_time}
+      auth_time < since - allowance -> {:error, :reauthentication_required}
+      true -> :ok
+    end
+  end
+
   defp merge_request_object(%{"request" => request} = params, opts) when is_binary(request) and request != "" do
     if Keyword.get(opts, :request_objects_supported, true) do
       verify_request_object(request, params, opts)

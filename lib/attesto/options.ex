@@ -9,6 +9,15 @@ defmodule Attesto.Options do
     end
   end
 
+  @spec non_negative_integer!(keyword(), atom(), non_neg_integer()) :: non_neg_integer()
+  def non_negative_integer!(opts, key, default)
+      when is_list(opts) and is_atom(key) and is_integer(default) and default >= 0 do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      _invalid -> raise ArgumentError, ":#{key} must be a non-negative integer"
+    end
+  end
+
   @spec positive_integer!(keyword(), atom(), pos_integer()) :: pos_integer()
   def positive_integer!(opts, key, default)
       when is_list(opts) and is_atom(key) and is_integer(default) and default > 0 do

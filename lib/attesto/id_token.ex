@@ -248,7 +248,7 @@ defmodule Attesto.IDToken do
        `:invalid_signature` (alg-confusion is impossible). A protected header
        carrying a `crit` parameter (RFC 7515 §4.1.11) is rejected with
        `:unsupported_critical_header`. The JOSE header `typ`, when present,
-       MUST be `"JWT"`; an access-token header such as `"at+jwt"` is
+       must be `"JWT"` or `"application/jwt"`, case-insensitive; an access-token header such as `"at+jwt"` is
        `:unexpected_typ`. Verification also rejects access-token-only payload
        claims such as `scope`, `typ: "access"`, and the configured
        principal-kind claim, so token-type separation does not depend solely
@@ -310,14 +310,25 @@ defmodule Attesto.IDToken do
       accept an otherwise-valid hint even after it has expired, since the
       user is logging out precisely because their session is ending.
 
+  `:require_typ` (default `false`) requires a JOSE `typ` header. Accepted
+  values are `JWT` and `application/jwt`, case-insensitive (RFC 7515 §4.1.9).
+  Missing required or invalid types return `:unexpected_typ`.
+
   A logout token's authenticity still rests entirely on the signature, so a
   forged or tampered hint is rejected as `:invalid_signature` / `:invalid_token`.
 
   Returns `{:ok, claims}` (string-keyed payload) or `{:error, reason}`.
   """
-  @spec verify_logout_hint(Config.t(), String.t()) :: {:ok, claims()} | {:error, verify_error()}
-  def verify_logout_hint(%Config{} = config, id_token) when is_binary(id_token) do
-    with {:ok, claims} <- verify_signature(config, id_token),
+  @spec verify_logout_hint(Config.t(), String.t(), keyword()) :: {:ok, claims()} | {:error, verify_error()}
+  def verify_logout_hint(config, id_token, opts \\ [])
+
+  def verify_logout_hint(%Config{} = config, id_token, opts) when is_list(opts) do
+    require_typ = Attesto.Options.boolean!(opts, :require_typ, false)
+    verify_logout_hint_token(config, id_token, require_typ)
+  end
+
+  defp verify_logout_hint_token(config, id_token, require_typ) when is_binary(id_token) do
+    with {:ok, claims} <- verify_signature(config, id_token, require_typ),
          :ok <- check_token_purpose(config, claims),
          :ok <- check_issuer(config, claims),
          :ok <- check_required_claims(claims),
@@ -326,7 +337,7 @@ defmodule Attesto.IDToken do
     end
   end
 
-  def verify_logout_hint(%Config{}, _id_token), do: {:error, :invalid_token}
+  defp verify_logout_hint_token(%Config{}, _id_token, _require_typ), do: {:error, :invalid_token}
 
   @doc "The default JWS algorithm for RSA keys. Keystores may label individual keys with another supported alg."
   @spec signing_alg() :: String.t()
@@ -372,21 +383,25 @@ defmodule Attesto.IDToken do
   # Mirrors `Attesto.Token`'s signature path: peek the protected header,
   # reject any `crit` member (RFC 7515 §4.1.11), select keystore keys by
   # `kid`, and verify strictly against each trusted key's bound algorithm.
-  defp verify_signature(config, jwt) do
+  defp verify_signature(config, jwt, require_typ \\ false) do
     with {:ok, header} <-
            JWS.protected_header(jwt,
              error: :invalid_token,
              crit_error: :unsupported_critical_header,
              max_compact_bytes: @max_token_bytes
            ),
-         :ok <- check_header_typ(header) do
+         :ok <- check_header_typ(header, require_typ) do
       verify_against_trusted(config, jwt, header)
     end
   end
 
-  defp check_header_typ(%{"typ" => @header_typ}), do: :ok
-  defp check_header_typ(%{"typ" => _other}), do: {:error, :unexpected_typ}
-  defp check_header_typ(_header), do: :ok
+  defp check_header_typ(%{"typ" => typ}, _require_typ) when is_binary(typ) do
+    if String.downcase(typ) in ["jwt", "application/jwt"], do: :ok, else: {:error, :unexpected_typ}
+  end
+
+  defp check_header_typ(%{"typ" => _other}, _require_typ), do: {:error, :unexpected_typ}
+  defp check_header_typ(_header, true), do: {:error, :unexpected_typ}
+  defp check_header_typ(_header, false), do: :ok
 
   defp verify_against_trusted(config, jwt, header) do
     JWS.verify_trusted(jwt, header, config.keystore.verification_pems(),
