@@ -46,6 +46,52 @@ defmodule Attesto.URI do
 
   def https_identifier?(_value, _opts), do: false
 
+  @doc """
+  Adds response parameters to a registered redirect URI's query.
+
+  RFC 6749 §3.1.2 requires the registered query component to be retained
+  when parameters are added. A registered pair whose name the response sets
+  is dropped first, so the client never receives two values for one
+  parameter (`?state=static&state=abc123`, where a first-value parser reads
+  the registered one). `:replace` names further parameters to drop even when
+  this response does not set them, such as `code` on an error response. Every
+  other registered pair is kept byte for byte, including repeated and bare
+  names and their original percent-encoding. A registered name is compared
+  after `application/x-www-form-urlencoded` decoding, so `st%61te` counts as
+  `state`.
+
+  `params` is a map or a list of `{name, value}` pairs, encoded with
+  `URI.encode_query/1` in the given order.
+  """
+  @spec put_query_params(String.t(), Enumerable.t(), keyword()) :: String.t()
+  def put_query_params(uri, params, opts \\ []) when is_binary(uri) and is_list(opts) do
+    params = Enum.to_list(params)
+    replaced = MapSet.new(Enum.map(params, fn {name, _value} -> to_string(name) end) ++ Keyword.get(opts, :replace, []))
+    parsed = URI.parse(uri)
+
+    kept =
+      case parsed.query do
+        query when is_binary(query) and query != "" ->
+          query |> String.split("&") |> Enum.reject(&(query_pair_name(&1) in replaced))
+
+        _empty ->
+          []
+      end
+
+    query = Enum.join(kept ++ ([URI.encode_query(params)] -- [""]), "&")
+    URI.to_string(%{parsed | query: if(query != "", do: query)})
+  end
+
+  defp query_pair_name(pair) do
+    raw = pair |> String.split("=", parts: 2) |> hd()
+
+    try do
+      URI.decode_www_form(raw)
+    rescue
+      ArgumentError -> raw
+    end
+  end
+
   @doc false
   @spec normalize_path(String.t() | nil) :: String.t()
   def normalize_path(path) when path in [nil, ""], do: "/"

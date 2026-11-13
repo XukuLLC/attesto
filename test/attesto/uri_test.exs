@@ -128,4 +128,36 @@ defmodule Attesto.URITest do
       refute AttestoURI.loopback_host?(nil)
     end
   end
+
+  describe "put_query_params/3" do
+    test "appends to a URI without a query" do
+      assert AttestoURI.put_query_params("https://c.example/cb", [{"code", "x"}, {"state", "s"}]) ==
+               "https://c.example/cb?code=x&state=s"
+    end
+
+    test "replaces registered pairs the response sets and keeps every other pair byte for byte" do
+      assert AttestoURI.put_query_params(
+               "https://c.example/cb?state=static&a=1&a=2&flag&b=%20x&state=again",
+               [{"code", "x"}, {"state", "s y"}]
+             ) == "https://c.example/cb?a=1&a=2&flag&b=%20x&code=x&state=s+y"
+    end
+
+    test "compares decoded names and drops :replace names the response does not set" do
+      assert AttestoURI.put_query_params(
+               "https://c.example/cb?st%61te=static&code=old&keep=1",
+               [{"error", "access_denied"}, {"state", "s"}],
+               replace: ["code"]
+             ) == "https://c.example/cb?keep=1&error=access_denied&state=s"
+    end
+
+    test "keeps a pair whose name is not valid percent-encoding" do
+      assert AttestoURI.put_query_params("https://c.example/cb?x%zz=1&state=1", [{"state", "2"}]) ==
+               "https://c.example/cb?x%zz=1&state=2"
+    end
+
+    test "removes the query when nothing is left" do
+      assert AttestoURI.put_query_params("https://c.example/cb?state=only", [], replace: ["state"]) ==
+               "https://c.example/cb"
+    end
+  end
 end

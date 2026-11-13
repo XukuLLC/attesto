@@ -222,18 +222,9 @@ defmodule Attesto.EndSession do
   defp append_state(uri, nil), do: uri
   defp append_state(uri, ""), do: uri
 
-  defp append_state(uri, state) when is_binary(state) do
-    parsed = URI.parse(uri)
-    encoded_state = URI.encode_query(%{"state" => state})
-
-    query =
-      case parsed.query do
-        query when is_binary(query) and query != "" -> query <> "&" <> encoded_state
-        _empty -> encoded_state
-      end
-
-    parsed |> Map.put(:query, query) |> URI.to_string()
-  end
+  # RP-Initiated Logout §3: `state` is added to the registered URI's query,
+  # replacing a registered `state` (see `Attesto.URI.put_query_params/3`).
+  defp append_state(uri, state) when is_binary(state), do: Attesto.URI.put_query_params(uri, [{"state", state}])
 
   defp id_token_hint(params) do
     value =

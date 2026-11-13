@@ -236,5 +236,19 @@ defmodule Attesto.EndSessionTest do
       assert {:ok, "https://rp.example/after?a=1&a=2&state=x+y"} =
                EndSession.confirm_redirect(request, [registered])
     end
+
+    test "a registered state is replaced, not duplicated", %{config: config} do
+      registered = "https://rp.example/after?state=static&theme=dark"
+
+      {:ok, request} =
+        EndSession.parse(config, %{
+          "client_id" => @client_id,
+          "post_logout_redirect_uri" => registered,
+          "state" => "xyz"
+        })
+
+      assert {:ok, "https://rp.example/after?theme=dark&state=xyz"} =
+               EndSession.confirm_redirect(request, [registered])
+    end
   end
 end

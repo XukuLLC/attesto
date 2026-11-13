@@ -42,6 +42,11 @@ defmodule Attesto.FrontChannelLogoutTest do
              }
     end
 
+    test "a registered iss or sid is replaced, not duplicated" do
+      uri = FrontChannelLogout.logout_uri(config(), "https://rp.example/fc?sid=old&a=b&iss=x", "sess-1")
+      assert uri == "https://rp.example/fc?a=b&iss=https%3A%2F%2Fop.example&sid=sess-1"
+    end
+
     test "with no sid the URI is returned unchanged (iss-only is never produced)" do
       # Front-Channel Logout 1.0 §2: if either of iss/sid is included, both
       # MUST be — so an unknown session id yields the bare registered URI.

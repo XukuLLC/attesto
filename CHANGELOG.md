@@ -6,6 +6,25 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.19.0] - 2026-11-13
+
+### Added
+
+- `Attesto.URI.put_query_params/3` adds response parameters to a registered
+  redirect URI's query. A registered pair whose name the response sets, or
+  that `:replace` names, is dropped first; every other registered pair is kept
+  byte for byte (RFC 6749 §3.1.2). A registered
+  `https://rp.example/cb?state=static` no longer yields
+  `?state=static&state=abc123`, where a first-value parser reads the
+  registered value.
+
+### Fixed
+
+- `Attesto.EndSession.confirm_redirect/2` replaces a `state` already in the
+  registered `post_logout_redirect_uri` instead of adding a second one, and
+  `Attesto.FrontChannelLogout.logout_uri/3` does the same for `iss` and
+  `sid`.
+
 ## [2.18.0] - 2026-11-12
 
 ### Added

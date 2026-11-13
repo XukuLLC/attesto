@@ -33,7 +33,8 @@ defmodule Attesto.FrontChannelLogout do
   Build the URI an OP logout page loads in an iframe for one Relying Party.
 
   `registered_uri` is the RP's registered `frontchannel_logout_uri`
-  (Front-Channel Logout 1.0 §2); any query it already carries is preserved.
+  (Front-Channel Logout 1.0 §2); any query it already carries is preserved,
+  except a registered `iss` or `sid`, which the added values replace.
   When `sid` is a non-empty session identifier, `iss` (from `config.issuer`)
   and `sid` are appended as query parameters — both together, per §2's
   "if either is included, both MUST be". With no `sid`, the registered URI is
@@ -53,18 +54,7 @@ defmodule Attesto.FrontChannelLogout do
     end
   end
 
-  # Append parameters to the URI's query component, preserving any query the RP
-  # registered (mirrors the authorization endpoint's redirect handling).
-  defp append_query(uri, params) do
-    encoded = URI.encode_query(params)
-    parsed = URI.parse(uri)
-
-    new_query =
-      case parsed.query do
-        nil -> encoded
-        existing -> existing <> "&" <> encoded
-      end
-
-    URI.to_string(%{parsed | query: new_query})
-  end
+  # Add `iss` and `sid` to the RP's registered query, replacing registered
+  # values of the same names (see `Attesto.URI.put_query_params/3`).
+  defp append_query(uri, params), do: Attesto.URI.put_query_params(uri, params)
 end
