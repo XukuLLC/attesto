@@ -1126,4 +1126,81 @@ defmodule Attesto.AuthorizationRequestTest do
                validate_request_object(request, client_jwk, request_object_policy: Policy.fapi_message_signing())
     end
   end
+
+  describe "check_nonce/2, check_auth_time/4, and resolve_request_object/2" do
+    test "check_nonce/2 catches openid scope applied after parsing without nonce" do
+      {:ok, request} =
+        AuthorizationRequest.validate(
+          Map.delete(base_params(%{"scope" => "profile"}), "nonce"),
+          registered_redirect_uris: [@redirect_uri]
+        )
+
+      expanded = %{request | scope: ["openid", "profile"], response_mode: "query"}
+
+      assert {:error, {:redirect, %{error: "invalid_request", response_mode: "query", client_id: "client-123"}}} =
+               AuthorizationRequest.check_nonce(expanded, require_nonce: true)
+
+      assert :ok = AuthorizationRequest.check_nonce(expanded, require_nonce: false)
+    end
+
+    test "check_auth_time/4 accepts plain integer or nil max_age and validates integer options" do
+      assert :ok = AuthorizationRequest.check_auth_time(nil, nil, 1_000)
+      assert :ok = AuthorizationRequest.check_auth_time(60, 950, 1_000, allowance: 0, future_skew: 0)
+      assert {:error, :auth_time_required} = AuthorizationRequest.check_auth_time(60, nil, 1_000)
+      assert {:error, :max_age_exceeded} = AuthorizationRequest.check_auth_time(60, 900, 1_000)
+
+      assert_raise ArgumentError, ~r/:allowance/, fn ->
+        AuthorizationRequest.check_auth_time(60, 950, 1_000, allowance: -1)
+      end
+
+      assert_raise ArgumentError, ~r/:future_skew/, fn ->
+        AuthorizationRequest.check_auth_time(60, 950, 1_000, future_skew: "5")
+      end
+    end
+
+    test "resolve_request_object/2 enforces outer response_type and respects :keep_request_param" do
+      key = JOSE.JWK.generate_key({:ec, "P-256"})
+      {_kty, pub} = JOSE.JWK.to_public_map(key)
+      now = System.system_time(:second)
+
+      claims = %{
+        "iss" => "client-123",
+        "aud" => @issuer,
+        "iat" => now,
+        "exp" => now + 60,
+        "jti" => "req-1",
+        "response_type" => "code",
+        "client_id" => "client-123",
+        "redirect_uri" => @redirect_uri,
+        "scope" => "openid profile",
+        "nonce" => "n-1",
+        "code_challenge" => @code_challenge,
+        "code_challenge_method" => "S256"
+      }
+
+      jar = JWT.sign_compact(key, %{"alg" => "ES256", "typ" => "oauth-authz-req+jwt"}, claims)
+
+      assert {:error, :invalid_request_object} =
+               AuthorizationRequest.resolve_request_object(
+                 %{"client_id" => "client-123", "response_type" => "token", "request" => jar},
+                 request_object_jwks: pub,
+                 request_object_audience: @issuer,
+                 issuer: "client-123",
+                 now: now
+               )
+
+      assert {:ok, resolved} =
+               AuthorizationRequest.resolve_request_object(
+                 %{"client_id" => "client-123", "response_type" => "code", "request" => jar},
+                 request_object_jwks: pub,
+                 request_object_audience: @issuer,
+                 issuer: "client-123",
+                 now: now,
+                 keep_request_param: true
+               )
+
+      assert resolved["request"] == jar
+      assert resolved["response_type"] == "code"
+    end
+  end
 end

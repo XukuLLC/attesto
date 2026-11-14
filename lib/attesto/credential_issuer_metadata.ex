@@ -110,7 +110,7 @@ defmodule Attesto.CredentialIssuerMetadata do
   @spec signed(%{required(String.t()) => term()}, keyword()) :: String.t()
   def signed(metadata, opts) when is_map(metadata) and is_list(opts) do
     {jwk, signing_source} = metadata_signing_source!(opts)
-    {_modules, public_jwk} = JOSE.JWK.to_public_map(jwk)
+    public_jwk = Attesto.Key.public_map(jwk)
     now = Keyword.get(opts, :now, System.system_time(:second))
     issuer = Map.get(metadata, "credential_issuer")
 

@@ -127,25 +127,7 @@ defmodule Attesto.SessionState do
   compare equal in the browser, so fail closed instead).
   """
   @spec origin(String.t()) :: {:ok, String.t()} | {:error, :invalid_uri}
-  def origin(uri) when is_binary(uri) do
-    case URI.parse(uri) do
-      %URI{scheme: scheme, host: host} = parsed
-      when is_binary(scheme) and scheme != "" and is_binary(host) and host != "" ->
-        scheme = String.downcase(scheme)
-        host = host |> String.downcase() |> bracket_ipv6()
-        {:ok, "#{scheme}://#{host}#{origin_port(scheme, parsed.port)}"}
-
-      _ ->
-        {:error, :invalid_uri}
-    end
-  end
-
-  # An IPv6 literal (the only host form containing `:`) must be wrapped in
-  # brackets to match the browser's WHATWG origin; a DNS host never contains a
-  # colon, so this is unambiguous.
-  defp bracket_ipv6(host) do
-    if String.contains?(host, ":"), do: "[#{host}]", else: host
-  end
+  def origin(uri), do: Attesto.URI.origin(uri)
 
   @doc "A fresh random salt for `compute/4` (unpadded URL-safe Base64, no spaces or dots)."
   @spec generate_salt() :: String.t()
@@ -277,11 +259,4 @@ defmodule Attesto.SessionState do
   end
 
   # A default port is omitted from a browser origin; any other port is kept.
-  defp origin_port(scheme, port) do
-    cond do
-      is_nil(port) -> ""
-      URI.default_port(scheme) == port -> ""
-      true -> ":#{port}"
-    end
-  end
 end

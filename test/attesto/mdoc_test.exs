@@ -891,6 +891,27 @@ defmodule Attesto.MdocTest do
       assert {:error, :invalid_mdoc} =
                Mdoc.verify_device_response(device_response, incomplete_context, ctx.issuer_public, now: ctx.now)
     end
+
+    test "rejects DeviceAuth carrying both deviceSignature and deviceMac and handles omitted/non-map IssuerSigned nameSpaces",
+         ctx do
+      valid_b64 = build_device_response(ctx)
+      {:ok, raw} = Base.url_decode64(valid_b64, padding: false)
+      {:ok, %{"documents" => [doc | rest]} = dr, ""} = CBOR.decode(raw)
+
+      mutated_doc =
+        put_in(doc, ["deviceSigned", "deviceAuth", "deviceMac"], %{"mac" => <<1, 2, 3>>})
+
+      mutated = Base.url_encode64(CBOR.encode(%{dr | "documents" => [mutated_doc | rest]}), padding: false)
+
+      assert {:error, :invalid_mdoc} =
+               Mdoc.verify_device_response(mutated, context(ctx), ctx.issuer_public, now: ctx.now)
+
+      no_ns = Base.url_encode64(CBOR.encode(Map.delete(ctx.issuer_signed, "nameSpaces")), padding: false)
+      assert {:ok, %{namespaces: %{}}} = Mdoc.verify(no_ns, ctx.issuer_public, now: ctx.now)
+
+      bad_ns = Base.url_encode64(CBOR.encode(Map.put(ctx.issuer_signed, "nameSpaces", [])), padding: false)
+      assert {:error, :invalid_mdoc} = Mdoc.verify(bad_ns, ctx.issuer_public, now: ctx.now)
+    end
   end
 
   test "rejects a DeviceResponse in which a map repeats a key" do
@@ -938,5 +959,12 @@ defmodule Attesto.MdocTest do
   test "rejects oversized deeply nested CBOR before decoding" do
     nested_arrays = :binary.copy(<<0x81>>, 262_145)
     assert {:error, :invalid_mdoc} = Mdoc.peek_doc_type(nested_arrays)
+  end
+
+  test "decode_issuer_signed/1 decodes raw IssuerSigned CBOR and exports max_cbor_bytes/0" do
+    assert Mdoc.max_cbor_bytes() == 262_144
+
+    no_ns = CBOR.encode(%{"issuerAuth" => {[], <<>>, %{}, <<>>}})
+    assert {:ok, %{"issuerAuth" => _}} = Mdoc.decode_issuer_signed(no_ns)
   end
 end

@@ -166,7 +166,12 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     # ----- internal -----
 
-    defp challenge(scheme, params) do
+    @doc """
+    Format a `WWW-Authenticate` header value for `:bearer` or `:dpop` with escaped
+    quoted auth-params.
+    """
+    @spec format_challenge(:bearer | :dpop | atom(), [{atom() | String.t(), String.t()}]) :: String.t()
+    def format_challenge(scheme, params) do
       scheme_label =
         case scheme do
           :dpop -> "DPoP"
@@ -176,6 +181,8 @@ if Code.ensure_loaded?(Plug.Conn) do
       param_str = Enum.map_join(params, ", ", fn {k, v} -> ~s(#{k}="#{escape(v)}") end)
       scheme_label <> " " <> param_str
     end
+
+    defp challenge(scheme, params), do: format_challenge(scheme, params)
 
     defp description_param(opts) do
       case Keyword.get(opts, :description) do

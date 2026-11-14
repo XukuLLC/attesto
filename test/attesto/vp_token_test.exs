@@ -1164,5 +1164,20 @@ defmodule Attesto.VpTokenTest do
       assert constraints["pid"].format == "dc+sd-jwt"
       assert constraints["pid"].claims == [%{path: ["age_over_21"], values: [true]}]
     end
+
+    test "dcql_value_matches?/2 enforces strict equality and redirect_mdoc_context rejects bad response_encryption_jwk" do
+      assert VpToken.dcql_value_matches?("DE", ["DE", "FR"])
+      assert VpToken.dcql_value_matches?(true, [true])
+      refute VpToken.dcql_value_matches?(1, [true, "1"])
+
+      fixture = dc_api_mdoc_fixture()
+
+      redirect_opts =
+        fixture.opts
+        |> Keyword.delete(:dc_api_origin)
+        |> Keyword.merge(response_uri: "https://verifier.example.com/cb", response_encryption_jwk: "not-a-jwk")
+
+      assert {:error, {"mdl", :invalid_key}} = VpToken.verify(%{"mdl" => [fixture.presentation]}, redirect_opts)
+    end
   end
 end

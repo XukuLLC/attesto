@@ -102,6 +102,10 @@ defmodule Attesto.IDToken do
   # authentication.
   @max_token_bytes 64 * 1_024
 
+  @doc "Maximum accepted wire size in bytes of a compact ID Token."
+  @spec max_token_bytes() :: pos_integer()
+  def max_token_bytes, do: @max_token_bytes
+
   @type mint_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
           | {:lifetime, pos_integer()}
@@ -395,11 +399,12 @@ defmodule Attesto.IDToken do
     end
   end
 
-  defp check_header_typ(%{"typ" => typ}, _require_typ) when is_binary(typ) do
-    if String.downcase(typ) in ["jwt", "application/jwt"], do: :ok, else: {:error, :unexpected_typ}
+  defp check_header_typ(%{"typ" => typ}, _require_typ) do
+    if is_binary(typ) and Claims.typ_matches?(typ, [@header_typ], normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :unexpected_typ}
   end
 
-  defp check_header_typ(%{"typ" => _other}, _require_typ), do: {:error, :unexpected_typ}
   defp check_header_typ(_header, true), do: {:error, :unexpected_typ}
   defp check_header_typ(_header, false), do: :ok
 

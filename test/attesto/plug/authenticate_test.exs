@@ -11,6 +11,7 @@ defmodule Attesto.Plug.AuthenticateTest do
 
   alias Attesto.DPoP
   alias Attesto.Plug.Authenticate
+  alias Attesto.Plug.OAuthError
   alias Attesto.Test.Factory
   alias Attesto.Token
 
@@ -205,6 +206,7 @@ defmodule Attesto.Plug.AuthenticateTest do
         |> Authenticate.call(
           Authenticate.init(
             config: :remote_issuer,
+            origin: "https://api.example.com",
             replay_check: fn _key, _ttl -> :ok end,
             verify:
               {__MODULE__, :verify_result_callback, [{:ok, %{"sub" => "remote-subject", "cnf" => %{"jkt" => jkt}}}]}
@@ -651,7 +653,13 @@ defmodule Attesto.Plug.AuthenticateTest do
       conn =
         [{"authorization", "DPoP " <> token}, {"dpop", proof}]
         |> request()
-        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            replay_check: fn _jti, _ttl -> :ok end
+          )
+        )
 
       refute conn.halted
       assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
@@ -708,7 +716,13 @@ defmodule Attesto.Plug.AuthenticateTest do
       conn =
         [{"authorization", "DPoP " <> token}, {"dpop", proof}]
         |> request()
-        |> Authenticate.call(Authenticate.init(config: config, dpop_replay_unprotected_acknowledged?: true))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            dpop_replay_unprotected_acknowledged?: true
+          )
+        )
 
       refute conn.halted
       assert conn.assigns.attesto_claims["sub"] == "oc_abc123"
@@ -737,6 +751,7 @@ defmodule Attesto.Plug.AuthenticateTest do
         |> Authenticate.call(
           Authenticate.init(
             config: config,
+            origin: "https://api.example.com",
             replay_check: fn jti, _ttl ->
               send(test_pid, {:claimed, jti})
               :ok
@@ -767,6 +782,7 @@ defmodule Attesto.Plug.AuthenticateTest do
         |> Authenticate.call(
           Authenticate.init(
             config: config,
+            origin: "https://api.example.com",
             replay_check: fn jti, ttl ->
               send(test_pid, {:claimed, jti, ttl})
               :ok
@@ -806,7 +822,13 @@ defmodule Attesto.Plug.AuthenticateTest do
       conn =
         [{"authorization", "DPoP " <> token}, {"dpop", proof}]
         |> request()
-        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> {:error, :replay} end))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            replay_check: fn _jti, _ttl -> {:error, :replay} end
+          )
+        )
 
       assert conn.status == 401
       assert_received {:replay_event, meta}
@@ -823,6 +845,7 @@ defmodule Attesto.Plug.AuthenticateTest do
       opts =
         Authenticate.init(
           config: config,
+          origin: "https://api.example.com",
           replay_check: fn _jti, _ttl -> {:error, "credential-sentinel-that-must-not-escape"} end
         )
 
@@ -847,6 +870,7 @@ defmodule Attesto.Plug.AuthenticateTest do
       opts =
         Authenticate.init(
           config: config,
+          origin: "https://api.example.com",
           replay_check: fn _jti, _ttl -> {:error, :replay} end
         )
 
@@ -873,7 +897,13 @@ defmodule Attesto.Plug.AuthenticateTest do
       conn =
         [{"authorization", "DPoP " <> token}, {"dpop", proof}]
         |> request()
-        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            replay_check: fn _jti, _ttl -> :ok end
+          )
+        )
 
       assert conn.status == 401
       assert [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
@@ -892,7 +922,13 @@ defmodule Attesto.Plug.AuthenticateTest do
         [{"authorization", "DPoP " <> token}, {"dpop", proof}]
         |> request()
         |> Map.put(:host, "::1")
-        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://[::1]",
+            replay_check: fn _jti, _ttl -> :ok end
+          )
+        )
 
       refute conn.halted
     end
@@ -958,6 +994,7 @@ defmodule Attesto.Plug.AuthenticateTest do
         |> Authenticate.call(
           Authenticate.init(
             config: config,
+            origin: "https://api.example.com",
             replay_check: fn _jti, _ttl -> :ok end,
             nonce_check: fn _nonce -> {:error, :use_dpop_nonce} end,
             nonce_issue: fn -> "fresh-nonce-xyz" end
@@ -1012,7 +1049,13 @@ defmodule Attesto.Plug.AuthenticateTest do
       conn =
         [{"authorization", "Bearer " <> token}, {"dpop", proof}]
         |> request()
-        |> Authenticate.call(Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end))
+        |> Authenticate.call(
+          Authenticate.init(
+            config: config,
+            origin: "https://api.example.com",
+            replay_check: fn _jti, _ttl -> :ok end
+          )
+        )
 
       assert conn.status == 401
       assert conn.halted
@@ -1063,6 +1106,44 @@ defmodule Attesto.Plug.AuthenticateTest do
       assert_raise ArgumentError, ~r/either :origin or :htu/, fn ->
         Authenticate.init(config: config, origin: "https://api.example.com", htu: fn _conn -> @uri end)
       end
+    end
+
+    test "non-function :htu raises at init", %{config: config} do
+      for bad_htu <- [nil, "https://api.example.com/x", {__MODULE__, :config_callback}, 123] do
+        assert_raise ArgumentError, ~r/:htu must be a 1-arity function/, fn ->
+          Authenticate.init(config: config, htu: bad_htu)
+        end
+      end
+    end
+
+    test "DPoP mount without :origin or :htu raises at init while Bearer-only mounts do not", %{config: config} do
+      assert_raise ArgumentError, ~r/accepts DPoP requires :origin or :htu/, fn ->
+        Authenticate.init(config: config, replay_check: fn _jti, _ttl -> :ok end)
+      end
+
+      assert_raise ArgumentError, ~r/accepts DPoP requires :origin or :htu/, fn ->
+        Authenticate.init(config: config, dpop_replay_unprotected_acknowledged?: true)
+      end
+
+      assert is_list(Authenticate.init(config: config))
+    end
+
+    test "plug helper utilities parse headers, format challenges, compute pinned htu, and classify refusals" do
+      assert Authenticate.origin_htu("https://api.example/", "/mcp") == "https://api.example/mcp"
+      assert Authenticate.parse_authorization("Bearer  tok  ") == {:ok, :bearer, "tok"}
+      assert Authenticate.parse_authorization("dpop proof") == {:ok, :dpop, "proof"}
+      assert Authenticate.parse_authorization("Basic xyz") == :malformed
+
+      assert OAuthError.format_challenge(:bearer, error: "invalid_token", resource_metadata: "https://a/b") ==
+               ~s(Bearer error="invalid_token", resource_metadata="https://a/b")
+
+      assert "dpop_proof_required" in Authenticate.sender_constraint_reasons()
+
+      assert Authenticate.classify_refusal(401, %{"error" => "invalid_token", "error_description" => "expired"}) ==
+               :token_expired
+
+      assert Authenticate.classify_refusal(503, %{"error" => "invalid_token"}) == :verifier_unavailable
+      assert Authenticate.classify_refusal(503, %{"error" => "temporarily_unavailable"}) == :verifier_unavailable
     end
   end
 
@@ -1168,6 +1249,46 @@ defmodule Attesto.Plug.AuthenticateTest do
 
     test "a malformed :step_up requirement fails closed at init", %{config: config} do
       assert_raise ArgumentError, fn -> Authenticate.init(config: config, step_up: []) end
+    end
+  end
+
+  describe "sender-constraint classification" do
+    test "classifies every real Token sender-constraint error description and omits removed aliases", %{
+      config: config
+    } do
+      expected = ~w(
+        invalid_dpop_jkt invalid_mtls_thumbprint
+        dpop_proof_required dpop_binding_mismatch dpop_proof_unexpected
+        mtls_cert_required mtls_binding_mismatch mtls_cert_unexpected
+        conflicting_confirmation unsupported_confirmation
+      )
+
+      assert Enum.sort(Authenticate.sender_constraint_reasons()) == Enum.sort(expected)
+      refute "dpop_thumbprint_mismatch" in Authenticate.sender_constraint_reasons()
+
+      for reason <- expected do
+        assert :sender_constraint_mismatch ==
+                 Authenticate.classify_refusal(401, %{"error" => "invalid_token", "error_description" => reason})
+      end
+
+      bound_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      other_jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      bound_jkt = JOSE.JWK.thumbprint(bound_jwk)
+      {:ok, %{access_token: token}} = Token.mint(config, client_principal(), dpop_jkt: bound_jkt)
+      ath = DPoP.compute_ath(token)
+      {proof, _} = Factory.dpop_proof(jwk: other_jwk, htm: "GET", htu: @uri, ath: ath)
+
+      conn =
+        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+        |> request()
+        |> Authenticate.call(
+          Authenticate.init(config: config, origin: "https://api.example.com", replay_check: fn _j, _t -> :ok end)
+        )
+
+      assert conn.status == 401
+      body = JSON.decode!(conn.resp_body)
+      assert body["error_description"] == "dpop_binding_mismatch"
+      assert Authenticate.classify_refusal(conn.status, body) == :sender_constraint_mismatch
     end
   end
 end

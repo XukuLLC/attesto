@@ -170,6 +170,7 @@ defmodule Attesto.Introspection do
     base
     |> put_if_present(:now, Keyword.get(opts, :now))
     |> put_if_present(:trusted_audiences, Keyword.get(opts, :trusted_audiences))
+    |> put_if_present(:pairwise_subject_salt, Keyword.get(opts, :pairwise_subject_salt))
   end
 
   defp put_if_present(opts, _key, nil), do: opts

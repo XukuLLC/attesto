@@ -301,7 +301,7 @@ defmodule Attesto.Federation.TrustChain do
   defp valid_domain_constraint?(_constraint), do: false
 
   defp valid_domain_label?(label) when byte_size(label) in 1..63 do
-    String.match?(label, ~r/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/)
+    String.match?(label, ~r/\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\z/)
   end
 
   defp valid_domain_label?(_label), do: false

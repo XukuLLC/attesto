@@ -115,6 +115,36 @@ defmodule Attesto.Key do
   def single_jwk_map?(%{"kty" => kty} = jwk_map) when is_binary(kty), do: not is_map_key(jwk_map, "keys")
   def single_jwk_map?(_jwk_map), do: false
 
+  @doc "Default minimum accepted RSA modulus bit length."
+  @spec default_minimum_rsa_bits() :: pos_integer()
+  def default_minimum_rsa_bits, do: @default_minimum_rsa_bits
+
+  @doc """
+  Return the public JWK field map for a single `JOSE.JWK` struct or single JWK map.
+
+  Raises `ArgumentError` for JWK Set inputs or non-JWK values.
+  """
+  @spec public_map(JOSE.JWK.t() | map()) :: map()
+  def public_map(%JOSE.JWK{keys: :undefined} = jwk) do
+    {_metadata, fields} = JOSE.JWK.to_public_map(jwk)
+
+    if single_jwk_map?(fields) do
+      fields
+    else
+      raise ArgumentError, "expected a single JWK"
+    end
+  end
+
+  def public_map(jwk_map) when is_map(jwk_map) do
+    if single_jwk_map?(jwk_map) do
+      jwk_map |> JOSE.JWK.from_map() |> public_map()
+    else
+      raise ArgumentError, "expected a single JWK map, not a JWK set"
+    end
+  end
+
+  def public_map(_other), do: raise(ArgumentError, "expected a single JWK")
+
   defp validate_single_jwk(jwk_map) do
     if single_jwk_map?(jwk_map), do: :ok, else: {:error, :malformed_jwk}
   end

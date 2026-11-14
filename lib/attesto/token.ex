@@ -74,6 +74,7 @@ defmodule Attesto.Token do
   alias Attesto.Key
   alias Attesto.NumericDate
   alias Attesto.Options
+  alias Attesto.PairwiseSubject
   alias Attesto.PrincipalKind
   alias Attesto.Record
   alias Attesto.Scope
@@ -90,6 +91,7 @@ defmodule Attesto.Token do
   @typ_values [@typ_access, @typ_refresh]
 
   @jti_byte_length 16
+  @pairwise_subject_claim PairwiseSubject.sealed_claim()
 
   # Modest tolerance for a verifier clock running slightly ahead of the
   # issuer's, applied to the `nbf` (not-before) and future-`iat` checks.
@@ -97,6 +99,10 @@ defmodule Attesto.Token do
   # A bearer token is read at a resource server before any authentication;
   # 64 KiB leaves room for rich authorization details.
   @max_token_bytes 64 * 1_024
+
+  @doc "Maximum accepted wire size in bytes of a compact JWT access or refresh token."
+  @spec max_token_bytes() :: pos_integer()
+  def max_token_bytes, do: @max_token_bytes
 
   @type principal :: %{
           required(:kind) => String.t(),
@@ -114,6 +120,7 @@ defmodule Attesto.Token do
           | {:auth_time, non_neg_integer()}
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
+          | {:pairwise, {String.t(), binary()} | nil}
         ]
 
   @type token_response :: %{
@@ -134,6 +141,7 @@ defmodule Attesto.Token do
           | :invalid_dpop_jkt
           | :invalid_mtls_thumbprint
           | :conflicting_confirmation
+          | :invalid_pairwise
 
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
@@ -142,6 +150,7 @@ defmodule Attesto.Token do
           | {:dpop_jkt, String.t() | nil}
           | {:mtls_cert_thumbprint, String.t() | nil}
           | {:require_confirmation_binding, boolean()}
+          | {:pairwise_subject_salt, binary() | nil}
         ]
 
   @type verify_error ::
@@ -221,7 +230,8 @@ defmodule Attesto.Token do
          {:ok, typ} <- normalize_typ(opts),
          {:ok, audience} <- normalize_audience(config, opts),
          {:ok, auth_context} <- normalize_auth_context(opts),
-         {:ok, confirmation} <- normalize_confirmation(opts) do
+         {:ok, confirmation} <- normalize_confirmation(opts),
+         {:ok, pairwise_claims} <- normalize_pairwise(principal, opts) do
       iat = NumericDate.now(opts)
       lifetime = NumericDate.bounded_lifetime(opts, :lifetime, config.default_lifetime_seconds)
       scope_string = Enum.join(scopes, " ")
@@ -241,6 +251,7 @@ defmodule Attesto.Token do
           "typ" => typ
         }
         |> Map.merge(extra)
+        |> Map.merge(pairwise_claims)
         # RFC 9470 / OIDC Core §2: the authentication context (`acr` /
         # `auth_time`) the end-user grant established, carried onto the access
         # token so a resource server can enforce a step-up requirement. Present
@@ -353,6 +364,11 @@ defmodule Attesto.Token do
     * `:mtls_cert_thumbprint` - the presented certificate's thumbprint
       (from `Attesto.MTLS.compute_thumbprint/1`). Required iff the token
       carries `cnf.x5t#S256`.
+    * `:pairwise_subject_salt` - the authorization server's pairwise salt (at
+      least `Attesto.PairwiseSubject.min_salt_bytes/0` bytes). Required when
+      verifying an access token that carries a sealed pairwise host subject
+      claim; when absent or invalid on such a token, verification fails with
+      `:invalid_claims`.
 
   Returns `{:ok, claims}` (string-keyed payload) or `{:error, reason}`.
   """
@@ -371,6 +387,7 @@ defmodule Attesto.Token do
          :ok <- check_not_before(claims, opts),
          :ok <- check_required_claims(config, claims),
          :ok <- check_iat_not_future(claims, opts),
+         {:ok, claims} <- unseal_pairwise_subject(claims, opts),
          {:ok, kind} <- check_principal(config, claims),
          :ok <- check_principal_identity_claims(kind, claims),
          :ok <- check_typ(claims, opts),
@@ -887,6 +904,43 @@ defmodule Attesto.Token do
     end
   end
 
+  defp normalize_pairwise(%{sub: subject}, opts) do
+    case Keyword.get(opts, :pairwise) do
+      nil ->
+        {:ok, %{}}
+
+      {sector, salt} when is_binary(sector) and sector != "" ->
+        if PairwiseSubject.valid_salt?(salt) do
+          pairwise_sub = PairwiseSubject.derive(sector, subject, salt)
+          sealed = PairwiseSubject.seal_subject(subject, pairwise_sub, salt)
+          {:ok, %{"sub" => pairwise_sub, @pairwise_subject_claim => sealed}}
+        else
+          {:error, :invalid_pairwise}
+        end
+
+      _other ->
+        {:error, :invalid_pairwise}
+    end
+  end
+
+  defp unseal_pairwise_subject(claims, opts) do
+    case Map.fetch(claims, @pairwise_subject_claim) do
+      :error ->
+        {:ok, claims}
+
+      {:ok, sealed} ->
+        salt = Keyword.get(opts, :pairwise_subject_salt)
+        pairwise_sub = Map.get(claims, "sub")
+
+        with {:ok, host_sub} <- PairwiseSubject.unseal_subject(sealed, pairwise_sub, salt),
+             true <- Record.non_empty_binary?(host_sub) do
+          {:ok, claims |> Map.put("sub", host_sub) |> Map.delete(@pairwise_subject_claim)}
+        else
+          _ -> {:error, :invalid_claims}
+        end
+    end
+  end
+
   defp check_typ(%{"typ" => typ}, opts) when typ in @typ_values do
     expected = Keyword.get(opts, :expected_typ, @typ_access)
 
@@ -918,14 +972,12 @@ defmodule Attesto.Token do
   end
 
   defp matching_header_typ(typ, expected) when is_binary(typ) do
-    if media_type(typ) == media_type(expected), do: :ok, else: {:error, :invalid_typ}
+    if Claims.typ_matches?(typ, [expected], normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :invalid_typ}
   end
 
   defp matching_header_typ(_absent_or_invalid, _expected), do: {:error, :invalid_typ}
-
-  defp media_type(typ) do
-    typ |> String.downcase() |> String.replace_prefix("application/", "")
-  end
 
   # ----- internal: helpers -----
 

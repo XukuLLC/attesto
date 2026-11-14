@@ -5,7 +5,7 @@ defmodule Attesto.CIBA.Record do
   alias Attesto.{Claims, Record, Scope}
 
   @notification_token_pattern ~r/\A[A-Za-z0-9\-._~+\/]+=*\z/
-  @notification_token_max_length 1024
+  @notification_token_max_length Request.notification_token_max_length()
   @statuses [:pending, :approved, :denied, :consumed]
   @canonical_data_keys [
     :acr_values,
@@ -138,8 +138,7 @@ defmodule Attesto.CIBA.Record do
 
   defp optional_display_text?(nil), do: true
 
-  defp optional_display_text?(value) when is_binary(value) and value != "",
-    do: String.valid?(value) and not Regex.match?(~r/[\x00-\x1F\x7F]/u, value)
+  defp optional_display_text?(value) when is_binary(value) and value != "", do: Claims.no_terminal_controls?(value)
 
   defp optional_display_text?(_value), do: false
 

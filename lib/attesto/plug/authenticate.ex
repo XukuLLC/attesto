@@ -112,14 +112,12 @@ if Code.ensure_loaded?(Plug.Conn) do
     RFC 9449 §4.3 binds a proof to the URI of the request it was made for, so
     that a proof sent to one server cannot be replayed to another. That holds
     only if the URI a proof is compared against names this server whatever
-    the request says. Without `:origin` or `:htu`, the plug builds it from
-    `conn.scheme`, `conn.host`, and `conn.port`, and `conn.host` comes from
-    the client's `Host` header. A resource server that answers requests for
-    any `Host` then accepts a proof made for another server, together with a
-    DPoP-bound access token whose audience it also accepts, when the sender
-    puts that server's name in `Host`. The default also requires the
-    scheme and port seen by the application to match the external request,
-    which a TLS-terminating proxy changes unless the host rewrites them.
+    the request says, so `:origin` or `:htu` is required whenever DPoP is
+    enabled. Without a pinned target URI, `conn.host` comes from the client's
+    `Host` header and the scheme and port can differ behind a TLS-terminating
+    proxy, so a resource server with no pin refuses to start unless DPoP is
+    disabled (by omitting `:replay_check` without
+    `dpop_replay_unprotected_acknowledged?: true`).
 
     Set `:origin` to the origin clients use. Use `:htu` instead when the
     resource server answers on several origins or behind a path-rewriting
@@ -180,32 +178,46 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     defp validate_htu_options!(opts) do
-      if Keyword.has_key?(opts, :origin) and Keyword.has_key?(opts, :htu) do
+      validate_htu_fn!(opts)
+      validate_origin_opt!(opts)
+      require_dpop_pin!(opts)
+    end
+
+    defp validate_htu_fn!(opts) do
+      has_htu? = Keyword.has_key?(opts, :htu)
+
+      if has_htu? and not is_function(Keyword.get(opts, :htu), 1) do
+        raise ArgumentError,
+              "Attesto.Plug.Authenticate: :htu must be a 1-arity function (conn -> uri); " <>
+                "got #{inspect(Keyword.get(opts, :htu))}"
+      end
+
+      if Keyword.has_key?(opts, :origin) and has_htu? do
         raise ArgumentError,
               "Attesto.Plug.Authenticate: set either :origin or :htu, not both; " <>
                 ":htu builds the whole DPoP target URI."
       end
+    end
 
-      case Keyword.fetch(opts, :origin) do
-        :error ->
-          :ok
-
-        {:ok, origin} ->
-          if !origin?(origin) do
-            raise ArgumentError,
-                  "Attesto.Plug.Authenticate: :origin must be an https URL with a host, an " <>
-                    "optional port, and no path, userinfo, query, or fragment " <>
-                    "(e.g. \"https://api.example\"); got #{inspect(origin)}"
-          end
+    defp validate_origin_opt!(opts) do
+      with {:ok, origin} <- Keyword.fetch(opts, :origin),
+           false <- origin?(origin) do
+        raise ArgumentError,
+              "Attesto.Plug.Authenticate: :origin must be an https URL with a host, an " <>
+                "optional port, and no path, userinfo, query, or fragment " <>
+                "(e.g. \"https://api.example\"); got #{inspect(origin)}"
       end
     end
 
-    defp origin?(origin) when is_binary(origin) do
-      Attesto.URI.https_identifier?(origin) and
-        match?({:ok, %URI{path: path, query: nil}} when path in [nil, "", "/"], URI.new(origin))
+    defp require_dpop_pin!(opts) do
+      if accepts_dpop?(opts) and not Keyword.has_key?(opts, :origin) and not Keyword.has_key?(opts, :htu) do
+        raise ArgumentError,
+              "Attesto.Plug.Authenticate: a mount that accepts DPoP requires :origin or :htu " <>
+                "(so the request Host header cannot select the expected DPoP htu)."
+      end
     end
 
-    defp origin?(_origin), do: false
+    defp origin?(origin), do: Attesto.URI.origin?(origin)
 
     # RFC 9470: a route may declare a step-up requirement (`step_up:
     # [acr_values: [...], max_age: ...]` or a `%Attesto.StepUp.Requirement{}`).
@@ -300,11 +312,73 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
-    defp parse_authorization(value, opts) do
+    @sender_constraint_reasons ~w(
+      invalid_dpop_jkt invalid_mtls_thumbprint
+      dpop_proof_required dpop_binding_mismatch dpop_proof_unexpected
+      mtls_cert_required mtls_binding_mismatch mtls_cert_unexpected
+      conflicting_confirmation unsupported_confirmation
+    )
+
+    @doc "Token verification failure descriptions corresponding to sender-constraint mismatches."
+    @spec sender_constraint_reasons() :: [String.t()]
+    def sender_constraint_reasons, do: @sender_constraint_reasons
+
+    @doc """
+    Classify an OAuth HTTP error response (`status` and decoded `body` map) into
+    a bounded telemetry outcome atom.
+    """
+    @spec classify_refusal(integer(), term()) :: atom()
+    def classify_refusal(503, _body), do: :verifier_unavailable
+
+    def classify_refusal(status, %{"error" => error} = body) when is_integer(status) do
+      error_outcome(error, Map.get(body, "error_description"), status)
+    end
+
+    def classify_refusal(status, _body) when is_integer(status), do: status_outcome(status)
+
+    defp error_outcome("insufficient_scope", _description, _status), do: :insufficient_scope
+    defp error_outcome("use_dpop_nonce", _description, _status), do: :dpop_nonce_required
+    defp error_outcome("invalid_dpop_proof", "replay", _status), do: :dpop_replay
+    defp error_outcome("invalid_dpop_proof", _description, _status), do: :invalid_dpop_proof
+    defp error_outcome("insufficient_user_authentication", _description, _status), do: :step_up_required
+    defp error_outcome("invalid_token", description, _status), do: token_outcome(description)
+    defp error_outcome(_error, _description, status), do: status_outcome(status)
+
+    defp token_outcome("missing or malformed Authorization header"), do: :missing_credentials
+    defp token_outcome("expired"), do: :token_expired
+    defp token_outcome("not_yet_valid"), do: :token_not_yet_valid
+    defp token_outcome("invalid_audience"), do: :invalid_audience
+    defp token_outcome("invalid_issuer"), do: :invalid_issuer
+    defp token_outcome("request is not authenticated"), do: :unauthenticated
+    defp token_outcome("request was not authenticated by this protected-resource boundary"), do: :unauthenticated
+    defp token_outcome(reason) when reason in @sender_constraint_reasons, do: :sender_constraint_mismatch
+    defp token_outcome(_reason), do: :invalid_token
+
+    defp status_outcome(401), do: :invalid_token
+    defp status_outcome(403), do: :insufficient_scope
+    defp status_outcome(503), do: :verifier_unavailable
+    defp status_outcome(_status), do: :other
+
+    @doc "Compute the expected DPoP `htu` by joining a pinned `origin` and `request_path`."
+    @spec origin_htu(String.t(), String.t()) :: String.t()
+    def origin_htu(origin, request_path) when is_binary(origin) and is_binary(request_path) do
+      String.trim_trailing(origin, "/") <> request_path
+    end
+
+    @doc "Resolve the expected DPoP `htu` from `conn` and plug `opts` without consulting `Host`."
+    @spec expected_htu(Plug.Conn.t(), keyword()) :: {:ok, String.t()} | {:error, :invalid_http_uri}
+    def expected_htu(conn, opts), do: htu(conn, opts)
+
+    @doc """
+    Parse an HTTP `Authorization` header value into `{:ok, :bearer | :dpop, token}`
+    or `:malformed`. Trims whitespace around the credential.
+    """
+    @spec parse_authorization(term()) :: {:ok, :bearer | :dpop, String.t()} | :malformed
+    def parse_authorization(value) when is_binary(value) do
       case String.split(value, " ", parts: 2) do
         [scheme, token] ->
           case String.downcase(scheme) do
-            "bearer" -> bearer_header_authorization(token, opts)
+            "bearer" -> authorization_token(:bearer, token)
             "dpop" -> authorization_token(:dpop, token)
             _ -> :malformed
           end
@@ -314,8 +388,16 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
-    defp bearer_header_authorization(token, opts) do
-      if bearer_method?(opts, :header), do: authorization_token(:bearer, token), else: :malformed
+    def parse_authorization(_value), do: :malformed
+
+    defp parse_authorization(value, opts) do
+      case parse_authorization(value) do
+        {:ok, :bearer, token} ->
+          if bearer_method?(opts, :header), do: {:ok, :bearer, token}, else: :malformed
+
+        other ->
+          other
+      end
     end
 
     defp authorization_token(scheme, token) do
@@ -556,7 +638,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp verify_token(config, token, dpop_jkt, mtls_thumb, opts) do
       verify_opts =
         [dpop_jkt: dpop_jkt, mtls_cert_thumbprint: mtls_thumb] ++
-          Keyword.take(opts, [:trusted_audiences, :allow_ambient_mtls])
+          Keyword.take(opts, [:trusted_audiences, :allow_ambient_mtls, :pairwise_subject_salt])
 
       opts
       |> Keyword.get(:verify)
@@ -733,20 +815,12 @@ if Code.ensure_loaded?(Plug.Conn) do
           end
 
         {_htu, origin} when is_binary(origin) ->
-          {:ok, String.trim_trailing(origin, "/") <> conn.request_path}
+          {:ok, origin_htu(origin, conn.request_path)}
 
         _default ->
-          scheme = Atom.to_string(conn.scheme)
-          {:ok, scheme <> "://" <> uri_host(conn.host) <> port_suffix(scheme, conn.port) <> conn.request_path}
+          {:error, :invalid_http_uri}
       end
     end
-
-    defp uri_host("[" <> _rest = host), do: host
-    defp uri_host(host) when is_binary(host), do: if(String.contains?(host, ":"), do: "[" <> host <> "]", else: host)
-
-    defp port_suffix("https", 443), do: ""
-    defp port_suffix("http", 80), do: ""
-    defp port_suffix(_scheme, port), do: ":" <> Integer.to_string(port)
 
     defp issue_nonce(opts) do
       case Keyword.get(opts, :nonce_issue) do

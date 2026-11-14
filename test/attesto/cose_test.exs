@@ -275,5 +275,27 @@ defmodule Attesto.CoseTest do
     assert {:error, :invalid_cose} = Cose.verify1_detached(embedded, "not detached", public, [])
   end
 
+  test "rejects JWK Set maps and JOSE.JWK set structs in key_to_cose/1 and verify1/3" do
+    {pem, public} = keypair()
+    signed = Cose.sign1(pem, "payload", [])
+    jwk_set_map = %{"keys" => [public]}
+    mixed_set_map = Map.put(public, "keys", [public])
+    jwk_set_struct = JOSE.JWK.from_map(jwk_set_map)
+
+    for input <- [jwk_set_map, mixed_set_map, jwk_set_struct] do
+      assert_raise ArgumentError, fn -> Cose.key_to_cose(input) end
+      assert {:error, :invalid_key} = Cose.verify1(signed, input, [])
+    end
+
+    assert Cose.alg_id("ES256") == -7
+    assert Cose.alg_id("ES384") == -35
+    assert Cose.alg_id("ES512") == -36
+    assert Cose.max_cbor_bytes() == 1_048_576
+    assert Attesto.Key.public_map(public) == public
+    assert Attesto.Key.default_minimum_rsa_bits() == 2048
+    assert_raise ArgumentError, fn -> Attesto.Key.public_map(jwk_set_struct) end
+    assert_raise ArgumentError, fn -> Attesto.Key.public_map(mixed_set_map) end
+  end
+
   defp bxor(left, right), do: :erlang.bxor(left, right)
 end

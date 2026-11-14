@@ -6,6 +6,97 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.20.0] - 2026-11-14
+
+### Security
+
+- `Attesto.Plug.Authenticate.init/1` now raises `ArgumentError` when DPoP is
+  accepted (`accepts_dpop?/1`: a 2-arity `:replay_check` function or
+  `dpop_replay_unprotected_acknowledged?: true`) without a pinned `:origin` or
+  a 1-arity `:htu` callback, or when `:htu` is not a 1-arity function. It no
+  longer falls back to the request `Host` header, and a `nil` return from `:htu`
+  is refused. Bearer-only mounts (where DPoP replay checking is omitted and
+  `dpop_replay_unprotected_acknowledged?` is not `true`) are unaffected.
+- `Attesto.PairwiseSubject` now restricts `sector_identifier/1` to non-loopback
+  `https` redirect URIs sharing one host and provides `seal_subject/3` /
+  `unseal_subject/3` (block-padded AES-256-GCM with per-token derived keys and
+  `pairwise_sub` AAD) so `Attesto.Token.mint/3` (via `:pairwise`) carries the
+  derived pairwise `sub` in pairwise access tokens instead of exposing the host
+  subject to pairwise clients. Same-deployment callers verifying pairwise tokens
+  via `Attesto.Token.verify/3` must pass `:pairwise_subject_salt`.
+- `Attesto.X509.verify/2` now enforces constraints (including `BasicConstraints`,
+  `KeyUsage`, `pathLenConstraint`, and `NameConstraints`) on both self-signed
+  and non-self-signed CA trust anchors via `:public_key.pkix_path_validation/3`,
+  refuses non-CA certificates used to issue chains, enforces CA `dNSName`
+  `NameConstraints` against leaf `uniformResourceIdentifier` SAN hosts unless
+  the CA defines a permitted URI subtree, rejects MD5 and SHA-1 signatures
+  anywhere in the chain, and returns `:untrusted_certificate` under `:haip`
+  when the leaf is self-signed or any chain certificate matches a trust anchor
+  (was `:invalid_certificate`).
+- `Attesto.Key.public_map/1` and `Attesto.Cose` refuse JWK Sets (`%{"keys" => _}`)
+  where a single JWK is expected.
+- `Attesto.CIBA` bounds `binding_message` by UTF-8 byte length rather than only
+  grapheme count and rejects C1 control characters in CIBA display text.
+- `Attesto.ClientIdMetadata` requires a non-empty `grant_types` list in client
+  metadata documents.
+- `Attesto.IPAddress` refuses IPv4-mapped networks and IPv6 zone IDs in CIDR
+  lists.
+- `Attesto.SessionState.origin/1` refuses userinfo and percent-encoded hosts in
+  origin comparison.
+- `Attesto.DeviceCodeStore.ETS`, `Attesto.CIBAStore.ETS`, and
+  `Attesto.PreAuthorizedCodeStore.ETS` implement `delete_unconsumed/1` for
+  subject, client, and session revocation across unconsumed pending and approved
+  grants.
+
+### Breaking
+
+- `Attesto.Plug.Authenticate.init/1` requires `:origin` or `:htu` at boot
+  whenever the mount accepts DPoP (`:replay_check` 2-arity function or
+  `dpop_replay_unprotected_acknowledged?: true`).
+- `Attesto.Token.verify/3` requires `:pairwise_subject_salt` when verifying
+  access tokens carrying the sealed `"attesto.pairwise_subject"` claim;
+  otherwise verification fails closed with `:invalid_claims`.
+- `Attesto.PairwiseSubject.sector_identifier/1` refuses non-`https` and loopback
+  redirect URIs.
+- `Attesto.X509.verify/2` rejects MD5 and SHA-1 signatures anywhere in the chain
+  and refuses non-CA trust anchors used as issuers.
+- `Attesto.ClientIdMetadata` rejects metadata documents with empty `grant_types`.
+- `Attesto.CIBA` rejects C1 control characters in CIBA display text.
+- `Attesto.IPAddress.parse_cidrs!/1` rejects IPv4-mapped networks and zone IDs.
+- `Attesto.SessionState.origin/1` rejects userinfo and percent-encoded hosts.
+
+### Added
+
+- Shared cross-package helpers on core modules:
+  - `Attesto.AuthorizationRequest`: `check_auth_time/4`, `check_nonce/2`,
+    `resolve_request_object/2`
+  - `Attesto.CIBA.Request.valid_acr_value?/1`
+  - `Attesto.Claims`: `storable_text?/1`, `no_terminal_controls?/2`
+  - `Attesto.Cose.alg_id/1`, `Attesto.Key.public_map/1`,
+    `Attesto.JWE.peek_protected_header/1`, `Attesto.Mdoc.decode_issuer_signed/1`,
+    `Attesto.Mdoc.extract_x5chain/1`
+  - `Attesto.IPAddress.unmap_ipv4/1`
+  - `Attesto.Plug.Authenticate`: `accepts_dpop?/1`, `classify_refusal/2`
+    (classifying HTTP `503` responses as `:verifier_unavailable` before
+    inspecting `"error"`), `sender_constraint_reasons/0`, `origin_htu/2`,
+    `expected_htu/2`, `parse_authorization/1`
+  - `Attesto.Plug.OAuthError.format_challenge/2`
+  - `Attesto.ProtectedResourceMetadata`: `well_known_path/1`, `well_known_uri/1`
+  - `Attesto.URI`: `origin/1`, `same_origin?/2`, `origin?/2`,
+    `issuer_identifier?/2`, `valid_percent_encoding?/1`
+  - `Attesto.PresentationRequest.valid_dcql_id?/1` and `Attesto.VpToken`:
+    `dcql_value_matches?/2`, `resolve_json_path/2`
+  - `Attesto.X509`: `max_cert_bytes/0`, `max_chain_length/0`,
+    `max_trust_anchors/0` (64), `valid_trust_anchors?/1`, `x509_hash_client_id/1`
+  - `Attesto.PairwiseSubject`: `seal_subject/3`, `unseal_subject/3`,
+    `sealed_claim/0`
+  - `:pairwise` option on `Attesto.Token.mint/3`
+  - Size limit accessors (`max_proof_bytes/0`, `max_cbor_bytes/0`,
+    `max_assertion_bytes/0`, `max_presentation_bytes/0`, `max_key_binding_bytes/0`,
+    `max_protected_segment_bytes/0`, `max_signature_segment_bytes/0`,
+    `max_request_object_bytes/0`, `max_attestation_bytes/0`, `max_pop_bytes/0`,
+    `max_jti_length/0`, `max_status_list_token_bytes/0`, `max_token_bytes/0`)
+
 ## [2.19.0] - 2026-11-13
 
 ### Added

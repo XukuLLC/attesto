@@ -57,6 +57,10 @@ defmodule Attesto.IdentityAssertion do
   @max_assertion_bytes 64 * 1_024
   @required_claims ~w(iss sub aud client_id jti exp iat)
 
+  @doc "Maximum accepted wire size in bytes of a compact Identity Assertion (ID-JAG)."
+  @spec max_assertion_bytes() :: pos_integer()
+  def max_assertion_bytes, do: @max_assertion_bytes
+
   @typedoc "The validated, string-keyed ID-JAG claim set."
   @type claims :: %{optional(String.t()) => term()}
 
@@ -201,8 +205,10 @@ defmodule Attesto.IdentityAssertion do
   # draft §5: the JOSE header `typ` MUST be `oauth-id-jag+jwt`. `typ` is a media
   # type (RFC 7515 §4.1.9), and media types are case-insensitive (RFC 2045
   # §5.1), so compare case-insensitively.
-  defp check_typ(%{"typ" => typ}) when is_binary(typ) do
-    if String.downcase(typ) == @typ, do: :ok, else: {:error, :invalid_typ}
+  defp check_typ(%{"typ" => typ}) do
+    if is_binary(typ) and Claims.typ_matches?(typ, [@typ], normalization: :case_insensitive),
+      do: :ok,
+      else: {:error, :invalid_typ}
   end
 
   defp check_typ(_header), do: {:error, :invalid_typ}

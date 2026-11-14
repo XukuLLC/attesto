@@ -13,6 +13,39 @@ defmodule Attesto.Claims do
   @type audience_mode :: :scalar_only | :array | :single_element | :all_array_members
   @max_exact_integer 9_007_199_254_740_991
   @max_portable_json_depth 64
+  @terminal_controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
+  @multiline_terminal_controls ~r/[\x{0000}-\x{0008}\x{000B}-\x{001F}\x{007F}-\x{009F}]/u
+
+  @doc """
+  Return whether `value` is valid UTF-8 text without NUL (U+0000), safe to
+  persist in UTF-8 / PostgreSQL text and JSONB stores.
+  """
+  @spec storable_text?(term()) :: boolean()
+  def storable_text?(value) do
+    is_binary(value) and String.valid?(value) and not String.contains?(value, <<0>>)
+  end
+
+  @doc """
+  Return whether `value` is valid UTF-8 text free of C0, DEL, and C1 terminal
+  control characters.
+
+  By default all C0 (`0x00..0x1F`), DEL (`0x7F`), and C1 (`0x80..0x9F`) controls
+  are rejected. Pass `allow_multiline?: true` to permit HT (`\\t`) and LF
+  (`\\n`) while still rejecting CR (`\\r`) and all other controls.
+  """
+  @spec no_terminal_controls?(term(), keyword()) :: boolean()
+  def no_terminal_controls?(value, opts \\ []) when is_list(opts) do
+    if storable_text?(value) do
+      regex =
+        if Keyword.get(opts, :allow_multiline?, false) == true,
+          do: @multiline_terminal_controls,
+          else: @terminal_controls
+
+      not Regex.match?(regex, value)
+    else
+      false
+    end
+  end
 
   @doc """
   Return whether `value` is a portable, lossless JSON object for persisted
@@ -47,9 +80,7 @@ defmodule Attesto.Claims do
   defp portable_json_value?(value, depth) when is_map(value), do: portable_json_object?(value, depth + 1)
   defp portable_json_value?(_value, _depth), do: false
 
-  defp portable_json_string?(value) do
-    is_binary(value) and String.valid?(value) and not String.contains?(value, <<0>>)
-  end
+  defp portable_json_string?(value), do: storable_text?(value)
 
   defp portable_json_array?(value, depth) when is_list(value) and depth <= @max_portable_json_depth,
     do: portable_json_array_tail?(value, depth)
@@ -151,11 +182,21 @@ defmodule Attesto.Claims do
   def typ_matches?(typ, accepted, opts) when is_list(accepted) and is_list(opts) do
     case Keyword.get(opts, :normalization) do
       :application_subtype -> typ_matches_application_subtype?(typ, accepted)
+      :case_insensitive -> typ_matches_case_insensitive?(typ, accepted)
       _ -> false
     end
   end
 
   def typ_matches?(_typ, _accepted, _opts), do: false
+
+  defp typ_matches_case_insensitive?(nil, accepted), do: Enum.member?(accepted, nil)
+
+  defp typ_matches_case_insensitive?(typ, accepted) when is_binary(typ) do
+    down = String.downcase(typ)
+    Enum.any?(accepted, &(is_binary(&1) and String.downcase(&1) == down))
+  end
+
+  defp typ_matches_case_insensitive?(_typ, _accepted), do: false
 
   defp normalize_key(key, _policy) when is_binary(key), do: {:ok, key}
   defp normalize_key(key, :convert) when is_atom(key), do: {:ok, Atom.to_string(key)}

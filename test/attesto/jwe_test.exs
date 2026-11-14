@@ -157,6 +157,14 @@ defmodule Attesto.JWETest do
              JWE.encrypt(context.public, "private", Map.put(context.header, "apu", "not+base64url"))
   end
 
+  test "peek_protected_header/1 decodes valid headers and enforces 16 KiB limit", context do
+    {:ok, compact} = JWE.encrypt(context.public, "private", context.header)
+    assert {:ok, %{"alg" => _}} = JWE.peek_protected_header(compact)
+
+    oversized_header = Base.url_encode64(String.duplicate("a", 16_385), padding: false)
+    assert {:error, :invalid_jwe} = JWE.peek_protected_header("#{oversized_header}.a.b.c.d")
+  end
+
   defp rewrite_header(compact, update) do
     rewrite_segment(compact, 0, fn bytes -> bytes |> JSON.decode!() |> update.() |> JSON.encode!() end)
   end

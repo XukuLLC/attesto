@@ -63,10 +63,10 @@ defmodule Attesto.JWKS do
   end
 
   defp public_jwk(pem, alg) do
-    {_kty, public_map} =
+    public_map =
       pem
       |> Key.jwk()
-      |> JOSE.JWK.to_public_map()
+      |> Key.public_map()
 
     Map.merge(public_map, %{"kid" => Key.kid(pem), "use" => "sig", "alg" => alg})
   end

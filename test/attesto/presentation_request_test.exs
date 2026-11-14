@@ -264,5 +264,40 @@ defmodule Attesto.PresentationRequestTest do
         )
       end
     end
+
+    test "supports dc_api / dc_api.jwt with expected_origins and validates DCQL IDs" do
+      assert PresentationRequest.valid_dcql_id?("pid-1_a")
+      refute PresentationRequest.valid_dcql_id?("bad id!")
+
+      dcql = PresentationRequest.dcql_query(credentials: [%{id: "pid", format: "dc+sd-jwt"}])
+
+      for mode <- ["dc_api", "dc_api.jwt"] do
+        req =
+          PresentationRequest.build(
+            client_id: "https://verifier.example.com",
+            response_type: "vp_token",
+            response_mode: mode,
+            expected_origins: ["https://verifier.example.com"],
+            nonce: "n-1",
+            dcql_query: dcql
+          )
+
+        assert req["response_mode"] == mode
+        assert req["expected_origins"] == ["https://verifier.example.com"]
+        refute Map.has_key?(req, "response_uri")
+        refute Map.has_key?(req, "state")
+      end
+
+      assert_raise ArgumentError, ~r/:expected_origins/, fn ->
+        PresentationRequest.build(
+          client_id: "https://verifier.example.com",
+          response_type: "vp_token",
+          response_mode: "dc_api",
+          expected_origins: ["https://verifier.example.com/"],
+          nonce: "n-1",
+          dcql_query: dcql
+        )
+      end
+    end
   end
 end

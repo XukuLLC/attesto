@@ -279,6 +279,18 @@ defmodule Attesto.Federation.TrustChainTest do
              TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
   end
 
+  test "refuses naming constraints containing a domain label with a trailing newline" do
+    fixture =
+      chain_fixture(
+        anchor_constraints: %{
+          "naming_constraints" => %{"excluded" => [".bad.example\n"]}
+        }
+      )
+
+    assert {:error, :constraint_violation} =
+             TrustChain.validate(fixture.chain, fixture.anchor_jwks, now: @now)
+  end
+
   test "fails closed on malformed naming constraints while ignoring unrelated extensions" do
     malformed =
       chain_fixture(anchor_constraints: %{"naming_constraints" => %{"permitted" => []}})

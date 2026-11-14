@@ -343,13 +343,9 @@ defmodule Attesto.PresentationSession do
   defp valid_issuer_trust?({:issuer_jwks, jwks}), do: is_map(jwks) or is_list(jwks)
   defp valid_issuer_trust?({:resolve_issuer, resolver}), do: is_function(resolver, 1)
 
-  defp valid_issuer_trust?({:trusted_certificates, anchors}), do: anchors != [] and certificate_binaries?(anchors)
+  defp valid_issuer_trust?({:trusted_certificates, anchors}), do: Attesto.X509.valid_trust_anchors?(anchors)
 
   defp valid_issuer_trust?(_issuer_trust), do: false
-
-  defp certificate_binaries?([]), do: true
-  defp certificate_binaries?([anchor | rest]) when is_binary(anchor), do: certificate_binaries?(rest)
-  defp certificate_binaries?(_anchors), do: false
 
   defp non_empty_string?(value), do: is_binary(value) and value != ""
 
@@ -460,7 +456,8 @@ defmodule Attesto.PresentationSession do
           :accepted_algs,
           :enforce_fapi_alg_policy,
           :certificate_trust,
-          :haip
+          :haip,
+          :dc_api_origin
         ])
       )
 

@@ -254,6 +254,20 @@ defmodule Attesto.ClientIdMetadataTest do
                ClientIdMetadata.validate_document(client_id, doc)
     end
 
+    test "accepts loopback HTTP redirect URIs on port 0 while rejecting :0 elsewhere (RFC 8252 §7.3)" do
+      client_id = "https://app.example/meta"
+
+      for uri <- ["http://127.0.0.1:0/cb", "http://[::1]:0/cb", "http://localhost:0/cb"] do
+        doc = %{"client_id" => client_id, "redirect_uris" => [uri]}
+        assert {:ok, _} = ClientIdMetadata.validate_document(client_id, doc)
+      end
+
+      for bad_uri <- ["https://app.example:0/cb", "http://evil.example:0/cb"] do
+        doc = %{"client_id" => client_id, "redirect_uris" => [bad_uri]}
+        assert {:error, :invalid_redirect_uris} = ClientIdMetadata.validate_document(client_id, doc)
+      end
+    end
+
     test "rejects redirect_uris with fragments, relative paths, or malformed ports (RFC 6749 §3.1.2)" do
       client_id = "https://app.example/meta"
 
@@ -372,6 +386,13 @@ defmodule Attesto.ClientIdMetadataTest do
         assert {:error, :invalid_redirect_uris} =
                  ClientIdMetadata.validate_document(client_id, %{"client_id" => client_id, "grant_types" => grants})
       end
+
+      assert {:error, :invalid_metadata} =
+               ClientIdMetadata.validate_document(client_id, %{
+                 "client_id" => client_id,
+                 "redirect_uris" => ["https://app.example/cb"],
+                 "grant_types" => []
+               })
     end
 
     test "rejects private and symmetric JWK material, including null private members" do

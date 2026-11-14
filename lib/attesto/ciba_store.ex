@@ -131,4 +131,14 @@ defmodule Attesto.CIBAStore do
   'approved' AND expires_at > $now RETURNING`.
   """
   @callback consume(auth_req_id_hash(), opts :: map()) :: {:ok, entry()} | :error
+
+  @doc """
+  Delete every unconsumed (`:pending` or `:approved`) CIBA request matching `criteria`
+  and return `{:ok, deleted_count}`.
+
+  See `Attesto.RevocationCriteria`. Optional on custom stores.
+  """
+  @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks delete_unconsumed: 1
 end

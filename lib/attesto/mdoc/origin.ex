@@ -33,10 +33,8 @@ defmodule Attesto.Mdoc.Origin do
   defp web_origin?(_uri, _origin), do: false
 
   defp valid_host?(host) do
-    if String.contains?(host, ":") do
-      match?({:ok, _address}, :inet.parse_ipv6_address(String.to_charlist(host)))
-    else
-      Regex.match?(~r/\A[a-zA-Z0-9.-]+\z/, host)
-    end
+    Attesto.URI.valid_host?(host) and
+      (not String.contains?(host, ":") or
+         match?({:ok, _address}, :inet.parse_ipv6_address(String.to_charlist(host))))
   end
 end

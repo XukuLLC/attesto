@@ -22,11 +22,13 @@ if Code.ensure_loaded?(CBOR) do
 
     @alg_es256 -7
     @coordinate_bytes 32
+    @max_cbor_bytes 1_048_576
     @algorithms %{
       -7 => %{name: "ES256", curve: "P-256", hash: :sha256, coordinate_bytes: 32},
       -35 => %{name: "ES384", curve: "P-384", hash: :sha384, coordinate_bytes: 48},
       -36 => %{name: "ES512", curve: "P-521", hash: :sha512, coordinate_bytes: 66}
     }
+    @alg_ids_by_name Map.new(@algorithms, fn {id, %{name: name}} -> {name, id} end)
 
     @type verify_error ::
             :algorithm_key_mismatch
@@ -162,6 +164,15 @@ if Code.ensure_loaded?(CBOR) do
       _error -> reraise(ArgumentError, [message: "expected an EC P-256 public JWK"], __STACKTRACE__)
     end
 
+    @doc "Map a JOSE signing algorithm name (such as `\"ES256\"`) to its COSE algorithm integer."
+    @spec alg_id(term()) :: integer() | nil
+    def alg_id(name) when is_binary(name), do: Map.get(@alg_ids_by_name, name)
+    def alg_id(_name), do: nil
+
+    @doc "Maximum accepted CBOR payload size in bytes."
+    @spec max_cbor_bytes() :: pos_integer()
+    def max_cbor_bytes, do: @max_cbor_bytes
+
     @doc "Convert an EC2 P-256 `COSE_Key` map to a public JWK map."
     @spec cose_to_key(map()) :: map()
     def cose_to_key(%{1 => 2, -1 => 1, -2 => x_value, -3 => y_value}) do
@@ -294,7 +305,7 @@ if Code.ensure_loaded?(CBOR) do
     defp understood_critical_header?(2), do: true
     defp understood_critical_header?(_label), do: false
 
-    defp verification_jwk(%JOSE.JWK{} = jwk), do: validate_verification_jwk(jwk)
+    defp verification_jwk(%JOSE.JWK{keys: :undefined} = jwk), do: validate_verification_jwk(jwk)
 
     defp verification_jwk(jwk_map) when is_map(jwk_map) do
       if Attesto.Key.single_jwk_map?(jwk_map) do
@@ -372,12 +383,14 @@ if Code.ensure_loaded?(CBOR) do
       :public_key.der_encode(:"ECDSA-Sig-Value", {:"ECDSA-Sig-Value", r, s})
     end
 
-    defp public_jwk_map(%JOSE.JWK{} = jwk), do: jwk |> JOSE.JWK.to_public_map() |> elem(1)
+    defp public_jwk_map(%JOSE.JWK{keys: :undefined} = jwk), do: Key.public_map(jwk)
 
     defp public_jwk_map(jwk_map) when is_map(jwk_map) do
-      jwk_map
-      |> JOSE.JWK.from_map()
-      |> public_jwk_map()
+      if Key.single_jwk_map?(jwk_map) do
+        Key.public_map(jwk_map)
+      else
+        raise ArgumentError, "expected an EC P-256 public JWK"
+      end
     end
 
     defp public_jwk_map(_other), do: raise(ArgumentError, "expected an EC P-256 public JWK")
@@ -400,8 +413,6 @@ if Code.ensure_loaded?(CBOR) do
     # with no depth limit, so deep-nesting input amplifies into heap ahead of any
     # signature check. Amplification is linear; a 1 MiB ceiling bounds the
     # worst-case footprint. A COSE_Sign1 is well under this.
-    @max_cbor_bytes 1_048_576
-
     defp decode_complete(encoded) when is_binary(encoded) and byte_size(encoded) > @max_cbor_bytes do
       {:error, :invalid_cose}
     end
@@ -436,5 +447,7 @@ else
     def verify1_detached(_cose_sign1_bytes, _external_payload, _jwk_or_pem, _opts), do: raise(@dep_error)
     def key_to_cose(_public_jwk), do: raise(@dep_error)
     def cose_to_key(_cose_key_map), do: raise(@dep_error)
+    def alg_id(_name), do: raise(@dep_error)
+    def max_cbor_bytes, do: 1_048_576
   end
 end

@@ -55,6 +55,7 @@ defmodule Attesto.CIBA.Request do
   duplicate CIBA transactions within its lifetime.
   """
 
+  alias Attesto.Claims
   alias Attesto.Options
   alias Attesto.RequestObject
   alias Attesto.ResourceIndicator
@@ -84,6 +85,10 @@ defmodule Attesto.CIBA.Request do
   # is 22 characters.
   @notification_token_max_length 1024
   @default_notification_token_min_length 22
+
+  @doc "Maximum accepted length in bytes of a `client_notification_token`."
+  @spec notification_token_max_length() :: pos_integer()
+  def notification_token_max_length, do: @notification_token_max_length
 
   @default_binding_message_max_length 128
   @default_user_code_max_length 64
@@ -460,6 +465,7 @@ defmodule Attesto.CIBA.Request do
 
   defp validate_binding_message(params, opts) do
     max_length = Keyword.get(opts, :binding_message_max_length, @default_binding_message_max_length)
+    max_bytes = max_length * 4
 
     case Map.get(params, "binding_message") do
       nil ->
@@ -468,7 +474,7 @@ defmodule Attesto.CIBA.Request do
           else: {:ok, nil}
 
       message when is_binary(message) ->
-        if displayable?(message) and String.length(message) in 1..max_length,
+        if displayable?(message) and byte_size(message) <= max_bytes and String.length(message) in 1..max_length,
           do: {:ok, message},
           else: {:error, :invalid_binding_message}
 
@@ -478,10 +484,8 @@ defmodule Attesto.CIBA.Request do
   end
 
   # §7.1: the binding message is displayed verbatim on both devices, so it
-  # must be valid UTF-8 plain text with no control characters.
-  defp displayable?(message) do
-    String.valid?(message) and not Regex.match?(~r/[\x00-\x1F\x7F]/u, message)
-  end
+  # must be valid UTF-8 plain text with no C0, DEL, or C1 control characters.
+  defp displayable?(message), do: Claims.no_terminal_controls?(message)
 
   # ----- user_code (§7.1: only when client registration + OP support say so) -----
 
@@ -492,6 +496,7 @@ defmodule Attesto.CIBA.Request do
 
       code when is_binary(code) ->
         if user_code_accepted?(client, opts) and displayable?(code) and
+             byte_size(code) <= @default_user_code_max_length * 4 and
              String.length(code) in 1..@default_user_code_max_length do
           {:ok, code}
         else
@@ -528,11 +533,28 @@ defmodule Attesto.CIBA.Request do
 
   # ----- acr_values (§7.1: space-separated string, order of preference) -----
 
+  @doc """
+  Return whether `value` is a valid ACR value token (non-empty UTF-8 string
+  free of terminal controls, whitespace, quotes, commas, and backslashes).
+  """
+  @spec valid_acr_value?(term()) :: boolean()
+  def valid_acr_value?(value) when is_binary(value) and value != "" do
+    Claims.no_terminal_controls?(value) and not Regex.match?(~r/[\s",\\]/, value)
+  end
+
+  def valid_acr_value?(_value), do: false
+
   defp validate_acr_values(params) do
     case Map.get(params, "acr_values") do
-      nil -> {:ok, []}
-      values when is_binary(values) -> {:ok, Scope.parse(values)}
-      _other -> {:error, :invalid_request}
+      nil ->
+        {:ok, []}
+
+      values when is_binary(values) ->
+        parsed = Scope.parse(values)
+        if Enum.all?(parsed, &valid_acr_value?/1), do: {:ok, parsed}, else: {:error, :invalid_request}
+
+      _other ->
+        {:error, :invalid_request}
     end
   end
 end

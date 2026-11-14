@@ -83,7 +83,7 @@ defmodule Attesto.Config do
   # host-asserted `Attesto.Token.mint/3` `:acr` / `:auth_time` opts - never
   # smuggled in through a principal's free-form `:claims` (which could otherwise
   # forge a token that satisfies a step-up requirement).
-  @reserved_claims ~w(iss aud exp iat jti sub scope typ cnf acr auth_time)
+  @reserved_claims ~w(iss aud exp iat jti sub scope typ cnf acr auth_time attesto.pairwise_subject)
 
   @doc """
   Build and validate a `Config`.

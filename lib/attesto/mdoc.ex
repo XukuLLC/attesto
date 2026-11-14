@@ -105,6 +105,10 @@ if Code.ensure_loaded?(CBOR) do
     @max_cbor_bytes 262_144
     @max_encoded_cbor_bytes div(@max_cbor_bytes * 4 + 2, 3)
 
+    @doc "Maximum accepted decoded CBOR size in bytes of an mdoc payload."
+    @spec max_cbor_bytes() :: pos_integer()
+    def max_cbor_bytes, do: @max_cbor_bytes
+
     @type validity :: %{
             signed: integer(),
             valid_from: integer(),
@@ -285,6 +289,40 @@ if Code.ensure_loaded?(CBOR) do
 
     def peek_doc_type(_device_response), do: {:error, :invalid_mdoc}
 
+    @doc """
+    Decode an IssuerSigned mdoc supplied as base64url or raw CBOR bytes, enforcing
+    core's #{@max_cbor_bytes}-byte decoded CBOR limit.
+    """
+    @spec decode_issuer_signed(binary()) :: {:ok, map()} | {:error, :invalid_mdoc}
+    def decode_issuer_signed(input) when is_binary(input) do
+      safe(:invalid_mdoc, fn ->
+        with {:ok, bytes} <- issuer_signed_bytes(input),
+             {:ok, %{"issuerAuth" => _} = decoded} <- decode_complete(bytes) do
+          {:ok, decoded}
+        else
+          _ -> {:error, :invalid_mdoc}
+        end
+      end)
+    end
+
+    def decode_issuer_signed(_input), do: {:error, :invalid_mdoc}
+
+    @doc """
+    Extract the `x5chain` (COSE unprotected header label 33) DER certificate list
+    from an IssuerSigned mdoc binary, decoded IssuerSigned map, or `issuerAuth` list.
+    """
+    @spec extract_x5chain(binary() | map() | list()) :: {:ok, [binary()]} | {:error, :invalid_certificate}
+    def extract_x5chain(input) when is_binary(input) do
+      case decode_issuer_signed(input) do
+        {:ok, issuer_signed} -> extract_x5chain(issuer_signed)
+        {:error, _reason} -> {:error, :invalid_certificate}
+      end
+    end
+
+    def extract_x5chain(%{"issuerAuth" => issuer_auth}), do: issuer_x5chain(issuer_auth)
+    def extract_x5chain(issuer_auth) when is_list(issuer_auth), do: issuer_x5chain(issuer_auth)
+    def extract_x5chain(_other), do: {:error, :invalid_certificate}
+
     defp safe(error, fun) do
       fun.()
     rescue
@@ -332,8 +370,10 @@ if Code.ensure_loaded?(CBOR) do
 
     defp decode_x5chain(%CBOR.Tag{tag: :bytes} = certificate), do: decode_x5chain([certificate])
 
-    defp decode_x5chain(chain) when is_list(chain) and length(chain) in 1..8 do
-      if Enum.all?(chain, &certificate_bytes?/1) do
+    defp decode_x5chain(chain) when is_list(chain) do
+      max_chain = X509.max_chain_length()
+
+      if length(chain) in 1..max_chain and Enum.all?(chain, &certificate_bytes?/1) do
         {:ok, Enum.map(chain, & &1.value)}
       else
         {:error, :invalid_certificate}
@@ -342,7 +382,9 @@ if Code.ensure_loaded?(CBOR) do
 
     defp decode_x5chain(_chain), do: {:error, :invalid_certificate}
 
-    defp certificate_bytes?(%CBOR.Tag{tag: :bytes, value: der}) when is_binary(der), do: byte_size(der) in 1..65_536
+    defp certificate_bytes?(%CBOR.Tag{tag: :bytes, value: der}) when is_binary(der) do
+      byte_size(der) in 1..X509.max_cert_bytes()
+    end
 
     defp certificate_bytes?(_certificate), do: false
 
@@ -430,11 +472,14 @@ if Code.ensure_loaded?(CBOR) do
         end)
     end
 
-    defp device_signature_bytes(%{"deviceAuth" => %{"deviceSignature" => parts}}) when is_list(parts) do
+    defp device_signature_bytes(%{"deviceAuth" => %{"deviceSignature" => parts} = auth})
+         when is_list(parts) and map_size(auth) == 1 do
       {:ok, CBOR.encode(parts)}
     end
 
-    defp device_signature_bytes(%{"deviceAuth" => %{"deviceMac" => _mac}}), do: {:error, :unsupported_algorithm}
+    defp device_signature_bytes(%{"deviceAuth" => %{"deviceMac" => _mac} = auth}) when map_size(auth) == 1,
+      do: {:error, :unsupported_algorithm}
+
     defp device_signature_bytes(_device_signed), do: {:error, :invalid_mdoc}
 
     @doc """
@@ -686,6 +731,11 @@ if Code.ensure_loaded?(CBOR) do
     defp issuer_signed_parts(%{"issuerAuth" => issuer_auth, "nameSpaces" => name_spaces})
          when is_list(issuer_auth) and is_map(name_spaces) do
       {:ok, CBOR.encode(issuer_auth), name_spaces}
+    end
+
+    defp issuer_signed_parts(%{"issuerAuth" => issuer_auth} = issuer_signed)
+         when is_list(issuer_auth) and not is_map_key(issuer_signed, "nameSpaces") do
+      {:ok, CBOR.encode(issuer_auth), %{}}
     end
 
     defp issuer_signed_parts(_issuer_signed), do: {:error, :invalid_mdoc}
@@ -980,10 +1030,15 @@ else
     @dep_error "Attesto.Mdoc requires the optional :cbor dependency. " <>
                  "Add {:cbor, \"~> 1.0\"} to your deps."
 
+    @max_cbor_bytes 262_144
+
+    def max_cbor_bytes, do: @max_cbor_bytes
     def issue(_opts), do: raise(@dep_error)
     def verify(_input, _trusted, _opts \\ []), do: raise(@dep_error)
     def verify_device_response(_device_response, _context, _trusted, _opts \\ []), do: raise(@dep_error)
     def peek_doc_type(_device_response), do: raise(@dep_error)
+    def decode_issuer_signed(_input), do: raise(@dep_error)
+    def extract_x5chain(_input), do: raise(@dep_error)
     def session_transcript(_context), do: raise(@dep_error)
     def device_authentication_bytes(_session_transcript, _doc_type, _device_namespaces), do: raise(@dep_error)
   end

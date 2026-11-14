@@ -360,19 +360,37 @@ defmodule Attesto.AuthorizationRequest do
       not have involved a re-authentication (`prompt=none`) passes nothing.
     * `:future_skew` - seconds an `auth_time` may lie ahead of `now`. Default
       `Attesto.NumericDate.default_clock_skew_seconds/0`.
+
+  Also accepts a plain `max_age` (`nil` or non-negative integer) in place of
+  `%Attesto.AuthorizationRequest{}` so relying parties and step-up checks apply
+  the same freshness rule.
   """
-  @spec check_auth_time(t(), term(), integer(), keyword()) :: :ok | {:error, auth_time_error()}
-  def check_auth_time(request, auth_time, now, opts \\ [])
-
-  def check_auth_time(%__MODULE__{max_age: nil}, _auth_time, now, opts) when is_integer(now) and is_list(opts), do: :ok
-
-  def check_auth_time(%__MODULE__{}, nil, now, opts) when is_integer(now) and is_list(opts),
-    do: {:error, :auth_time_required}
+  @spec check_auth_time(t() | non_neg_integer() | nil, term(), integer(), keyword()) ::
+          :ok | {:error, auth_time_error()}
+  def check_auth_time(request_or_max_age, auth_time, now, opts \\ [])
 
   def check_auth_time(%__MODULE__{max_age: max_age}, auth_time, now, opts)
-      when is_integer(max_age) and is_integer(now) and is_list(opts) do
-    allowance = Keyword.get(opts, :allowance, 0)
-    future_skew = Keyword.get(opts, :future_skew, NumericDate.default_clock_skew_seconds())
+      when (is_nil(max_age) or (is_integer(max_age) and max_age >= 0)) and is_integer(now) and is_list(opts) do
+    check_auth_time(max_age, auth_time, now, opts)
+  end
+
+  def check_auth_time(nil, _auth_time, now, opts) when is_integer(now) and is_list(opts) do
+    _ = Options.non_negative_integer!(opts, :allowance, 0)
+    _ = Options.non_negative_integer!(opts, :future_skew, NumericDate.default_clock_skew_seconds())
+    :ok
+  end
+
+  def check_auth_time(max_age, nil, now, opts)
+      when is_integer(max_age) and max_age >= 0 and is_integer(now) and is_list(opts) do
+    _ = Options.non_negative_integer!(opts, :allowance, 0)
+    _ = Options.non_negative_integer!(opts, :future_skew, NumericDate.default_clock_skew_seconds())
+    {:error, :auth_time_required}
+  end
+
+  def check_auth_time(max_age, auth_time, now, opts)
+      when is_integer(max_age) and max_age >= 0 and is_integer(now) and is_list(opts) do
+    allowance = Options.non_negative_integer!(opts, :allowance, 0)
+    future_skew = Options.non_negative_integer!(opts, :future_skew, NumericDate.default_clock_skew_seconds())
 
     if NumericDate.valid?(auth_time) do
       case NumericDate.fresh?(auth_time, now, future_skew: future_skew, max_age: max_age + allowance) do
@@ -382,6 +400,24 @@ defmodule Attesto.AuthorizationRequest do
       end
     else
       {:error, :invalid_auth_time}
+    end
+  end
+
+  @doc """
+  Re-check the OIDC Core §3.1.2.1 `nonce` requirement against `request`'s
+  effective `scope` (for example after host scope policy applies defaults).
+  """
+  @spec check_nonce(t(), keyword()) :: :ok | {:error, {:redirect, redirect_error()}}
+  def check_nonce(%__MODULE__{} = request, opts \\ []) when is_list(opts) do
+    require_nonce = boolean_option!(opts, :require_nonce, @default_require_nonce)
+
+    if require_nonce and @openid_scope in request.scope and is_nil(request.nonce) do
+      {:redirect, base} =
+        redirect_error("invalid_request", "nonce is required", request.redirect_uri, request.state)
+
+      {:error, {:redirect, Map.merge(base, %{response_mode: request.response_mode, client_id: request.client_id})}}
+    else
+      :ok
     end
   end
 
@@ -415,45 +451,69 @@ defmodule Attesto.AuthorizationRequest do
     end
   end
 
-  defp merge_request_object(%{"request" => request} = params, opts) when is_binary(request) and request != "" do
+  @doc """
+  Verify and resolve a JAR Request Object (RFC 9101 / OIDC Core §6.1 / FAPI 2.0
+  §5.3.1) for an authorization or PAR parameter map.
+
+  Returns `{:ok, resolved_params}` or `{:error, reason}` where `reason` is one
+  of `:request_not_supported`, `:invalid_request_object`, `:duplicate_request`,
+  or `:request_object_required`.
+  """
+  @spec resolve_request_object(map(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :request_not_supported
+             | :invalid_request_object
+             | :duplicate_request
+             | :request_object_required}
+  def resolve_request_object(%{"request" => request} = params, opts)
+      when is_binary(request) and request != "" and is_list(opts) do
     if Keyword.get(opts, :request_objects_supported, true) do
       verify_request_object(request, params, opts)
     else
-      # OIDC Core §3.1.2.6 / §6.1: a server that does not support the `request`
-      # parameter answers `request_not_supported`. That is a statement about
-      # the server, distinct from a client of a supporting server presenting an
-      # object it has no keys for, which stays `invalid_request_object`.
-      redirect_request_object_error(params, "request_not_supported", "request object is not supported", opts)
+      {:error, :request_not_supported}
     end
   end
 
-  # RFC 6749 §3.1: request parameters MUST NOT be included more than once. A
-  # `request` that arrives as a list or a map (`request[]=...`, `request[a]=...`)
-  # is a repeated or structured parameter, not one Request Object; ignoring it
-  # would process the outer parameters as though no object had been sent.
-  defp merge_request_object(%{"request" => request} = params, opts)
-       when not is_binary(request) and not is_nil(request) do
-    redirect_request_object_error(params, "invalid_request", "request must be a single value", opts)
+  def resolve_request_object(%{"request" => request}, opts)
+      when not is_binary(request) and not is_nil(request) and is_list(opts) do
+    {:error, :duplicate_request}
   end
 
-  # No `request` object present, or an empty one: RFC 6749 §3.1 says a
-  # parameter sent without a value MUST be treated as if it were omitted.
-  # RFC 9101 / FAPI 2.0 Message Signing §5.3.1: when the policy requires a
-  # signed request object, a request carrying none is rejected (redirectable
-  # invalid_request); otherwise the plain parameters stand (generic OpenID
-  # Connect §6.1).
-  defp merge_request_object(params, opts) do
+  def resolve_request_object(params, opts) when is_map(params) and is_list(opts) do
     policy = Keyword.get(opts, :request_object_policy, %Policy{})
 
-    if Policy.require_request_object?(policy) do
-      require_present_request_object(params, opts)
-    else
-      {:ok, params}
+    if Policy.require_request_object?(policy),
+      do: {:error, :request_object_required},
+      else: {:ok, params}
+  end
+
+  defp merge_request_object(params, opts) do
+    case resolve_request_object(params, opts) do
+      {:ok, resolved} ->
+        {:ok, resolved}
+
+      {:error, :request_not_supported} ->
+        # OIDC Core §3.1.2.6 / §6.1: a server that does not support the `request`
+        # parameter answers `request_not_supported`. That is a statement about
+        # the server, distinct from a client of a supporting server presenting an
+        # object it has no keys for, which stays `invalid_request_object`.
+        redirect_request_object_error(params, "request_not_supported", "request object is not supported", opts)
+
+      {:error, :duplicate_request} ->
+        redirect_request_object_error(params, "invalid_request", "request must be a single value", opts)
+
+      {:error, :request_object_required} ->
+        redirect_request_object_error(params, "invalid_request", "a signed request object is required", opts)
+
+      {:error, :invalid_request_object} ->
+        redirect_request_object_error(params, "invalid_request_object", "request object is invalid", opts)
     end
   end
 
   defp verify_request_object(request, params, opts) do
     policy = Keyword.get(opts, :request_object_policy, %Policy{})
+    issuer = Keyword.get(opts, :issuer, Map.get(params, "client_id"))
 
     with {:ok, jwks} <- fetch_request_object_jwks(opts),
          {:ok, object_params} <-
@@ -461,18 +521,17 @@ defmodule Attesto.AuthorizationRequest do
              request,
              jwks,
              [
-               issuer: Map.get(params, "client_id"),
+               issuer: issuer,
                audience: Keyword.get(opts, :request_object_audience)
              ] ++ Policy.to_verify_opts(policy)
            ),
          :ok <- matching_outer_response_type(params, object_params) do
-      {:ok, preserve_unsupported_request_uri(object_params, params)}
+      if Keyword.get(opts, :keep_request_param, false),
+        do: {:ok, Map.put(object_params, "request", request)},
+        else: {:ok, preserve_unsupported_request_uri(object_params, params)}
     else
-      {:error, :request_not_supported} ->
-        redirect_request_object_error(params, "request_not_supported", "request object is not supported", opts)
-
-      _ ->
-        redirect_request_object_error(params, "invalid_request_object", "request object is invalid", opts)
+      {:error, :request_not_supported} -> {:error, :request_not_supported}
+      _ -> {:error, :invalid_request_object}
     end
   end
 
@@ -494,18 +553,6 @@ defmodule Attesto.AuthorizationRequest do
     if Map.has_key?(params, "request_uri"),
       do: Map.put(object_params, "request_uri", Map.get(params, "request_uri")),
       else: object_params
-  end
-
-  # FAPI 2.0 Message Signing §5.3.1: a required-but-absent request object is a
-  # redirectable invalid_request once the client is trusted, classified entirely
-  # by redirect_request_object_error/4 below.
-  defp require_present_request_object(params, opts) do
-    redirect_request_object_error(
-      params,
-      "invalid_request",
-      "a signed request object is required",
-      opts
-    )
   end
 
   # A request-object failure (invalid object, or a required one absent) is only
@@ -963,25 +1010,7 @@ defmodule Attesto.AuthorizationRequest do
   defp decode_authorization_details(value) when is_list(value), do: {:ok, value}
   defp decode_authorization_details(_value), do: :error
 
-  defp valid_authorization_details?([_ | _] = details), do: Enum.all?(details, &valid_authorization_detail?/1)
-
-  defp valid_authorization_details?(_details), do: false
-
-  defp valid_authorization_detail?(%{"type" => type} = detail)
-       when is_binary(type) and type != "" and not is_struct(detail) do
-    Enum.all?(detail, fn {key, value} -> is_binary(key) and json_value?(value) end)
-  end
-
-  defp valid_authorization_detail?(_detail), do: false
-
-  defp json_value?(nil), do: true
-  defp json_value?(value) when is_binary(value) or is_boolean(value) or is_number(value), do: true
-  defp json_value?(values) when is_list(values), do: Enum.all?(values, &json_value?/1)
-
-  defp json_value?(value) when is_map(value) and not is_struct(value),
-    do: Enum.all?(value, fn {key, nested} -> is_binary(key) and json_value?(nested) end)
-
-  defp json_value?(_value), do: false
+  defp valid_authorization_details?(details), do: RequestObject.valid_authorization_details?(details)
 
   # OIDC Core §3.1.2.1: nonce is OPTIONAL for the code flow (RFC 6749 stays at
   # SHOULD), but REQUIRED when the OP policy demands it. The caller signals that

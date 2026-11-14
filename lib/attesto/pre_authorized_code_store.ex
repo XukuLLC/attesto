@@ -47,5 +47,8 @@ defmodule Attesto.PreAuthorizedCodeStore do
   @doc "Read the entry for `code_hash` without consuming it."
   @callback get(code_hash :: binary()) :: {:ok, entry()} | :error
 
-  @optional_callbacks get: 1
+  @doc "Delete every unredeemed pre-authorized code matching `criteria`."
+  @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks get: 1, delete_unconsumed: 1
 end

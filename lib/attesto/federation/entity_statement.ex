@@ -184,7 +184,7 @@ defmodule Attesto.Federation.EntityStatement do
   defp lifetime_seconds!(opts), do: Options.positive_integer!(opts, :lifetime_seconds, @default_lifetime_seconds)
 
   defp public_jwks(%{jwk: jwk, alg: alg, kid: kid}) do
-    {_metadata, public} = JOSE.JWK.to_public_map(jwk)
+    public = Attesto.Key.public_map(jwk)
     %{"keys" => [Map.merge(public, %{"alg" => alg, "kid" => kid})]}
   end
 

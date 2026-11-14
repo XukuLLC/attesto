@@ -643,4 +643,39 @@ defmodule Attesto.CIBA.RequestTest do
     JOSE.crypto_fallback(true)
     on_exit(fn -> JOSE.crypto_fallback(previous) end)
   end
+
+  describe "binding_message/user_code UTF-8 byte caps, C1 control chars, acr_values, and notification_token limit" do
+    test "rejects multi-combining-mark single-grapheme binding_message and user_code exceeding byte cap" do
+      combining = "a" <> String.duplicate("\u0301", 600)
+      assert String.length(combining) == 1
+      uc_client = client(%{user_code_parameter: true})
+
+      assert {:ok, _} =
+               Request.validate(uc_client, params(%{"user_code" => "secret-pin"}), user_code_supported: true)
+
+      assert {:error, :invalid_binding_message} =
+               Request.validate(client(), params(%{"binding_message" => combining}))
+
+      assert {:error, :invalid_request} =
+               Request.validate(uc_client, params(%{"user_code" => combining}), user_code_supported: true)
+    end
+
+    test "rejects C1 control characters in binding_message and user_code" do
+      uc_client = client(%{user_code_parameter: true})
+
+      assert {:error, :invalid_binding_message} =
+               Request.validate(client(), params(%{"binding_message" => "Confirm \u009B31m"}))
+
+      assert {:error, :invalid_request} =
+               Request.validate(uc_client, params(%{"user_code" => "pin\u009B"}), user_code_supported: true)
+    end
+
+    test "validates acr_values tokens and exports notification_token_max_length/0" do
+      assert Request.valid_acr_value?("urn:mace:incommon:iap:silver")
+      refute Request.valid_acr_value?("")
+      refute Request.valid_acr_value?("bad value")
+      assert {:error, :invalid_request} = Request.validate(client(), params(%{"acr_values" => "ok \"quoted\""}))
+      assert Request.notification_token_max_length() == 1024
+    end
+  end
 end

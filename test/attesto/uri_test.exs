@@ -124,8 +124,25 @@ defmodule Attesto.URITest do
       assert AttestoURI.loopback_host?("127.0.0.1")
       assert AttestoURI.loopback_host?("::1")
       refute AttestoURI.loopback_host?("local.test")
+      refute AttestoURI.loopback_host?("localhost..")
+      refute AttestoURI.loopback_host?("::1%lo0")
       refute AttestoURI.loopback_host?("::ffff:127.0.0.1")
       refute AttestoURI.loopback_host?(nil)
+    end
+
+    test "origin/1, same_origin?/2, origin?/2, and issuer_identifier?/2 normalize and validate origins and issuers" do
+      assert AttestoURI.origin("HTTPS://RP.Example:443/cb?x=1") == {:ok, "https://rp.example"}
+      assert AttestoURI.same_origin?("https://rp.example:443/a", "HTTPS://RP.EXAMPLE/b")
+      refute AttestoURI.same_origin?("https://rp.example/a", "https://rp.example:8443/a")
+
+      assert AttestoURI.origin?("https://api.example")
+      assert AttestoURI.origin?("https://api.example/")
+      refute AttestoURI.origin?("https://api.example/mcp")
+      refute AttestoURI.origin?("https://api.example?a=1")
+
+      assert AttestoURI.issuer_identifier?("https://auth.example/tenant")
+      refute AttestoURI.issuer_identifier?("https://auth.example/tenant?x=1")
+      assert AttestoURI.issuer_identifier?("http://localhost:4000", allow_loopback_http: true)
     end
   end
 

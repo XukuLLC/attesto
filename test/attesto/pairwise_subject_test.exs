@@ -16,6 +16,14 @@ defmodule Attesto.PairwiseSubjectTest do
                PairwiseSubject.sector_identifier(["https://a.example/cb", "https://b.example/cb"])
 
       assert {:error, :invalid_redirect_uri} = PairwiseSubject.sector_identifier(["https://a.example/cb", "urn:x"])
+
+      assert {:error, :invalid_redirect_uri} =
+               PairwiseSubject.sector_identifier(["com.evil.app://victim-rp.example/cb"])
+
+      assert {:error, :invalid_redirect_uri} = PairwiseSubject.sector_identifier(["http://rp.example/cb"])
+      assert {:error, :invalid_redirect_uri} = PairwiseSubject.sector_identifier(["https://localhost/cb"])
+      assert {:error, :invalid_redirect_uri} = PairwiseSubject.sector_identifier(["https://127.0.0.1/cb"])
+      assert {:error, :invalid_redirect_uri} = PairwiseSubject.sector_identifier(["https://[::1]/cb"])
       assert {:error, :no_redirect_uris} = PairwiseSubject.sector_identifier([])
       assert {:error, :no_redirect_uris} = PairwiseSubject.sector_identifier(nil)
     end
@@ -45,6 +53,41 @@ defmodule Attesto.PairwiseSubjectTest do
 
       for {sector, subject, salt} <- [{"rp.example", "usr_1", "short"}, {"", "usr_1", @salt}, {"rp.example", "", @salt}] do
         assert_raise ArgumentError, fn -> PairwiseSubject.derive(sector, subject, salt) end
+      end
+    end
+  end
+
+  describe "seal_subject/3 and unseal_subject/3" do
+    test "round-trips with a matching pairwise_sub and salt, using distinct nonces" do
+      pairwise = PairwiseSubject.derive("rp.example", "usr_1", @salt)
+      sealed_a = PairwiseSubject.seal_subject("usr_1", pairwise, @salt)
+      sealed_b = PairwiseSubject.seal_subject("usr_1", pairwise, @salt)
+
+      refute sealed_a == sealed_b
+      assert {:ok, "usr_1"} = PairwiseSubject.unseal_subject(sealed_a, pairwise, @salt)
+      assert {:ok, "usr_1"} = PairwiseSubject.unseal_subject(sealed_b, pairwise, @salt)
+      assert :error = PairwiseSubject.unseal_subject(sealed_a, "other_sub", @salt)
+      assert :error = PairwiseSubject.unseal_subject(sealed_a, pairwise, String.duplicate("t", 32))
+      assert :error = PairwiseSubject.unseal_subject("not-valid-base64!", pairwise, @salt)
+    end
+
+    test "pads short subjects to uniform blocks so ciphertexts do not leak subject length" do
+      pairwise = PairwiseSubject.derive("rp.example", "usr_1", @salt)
+
+      lengths =
+        for n <- [1, 5, 17, 49, 62] do
+          subject = String.duplicate("a", n)
+          sealed = PairwiseSubject.seal_subject(subject, pairwise, @salt)
+          assert {:ok, ^subject} = PairwiseSubject.unseal_subject(sealed, pairwise, @salt)
+          byte_size(sealed)
+        end
+
+      assert length(Enum.uniq(lengths)) == 1
+
+      for n <- [63, 64, 128] do
+        subject = String.duplicate("b", n)
+        sealed = PairwiseSubject.seal_subject(subject, pairwise, @salt)
+        assert {:ok, ^subject} = PairwiseSubject.unseal_subject(sealed, pairwise, @salt)
       end
     end
   end

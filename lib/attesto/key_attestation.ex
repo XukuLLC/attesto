@@ -54,6 +54,10 @@ defmodule Attesto.KeyAttestation do
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_attestation_bytes 256 * 1_024
 
+  @doc "Maximum accepted wire size in bytes of a `key-attestation+jwt`."
+  @spec max_attestation_bytes() :: pos_integer()
+  def max_attestation_bytes, do: @max_attestation_bytes
+
   @type verified :: %{
           attested_keys: [map()],
           key_storage: [String.t()] | nil,

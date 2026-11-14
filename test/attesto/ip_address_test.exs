@@ -188,6 +188,9 @@ defmodule Attesto.IPAddressTest do
             "fd12:3456::1/32",
             "0.0.0.0/0",
             "::/0",
+            "::ffff:127.0.0.1/104",
+            "fe80::/64%eth0",
+            "fe80::%eth0/64",
             "internal.example/16",
             "10.20.0.0/sixteen",
             "",
@@ -199,6 +202,7 @@ defmodule Attesto.IPAddressTest do
 
       assert_raise ArgumentError, ~r/must be a list/, fn -> IPAddress.parse_cidrs!("10.20.0.0/16") end
       assert IPAddress.parse_cidrs!([]) == []
+      assert IPAddress.unmap_ipv4({0, 0, 0, 0, 0, 0xFFFF, 0x0A14, 0x0001}) == {10, 20, 0, 1}
     end
   end
 end

@@ -16,6 +16,10 @@ defmodule Attesto.RequestObject do
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_request_object_bytes 64 * 1_024
 
+  @doc "Maximum accepted wire size in bytes of a compact JAR request object."
+  @spec max_request_object_bytes() :: pos_integer()
+  def max_request_object_bytes, do: @max_request_object_bytes
+
   @type verify_opts :: [
           {:now, DateTime.t() | non_neg_integer()}
           | {:profile, :jar | :oid4vp}
@@ -297,9 +301,10 @@ defmodule Attesto.RequestObject do
 
   defp check_authorization_details_claim(_claims), do: :ok
 
-  defp valid_authorization_details?([_ | _] = details), do: Enum.all?(details, &valid_authorization_detail?/1)
+  @doc false
+  def valid_authorization_details?([_ | _] = details), do: Enum.all?(details, &valid_authorization_detail?/1)
 
-  defp valid_authorization_details?(_details), do: false
+  def valid_authorization_details?(_details), do: false
 
   defp valid_authorization_detail?(%{"type" => type} = detail)
        when is_binary(type) and type != "" and not is_struct(detail) do

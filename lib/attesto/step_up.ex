@@ -12,6 +12,8 @@ defmodule Attesto.StepUp.Requirement do
       `nil` means "no freshness constraint".
   """
 
+  alias Attesto.CIBA.Request
+
   defstruct acr_values: [], max_age: nil
 
   @type t :: %__MODULE__{acr_values: [String.t()], max_age: non_neg_integer() | nil}
@@ -56,8 +58,7 @@ defmodule Attesto.StepUp.Requirement do
   # RFC 9470 §3: an `acr` value is echoed into a `WWW-Authenticate` quoted-string
   # challenge. `acr` is host-configured (trusted), but constraining it to a safe
   # token charset at config time forecloses any quote/param breakout regardless.
-  defp valid_acr?(value) when is_binary(value) and value != "", do: not Regex.match?(~r/[\s",\\]/, value)
-  defp valid_acr?(_value), do: false
+  defp valid_acr?(value), do: Request.valid_acr_value?(value)
 end
 
 defmodule Attesto.StepUp do
@@ -147,10 +148,8 @@ defmodule Attesto.StepUp do
   defp auth_time_satisfied?(nil, _claims, _now), do: true
 
   defp auth_time_satisfied?(max_age, claims, now) do
-    case Map.get(claims, "auth_time") do
-      auth_time when is_integer(auth_time) -> auth_time <= now and auth_time >= now - max_age
-      _ -> false
-    end
+    Attesto.AuthorizationRequest.check_auth_time(max_age, Map.get(claims, "auth_time"), now, future_skew: 0) ==
+      :ok
   end
 
   defp maybe_put(map, _key, nil), do: map

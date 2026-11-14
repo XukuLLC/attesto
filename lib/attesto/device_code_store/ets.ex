@@ -75,6 +75,11 @@ defmodule Attesto.DeviceCodeStore.ETS do
     GenServer.call(__MODULE__, {:consume, hash, opts})
   end
 
+  @impl Attesto.DeviceCodeStore
+  def delete_unconsumed(criteria) do
+    GenServer.call(__MODULE__, {:delete_unconsumed, Attesto.RevocationCriteria.new!(criteria)})
+  end
+
   # ----- server -----
 
   @impl GenServer
@@ -108,6 +113,32 @@ defmodule Attesto.DeviceCodeStore.ETS do
 
   def handle_call({:consume, hash, opts}, _from, state) do
     {:reply, ETSTable.consume(@table, hash, Map.get(opts, :now, System.system_time(:second))), state}
+  end
+
+  def handle_call({:delete_unconsumed, criteria}, _from, state) do
+    matching =
+      :ets.foldl(
+        fn {hash, _expires_at, record}, acc ->
+          claims =
+            record.data
+            |> Map.get(:claims, %{})
+            |> Map.merge(Map.get(record, :granted_claims) || %{})
+
+          target =
+            record.data
+            |> Map.put(:subject, Map.get(record, :subject) || Map.get(record.data, :subject))
+            |> Map.put(:claims, claims)
+
+          if record.status in [:pending, :approved] and Attesto.RevocationCriteria.match?(criteria, target),
+            do: [{hash, record.user_code} | acc],
+            else: acc
+        end,
+        [],
+        @table
+      )
+
+    Enum.each(matching, fn {hash, user_code} -> drop(hash, user_code) end)
+    {:reply, {:ok, length(matching)}, state}
   end
 
   defp delete_expired(now) do

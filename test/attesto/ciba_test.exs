@@ -768,4 +768,30 @@ defmodule Attesto.CIBATest do
       end
     end
   end
+
+  describe "ETS.delete_unconsumed/1" do
+    test "deletes unconsumed pending and approved requests for a subject" do
+      %{auth_req_id: pending_id} = issue(%{}, %{subject: "usr_revoked"})
+      %{auth_req_id: approved_id} = issue(%{}, %{subject: "usr_revoked"})
+      {:ok, _} = CIBA.approve(Store, approved_id, %{subject: "usr_revoked"}, now: @now + 1)
+      %{auth_req_id: other_id} = issue(%{}, %{subject: "usr_other"})
+
+      assert {:ok, 2} = Store.delete_unconsumed(subject: "usr_revoked")
+      assert {:error, :invalid_grant} = CIBA.redeem(Store, pending_id, %{client_id: @client_id}, now: @now + 2)
+      assert {:error, :invalid_grant} = CIBA.redeem(Store, approved_id, %{client_id: @client_id}, now: @now + 2)
+      assert {:error, :authorization_pending} = CIBA.redeem(Store, other_id, %{client_id: @client_id}, now: @now + 2)
+    end
+
+    test "deletes approved requests matching :sid in granted_claims while sparing other sessions" do
+      %{auth_req_id: sid1_id} = issue(%{}, %{subject: "usr_1"})
+      {:ok, _} = CIBA.approve(Store, sid1_id, %{subject: "usr_1", claims: %{"sid" => "sid-1"}}, now: @now + 1)
+
+      %{auth_req_id: sid2_id} = issue(%{}, %{subject: "usr_1"})
+      {:ok, _} = CIBA.approve(Store, sid2_id, %{subject: "usr_1", claims: %{"sid" => "sid-2"}}, now: @now + 1)
+
+      assert {:ok, 1} = Store.delete_unconsumed(sid: "sid-1")
+      assert {:error, :invalid_grant} = CIBA.redeem(Store, sid1_id, %{client_id: @client_id}, now: @now + 2)
+      assert {:ok, %Grant{subject: "usr_1"}} = CIBA.redeem(Store, sid2_id, %{client_id: @client_id}, now: @now + 2)
+    end
+  end
 end

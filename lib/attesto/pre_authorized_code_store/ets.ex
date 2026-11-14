@@ -65,6 +65,11 @@ defmodule Attesto.PreAuthorizedCodeStore.ETS do
     end
   end
 
+  @impl Attesto.PreAuthorizedCodeStore
+  def delete_unconsumed(criteria) do
+    GenServer.call(__MODULE__, {:delete_unconsumed, Attesto.RevocationCriteria.new!(criteria)})
+  end
+
   @impl GenServer
   def handle_call({:put, %{code_hash: code_hash, expires_at: expires_at} = record}, _from, state) do
     # expires_at is hoisted into its own tuple element so the sweep
@@ -81,6 +86,20 @@ defmodule Attesto.PreAuthorizedCodeStore.ETS do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:delete_unconsumed, criteria}, _from, state) do
+    matching =
+      :ets.foldl(
+        fn {code_hash, _expires_at, record}, acc ->
+          if Attesto.RevocationCriteria.match?(criteria, record.data), do: [code_hash | acc], else: acc
+        end,
+        [],
+        @table
+      )
+
+    Enum.each(matching, &:ets.delete(@table, &1))
+    {:reply, {:ok, length(matching)}, state}
   end
 
   defp delete_expired(now) do

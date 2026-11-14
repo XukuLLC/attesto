@@ -111,6 +111,7 @@ defmodule Attesto.EndSession do
   @spec parse(Config.t(), map(), keyword()) :: {:ok, t()} | {:error, parse_error()}
   def parse(%Config{} = config, params, opts \\ []) when is_map(params) and is_list(opts) do
     require_typ = Attesto.Options.boolean!(opts, :require_typ, false)
+    on_invalid_hint = on_invalid_hint!(opts)
     client_id_param = param(params, "client_id")
 
     with {:ok, hint} <- id_token_hint(params),
@@ -129,13 +130,20 @@ defmodule Attesto.EndSession do
        }}
     else
       {:error, :invalid_id_token_hint} = error ->
-        case Keyword.get(opts, :on_invalid_hint, :reject) do
+        case on_invalid_hint do
           :reject -> error
           :discard -> {:ok, hintless(params)}
         end
 
       error ->
         error
+    end
+  end
+
+  defp on_invalid_hint!(opts) do
+    case Keyword.get(opts, :on_invalid_hint, :reject) do
+      policy when policy in [:reject, :discard] -> policy
+      other -> raise ArgumentError, ":on_invalid_hint must be :reject or :discard, got: #{inspect(other)}"
     end
   end
 

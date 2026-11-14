@@ -587,4 +587,31 @@ defmodule Attesto.DeviceCodeTest do
       refute Exception.message(error) =~ uc
     end
   end
+
+  describe "ETS.delete_unconsumed/1 and decision_available?/2" do
+    test "deletes pending and approved records by subject/session while keeping consumed ones" do
+      %{device_code: dc1, user_code: uc1} = issue()
+      :ok = DeviceCode.approve(Store, uc1, %{subject: "usr_1"}, now: @now + 1)
+
+      %{device_code: dc2} = issue()
+      {:ok, 1} = Store.delete_unconsumed(subject: "usr_1")
+
+      assert {:error, :invalid_grant} = DeviceCode.redeem(Store, dc1, %{client_id: "cli-1"}, now: @now + 2)
+      assert {:error, :authorization_pending} = DeviceCode.redeem(Store, dc2, %{client_id: "cli-1"}, now: @now + 2)
+      assert :ok = DeviceCode.decision_available?(%{expires_at: @now + 60, status: :pending}, @now)
+      assert {:error, :expired} = DeviceCode.decision_available?(%{expires_at: @now, status: :pending}, @now)
+    end
+
+    test "deletes approved records matching :sid in granted_claims while sparing other sessions" do
+      %{device_code: dc1, user_code: uc1} = issue()
+      :ok = DeviceCode.approve(Store, uc1, %{subject: "usr_1", claims: %{"sid" => "sid-1"}}, now: @now + 1)
+
+      %{device_code: dc2, user_code: uc2} = issue()
+      :ok = DeviceCode.approve(Store, uc2, %{subject: "usr_1", claims: %{"sid" => "sid-2"}}, now: @now + 1)
+
+      assert {:ok, 1} = Store.delete_unconsumed(sid: "sid-1")
+      assert {:error, :invalid_grant} = DeviceCode.redeem(Store, dc1, %{client_id: "cli-1"}, now: @now + 2)
+      assert {:ok, %Grant{subject: "usr_1"}} = DeviceCode.redeem(Store, dc2, %{client_id: "cli-1"}, now: @now + 2)
+    end
+  end
 end

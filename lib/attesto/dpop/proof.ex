@@ -209,7 +209,7 @@ defmodule Attesto.DPoP.Proof do
   end
 
   defp compatible?(alg, jose_jwk) do
-    fields = jose_jwk |> JOSE.JWK.to_public_map() |> elem(1)
+    fields = Attesto.Key.public_map(jose_jwk)
 
     case fields do
       %{"kty" => "RSA"} -> alg in @rsa_algs
@@ -259,7 +259,7 @@ defmodule Attesto.DPoP.Proof do
     end
   end
 
-  defp public_jwk(jose_jwk), do: jose_jwk |> JOSE.JWK.to_public_map() |> elem(1)
+  defp public_jwk(jose_jwk), do: Attesto.Key.public_map(jose_jwk)
 
   defp sign(jose_jwk, %{"alg" => "PS" <> _} = header, claims) do
     {:ok, JWS.sign_compact_jwk(jose_jwk, header, claims)}

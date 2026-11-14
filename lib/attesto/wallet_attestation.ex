@@ -63,6 +63,18 @@ defmodule Attesto.WalletAttestation do
   # `jti` cannot be forced to retain unbounded-size identifiers.
   @max_jti_length 256
 
+  @doc "Maximum accepted wire size in bytes of an `oauth-client-attestation+jwt`."
+  @spec max_attestation_bytes() :: pos_integer()
+  def max_attestation_bytes, do: @max_attestation_bytes
+
+  @doc "Maximum accepted wire size in bytes of an `oauth-client-attestation-pop+jwt`."
+  @spec max_pop_bytes() :: pos_integer()
+  def max_pop_bytes, do: @max_pop_bytes
+
+  @doc "Maximum accepted length in bytes of a wallet PoP `jti`."
+  @spec max_jti_length() :: pos_integer()
+  def max_jti_length, do: @max_jti_length
+
   @type replay_check_fun :: (String.t(), pos_integer() -> :ok | {:error, :replay})
 
   @type instance_key :: %{jwk: map(), jkt: String.t()}

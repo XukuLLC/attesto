@@ -426,11 +426,12 @@ defmodule Attesto.DeviceCode do
     end
   end
 
-  defp decision_available?(%{status: :pending, expires_at: expires_at}, now) do
+  @doc false
+  def decision_available?(%{status: :pending, expires_at: expires_at}, now) do
     if expires_at > now, do: :ok, else: {:error, :expired}
   end
 
-  defp decision_available?(_record, _now), do: {:error, :already_decided}
+  def decision_available?(_record, _now), do: {:error, :already_decided}
 
   defp require_scope_subset(%{data: %{scope: requested_scope}}, granted_scope) do
     if MapSet.subset?(MapSet.new(granted_scope), MapSet.new(requested_scope)),

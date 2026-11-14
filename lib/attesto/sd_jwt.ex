@@ -61,6 +61,14 @@ defmodule Attesto.SdJwt do
   @max_key_binding_bytes 16 * 1_024
   @max_disclosures 1_000
 
+  @doc "Maximum accepted wire size in bytes of an encoded SD-JWT presentation."
+  @spec max_presentation_bytes() :: pos_integer()
+  def max_presentation_bytes, do: @max_presentation_bytes
+
+  @doc "Maximum accepted wire size in bytes of a Key Binding JWT."
+  @spec max_key_binding_bytes() :: pos_integer()
+  def max_key_binding_bytes, do: @max_key_binding_bytes
+
   @typedoc "A parsed, verified SD-JWT presentation."
   @type verified :: %{
           claims: map(),
@@ -577,7 +585,7 @@ defmodule Attesto.SdJwt do
 
   @kb_typ "kb+jwt"
   @default_kb_max_age 300
-  @kb_clock_skew_seconds 60
+  @kb_clock_skew_seconds NumericDate.default_clock_skew_seconds()
 
   defp check_kb_typ(%{"typ" => @kb_typ}), do: :ok
   defp check_kb_typ(_), do: {:error, :invalid_key_binding}

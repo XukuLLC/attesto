@@ -256,7 +256,7 @@ defmodule Attesto.Test.DPoP do
       raise ArgumentError, "unsupported DPoP signing algorithm #{inspect(alg)} for the configured JOSE backend"
     end
 
-    {_modules, fields} = JOSE.JWK.to_public_map(jwk)
+    fields = Attesto.Key.public_map(jwk)
 
     case {alg, fields} do
       {rsa_alg, %{"kty" => "RSA"}} when rsa_alg in ~w(RS256 RS384 RS512 PS256 PS384 PS512) -> alg

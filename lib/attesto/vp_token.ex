@@ -454,21 +454,40 @@ defmodule Attesto.VpToken do
 
   defp check_claim(_disclosed, _claim, _format), do: {:error, :invalid_claim_constraints}
 
+  @doc """
+  Return whether a DCQL scalar claim `value` strictly matches at least one entry
+  in `allowed` (`===`, so numbers, booleans, and strings never coerce across
+  types). Used by both the verifier and wallet claim-filtering logic.
+  """
+  @spec dcql_value_matches?(term(), [term()]) :: boolean()
+  def dcql_value_matches?(value, allowed) when is_list(allowed) do
+    Enum.any?(allowed, &(&1 === value))
+  end
+
   defp selected_values_allowed?(selected, allowed) do
-    Enum.all?(selected, fn selected_value -> Enum.any?(allowed, &(&1 === selected_value)) end)
+    Enum.all?(selected, &dcql_value_matches?(&1, allowed))
   end
 
   defp resolve_path(map, [namespace, element], :mso_mdoc) when is_binary(namespace) and is_binary(element) do
-    resolve_json_path([map], [namespace, element])
+    resolve_json_path(map, [namespace, element])
   end
 
   defp resolve_path(_map, _path, :mso_mdoc), do: :error
-  defp resolve_path(map, path, :sd_jwt_vc) when is_list(path) and path != [], do: resolve_json_path([map], path)
+  defp resolve_path(map, path, :sd_jwt_vc) when is_list(path) and path != [], do: resolve_json_path(map, path)
   defp resolve_path(_map, _path, _format), do: :error
 
-  defp resolve_json_path(selected, []), do: if(selected == [], do: :error, else: {:ok, selected})
+  @doc """
+  Traverse `root` using an OID4VP DCQL claims path pointer (`[component | rest]`).
+  Returns `{:ok, selected_values}` or `:error` when any step fails or selects nothing.
+  """
+  @spec resolve_json_path(map() | [term()], [term()]) :: {:ok, [term()]} | :error
+  def resolve_json_path(root, path) when is_map(root) and not is_struct(root) and is_list(path) and path != [] do
+    resolve_json_path([root], path)
+  end
 
-  defp resolve_json_path(selected, [component | rest]) do
+  def resolve_json_path(selected, []) when is_list(selected), do: if(selected == [], do: :error, else: {:ok, selected})
+
+  def resolve_json_path(selected, [component | rest]) when is_list(selected) do
     with {:ok, next} <- select_path_component(selected, component),
          false <- next == [] do
       resolve_json_path(next, rest)
@@ -476,6 +495,8 @@ defmodule Attesto.VpToken do
       _error_or_empty -> :error
     end
   end
+
+  def resolve_json_path(_root_or_selected, _path), do: :error
 
   defp select_path_component(selected, key) when is_binary(key) do
     if Enum.all?(selected, &(is_map(&1) and not is_struct(&1))) do
@@ -733,22 +754,27 @@ defmodule Attesto.VpToken do
   defp redirect_mdoc_context(nonce, audience, opts) do
     case Keyword.get(opts, :response_uri) do
       response_uri when is_binary(response_uri) and response_uri != "" ->
-        context = [client_id: audience, nonce: nonce, response_uri: response_uri]
-
-        # For an encrypted (`direct_post.jwt`) mdoc response the handover binds to
-        # the verifier's response-encryption JWK thumbprint; unencrypted omits it.
-        context =
-          case Keyword.get(opts, :response_encryption_jwk) do
-            jwk when is_map(jwk) -> Keyword.put(context, :response_encryption_jwk, jwk)
-            _other -> context
-          end
-
-        {:ok, context}
+        [client_id: audience, nonce: nonce, response_uri: response_uri]
+        |> put_response_encryption_jwk(Keyword.get(opts, :response_encryption_jwk))
 
       _other ->
         {:error, :missing_response_uri}
     end
   end
+
+  # For an encrypted (`direct_post.jwt`) mdoc response the handover binds to
+  # the verifier's response-encryption JWK thumbprint; unencrypted omits it.
+  # A non-nil malformed key fails closed instead of falling back to an
+  # unencrypted transcript.
+  defp put_response_encryption_jwk(context, nil), do: {:ok, context}
+
+  defp put_response_encryption_jwk(context, jwk) when is_map(jwk) do
+    if match?({:ok, _thumbprint}, Attesto.Thumbprint.of_jwk(jwk)),
+      do: {:ok, Keyword.put(context, :response_encryption_jwk, jwk)},
+      else: {:error, :invalid_key}
+  end
+
+  defp put_response_encryption_jwk(_context, _other), do: {:error, :invalid_key}
 
   # ── format dispatch ─────────────────────────────────────────────────────
 

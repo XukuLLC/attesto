@@ -4,6 +4,12 @@ defmodule Attesto.X509Test do
   alias Attesto.Test.X509Fixture, as: Fixture
   alias Attesto.X509
 
+  require Record
+
+  @records Record.extract_all(from_lib: "public_key/include/public_key.hrl")
+  Record.defrecordp(:otp_certificate, :OTPCertificate, @records[:OTPCertificate])
+  Record.defrecordp(:otp_tbs, :OTPTBSCertificate, @records[:OTPTBSCertificate])
+
   setup_all do
     root = Fixture.root()
     %{root: root, issuer: Fixture.chain(root)}
@@ -45,6 +51,7 @@ defmodule Attesto.X509Test do
     root =
       :public_key.pkix_test_root_cert(~c"synthetic-expired-root",
         key: Fixture.curve(),
+        digest: :sha256,
         validity: {{2020, 1, 1}, {2020, 1, 2}}
       )
 
@@ -87,9 +94,12 @@ defmodule Attesto.X509Test do
       assert {:error, :untrusted_certificate} = X509.verify(chain, trusted_certificates: ctx.issuer.anchors)
     end
 
-    for anchors <- [[oversized], List.duplicate(ctx.root.cert, 9)] do
+    for anchors <- [[oversized], List.duplicate(ctx.root.cert, X509.max_trust_anchors() + 1)] do
       assert {:error, :untrusted_certificate} = X509.verify(ctx.issuer.chain, trusted_certificates: anchors)
     end
+
+    many_anchors = [ctx.root.cert | List.duplicate(ctx.issuer.leaf, X509.max_trust_anchors() - 1)]
+    assert {:ok, _} = X509.verify(ctx.issuer.chain, trusted_certificates: many_anchors)
 
     for {chain, opts} <- [{nil, []}, {ctx.issuer.chain, nil}, {[ctx.issuer.leaf | :bad], []}] do
       assert {:error, :invalid_certificate} = X509.verify(chain, opts)
@@ -177,5 +187,245 @@ defmodule Attesto.X509Test do
 
     assert {:error, :untrusted_certificate} =
              X509.verify(issuer.chain, trusted_certificates: issuer.anchors, purpose: :mdoc_issuer)
+  end
+
+  describe "trust anchor constraints and weak signatures" do
+    test "pinned end-entity certificate cannot issue child certificates" do
+      anchor_key = :public_key.generate_key(Fixture.curve())
+
+      base_root =
+        :public_key.pkix_test_root_cert(~c"pinned-ee",
+          key: anchor_key,
+          digest: :sha256,
+          extensions: [
+            {:Extension, {2, 5, 29, 15}, true, [:digitalSignature]},
+            Fixture.san([{:uniformResourceIdentifier, ~c"https://issuer-a.example"}])
+          ]
+        )
+
+      # Remove BasicConstraints so anchor is strictly an end-entity cert.
+      anchor = Fixture.replace_extension(base_root.cert, anchor_key, {2, 5, 29, 19}, nil)
+      assert {:ok, _} = X509.verify([anchor], trusted_certificates: [anchor], haip: false)
+
+      child_key = :public_key.generate_key(Fixture.curve())
+
+      donor =
+        :public_key.pkix_test_data(%{
+          root: base_root,
+          intermediates: [],
+          peer: [key: child_key, digest: :sha256]
+        })
+
+      tbs = donor[:cert] |> :public_key.pkix_decode_cert(:otp) |> otp_certificate(:tbsCertificate)
+      anchor_tbs = anchor |> :public_key.pkix_decode_cert(:otp) |> otp_certificate(:tbsCertificate)
+
+      exts =
+        tbs
+        |> otp_tbs(:extensions)
+        |> Enum.reject(&(elem(&1, 1) in [{2, 5, 29, 19}, {2, 5, 29, 17}]))
+
+      exts = [Fixture.san([{:uniformResourceIdentifier, ~c"https://issuer-b.example"}]) | exts]
+
+      child =
+        tbs
+        |> otp_tbs(issuer: otp_tbs(anchor_tbs, :subject), extensions: exts)
+        |> :public_key.pkix_sign(anchor_key)
+
+      assert {:error, :untrusted_certificate} = X509.verify([child], trusted_certificates: [anchor], haip: false)
+    end
+
+    test "self-signed and non-self-signed trust anchors enforce NameConstraints and pathLenConstraint", ctx do
+      nc_ext =
+        {:Extension, {2, 5, 29, 30}, true,
+         {:NameConstraints, [{:GeneralSubtree, {:dNSName, ~c"allowed.example"}, 0, :asn1_NOVALUE}], :asn1_NOVALUE}}
+
+      key = :public_key.generate_key(Fixture.curve())
+
+      nc_root =
+        :public_key.pkix_test_root_cert(~c"nc-root",
+          key: key,
+          digest: :sha256,
+          extensions: [
+            {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+            {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 0}},
+            nc_ext
+          ]
+        )
+
+      bad_leaf = Fixture.named_chain(nc_root, [{:dNSName, ~c"evil.example"}]).leaf
+      good_leaf = Fixture.named_chain(nc_root, [{:dNSName, ~c"sub.allowed.example"}]).leaf
+
+      over_pathlen =
+        Fixture.named_chain(nc_root, [{:dNSName, ~c"sub.allowed.example"}], intermediates: [[key: Fixture.curve()]])
+
+      assert {:error, :untrusted_certificate} = X509.verify([bad_leaf], trusted_certificates: [nc_root.cert])
+      assert {:ok, _} = X509.verify([good_leaf], trusted_certificates: [nc_root.cert])
+      assert {:error, :untrusted_certificate} = X509.verify(over_pathlen.chain, trusted_certificates: [nc_root.cert])
+
+      inter_opts = [
+        key: Fixture.curve(),
+        digest: :sha256,
+        extensions: [
+          {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+          {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 0}},
+          nc_ext
+        ]
+      ]
+
+      inter_bad = Fixture.named_chain(ctx.root, [{:dNSName, ~c"evil.example"}], intermediates: [inter_opts])
+      inter_bad_anchor = Enum.at(inter_bad.chain, 1)
+      assert {:error, :untrusted_certificate} = X509.verify([inter_bad.leaf], trusted_certificates: [inter_bad_anchor])
+
+      inter_ok = Fixture.named_chain(ctx.root, [{:dNSName, ~c"sub.allowed.example"}], intermediates: [inter_opts])
+      inter_ok_anchor = Enum.at(inter_ok.chain, 1)
+      assert {:ok, _} = X509.verify([inter_ok.leaf], trusted_certificates: [inter_ok_anchor])
+      assert {:ok, _} = X509.verify(inter_ok.chain ++ [ctx.root.cert], trusted_certificates: [inter_ok_anchor])
+    end
+
+    test "non-self-signed CA anchors match OTP uniformResourceIdentifier NameConstraints semantics", ctx do
+      uri_nc_ext =
+        {:Extension, {2, 5, 29, 30}, true,
+         {:NameConstraints, [{:GeneralSubtree, {:uniformResourceIdentifier, ~c"allowed.example"}, 0, :asn1_NOVALUE}],
+          :asn1_NOVALUE}}
+
+      inter_opts = [
+        key: Fixture.curve(),
+        digest: :sha256,
+        extensions: [
+          {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+          {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 0}},
+          uri_nc_ext
+        ]
+      ]
+
+      sub_chain =
+        Fixture.named_chain(ctx.root, [{:uniformResourceIdentifier, ~c"https://sub.allowed.example/iss"}],
+          intermediates: [inter_opts]
+        )
+
+      inter_anchor = Enum.at(sub_chain.chain, 1)
+      assert {:error, :untrusted_certificate} = X509.verify(sub_chain.chain, trusted_certificates: [ctx.root.cert])
+      assert {:error, :untrusted_certificate} = X509.verify([sub_chain.leaf], trusted_certificates: [inter_anchor])
+
+      exact_chain =
+        Fixture.named_chain(ctx.root, [{:uniformResourceIdentifier, ~c"https://allowed.example/iss"}],
+          intermediates: [inter_opts]
+        )
+
+      exact_anchor = Enum.at(exact_chain.chain, 1)
+      assert {:ok, _} = X509.verify([exact_chain.leaf], trusted_certificates: [exact_anchor])
+    end
+
+    test "dNSName NameConstraints also constrain uniformResourceIdentifier SANs unless URI constraints exist", ctx do
+      dns_nc_ext =
+        {:Extension, {2, 5, 29, 30}, true,
+         {:NameConstraints, [{:GeneralSubtree, {:dNSName, ~c"allowed.example"}, 0, :asn1_NOVALUE}],
+          [{:GeneralSubtree, {:dNSName, ~c"blocked.allowed.example"}, 0, :asn1_NOVALUE}]}}
+
+      nc_root =
+        :public_key.pkix_test_root_cert(~c"dns-nc-root",
+          key: Fixture.curve(),
+          digest: :sha256,
+          extensions: [
+            {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+            {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 1}},
+            dns_nc_ext
+          ]
+        )
+
+      evil_uri = Fixture.named_chain(nc_root, [{:uniformResourceIdentifier, ~c"https://evil.example/iss"}])
+
+      blocked_uri =
+        Fixture.named_chain(nc_root, [{:uniformResourceIdentifier, ~c"https://blocked.allowed.example/iss"}])
+
+      hostless_uri = Fixture.named_chain(nc_root, [{:uniformResourceIdentifier, ~c"urn:example:iss"}])
+      allowed_uri = Fixture.named_chain(nc_root, [{:uniformResourceIdentifier, ~c"https://sub.allowed.example/iss"}])
+
+      assert {:error, :untrusted_certificate} = X509.verify(evil_uri.chain, trusted_certificates: [nc_root.cert])
+      assert {:error, :untrusted_certificate} = X509.verify(blocked_uri.chain, trusted_certificates: [nc_root.cert])
+      assert {:error, :untrusted_certificate} = X509.verify(hostless_uri.chain, trusted_certificates: [nc_root.cert])
+      assert {:ok, _} = X509.verify(allowed_uri.chain, trusted_certificates: [nc_root.cert])
+
+      excluded_uri_nc_ext =
+        {:Extension, {2, 5, 29, 30}, true,
+         {:NameConstraints, [{:GeneralSubtree, {:dNSName, ~c"allowed.example"}, 0, :asn1_NOVALUE}],
+          [{:GeneralSubtree, {:uniformResourceIdentifier, ~c".blocked.example"}, 0, :asn1_NOVALUE}]}}
+
+      excluded_uri_root =
+        :public_key.pkix_test_root_cert(~c"dns-perm-uri-excl-root",
+          key: Fixture.curve(),
+          digest: :sha256,
+          extensions: [
+            {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+            {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 1}},
+            excluded_uri_nc_ext
+          ]
+        )
+
+      excluded_uri_evil =
+        Fixture.named_chain(excluded_uri_root, [{:uniformResourceIdentifier, ~c"https://evil.example/iss"}])
+
+      excluded_uri_allowed =
+        Fixture.named_chain(excluded_uri_root, [{:uniformResourceIdentifier, ~c"https://allowed.example/iss"}])
+
+      assert {:error, :untrusted_certificate} =
+               X509.verify(excluded_uri_evil.chain, trusted_certificates: [excluded_uri_root.cert])
+
+      assert {:ok, _} = X509.verify(excluded_uri_allowed.chain, trusted_certificates: [excluded_uri_root.cert])
+
+      inter_opts = [
+        key: Fixture.curve(),
+        digest: :sha256,
+        extensions: [
+          {:Extension, {2, 5, 29, 15}, false, [:keyCertSign]},
+          {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, 0}},
+          dns_nc_ext
+        ]
+      ]
+
+      inter_evil =
+        Fixture.named_chain(ctx.root, [{:uniformResourceIdentifier, ~c"https://evil.example/iss"}],
+          intermediates: [inter_opts]
+        )
+
+      inter_anchor = Enum.at(inter_evil.chain, 1)
+      assert {:error, :untrusted_certificate} = X509.verify([inter_evil.leaf], trusted_certificates: [inter_anchor])
+    end
+
+    test "accepts CA-issued end-entity certificate pinned alone when valid and rejects when expired", ctx do
+      ee = Fixture.chain(ctx.root)
+      assert {:ok, _} = X509.verify([ee.leaf], trusted_certificates: [ee.leaf], haip: false)
+
+      expired_ee =
+        Fixture.chain(ctx.root,
+          peer: [validity: {{2020, 1, 1}, {2020, 1, 2}}]
+        )
+
+      assert {:error, :untrusted_certificate} =
+               X509.verify([expired_ee.leaf], trusted_certificates: [expired_ee.leaf], haip: false)
+    end
+
+    test "rejects SHA-1 and MD5 signatures on leaves and trust anchors", ctx do
+      sha1_root = :public_key.pkix_test_root_cert(~c"sha1-root", key: Fixture.curve(), digest: :sha)
+
+      assert {:error, :untrusted_certificate} =
+               X509.verify([sha1_root.cert], trusted_certificates: [sha1_root.cert], haip: false)
+
+      sha1_leaf = Fixture.chain(ctx.root, peer: [digest: :sha])
+      assert {:error, :untrusted_certificate} = X509.verify(sha1_leaf.chain, trusted_certificates: ctx.issuer.anchors)
+    end
+
+    test "rejects non-boolean :haip and exposes limit and x509_hash helpers", ctx do
+      assert {:error, :invalid_certificate} =
+               X509.verify(ctx.issuer.chain, trusted_certificates: ctx.issuer.anchors, haip: nil)
+
+      assert X509.max_cert_bytes() == 65_536
+      assert X509.max_chain_length() == 8
+      assert X509.max_trust_anchors() == 64
+      assert X509.valid_trust_anchors?(ctx.issuer.anchors)
+      refute X509.valid_trust_anchors?([])
+      assert {:ok, "x509_hash:" <> _} = X509.x509_hash_client_id(ctx.issuer.leaf)
+      assert {:error, :invalid_certificate} = X509.x509_hash_client_id("")
+    end
   end
 end

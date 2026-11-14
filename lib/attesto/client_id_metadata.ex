@@ -86,7 +86,7 @@ defmodule Attesto.ClientIdMetadata do
   # must satisfy when present. `redirect_uris` is validated and required
   # separately (RFC 9700), so it is not in this passthrough table.
   @passthrough_members [
-    {"grant_types", :string_array},
+    {"grant_types", :non_empty_string_array},
     {"response_types", :string_array},
     {"contacts", :string_array},
     {"client_attestation_signing_alg_values_supported", :attestation_algs},
@@ -347,23 +347,16 @@ defmodule Attesto.ClientIdMetadata do
   # present, and unambiguous across RFC 3986 and WHATWG URL parsers.
   defp valid_redirect_uri?(uri) when is_binary(uri) do
     with true <- Attesto.RedirectURI.unambiguous?(uri),
-         {:ok, %URI{scheme: scheme, fragment: nil} = parsed}
+         {:ok, %URI{scheme: scheme, host: host, fragment: nil} = parsed}
          when is_binary(scheme) and scheme != "" <- URI.new(uri) do
-      valid_redirect_port?(uri, parsed.port)
+      Attesto.URI.valid_port?(uri, parsed.port) or
+        (scheme == "http" and Attesto.URI.loopback_host?(host) and parsed.port == 0)
     else
       _ -> false
     end
   end
 
   defp valid_redirect_uri?(_uri), do: false
-
-  defp valid_redirect_port?(uri, nil) do
-    not String.ends_with?(URI.parse(uri).authority || "", ":")
-  end
-
-  defp valid_redirect_port?(uri, port) when is_integer(port) do
-    port in 0..65_535 and not String.ends_with?(URI.parse(uri).authority || "", ":")
-  end
 
   # Missing grant_types defaults to authorization_code (RFC 7591 §2). Only an
   # explicit grant catalog without browser redirection can omit redirect URIs.
@@ -409,6 +402,12 @@ defmodule Attesto.ClientIdMetadata do
   defp normalize_value(:string_array, value) when is_list(value) do
     if Enum.all?(value, &is_binary/1), do: {:ok, value}, else: :error
   end
+
+  defp normalize_value(:non_empty_string_array, [_ | _] = value) do
+    if Enum.all?(value, &(is_binary(&1) and &1 != "")), do: {:ok, value}, else: :error
+  end
+
+  defp normalize_value(:non_empty_string_array, _value), do: :error
 
   defp normalize_value(kind, value)
        when kind in [:attestation_algs, :attestation_pop_algs, :capability_strings] and is_list(value) do

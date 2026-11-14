@@ -388,9 +388,7 @@ defmodule Attesto.SigningAlg do
   defp fallback_inferred_alg(alg, _jwk), do: alg
 
   defp public_fields(%JOSE.JWK{keys: :undefined} = jwk) do
-    jwk
-    |> JOSE.JWK.to_public_map()
-    |> elem(1)
+    Attesto.Key.public_map(jwk)
   end
 
   # JOSE does not terminate when asked for the public form of a JWK Set.

@@ -42,6 +42,10 @@ defmodule Attesto.CredentialProof do
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_proof_bytes 256 * 1_024
 
+  @doc "Maximum accepted wire size in bytes of an `openid4vci-proof+jwt`."
+  @spec max_proof_bytes() :: pos_integer()
+  def max_proof_bytes, do: @max_proof_bytes
+
   @type verified :: %{jwk: map(), jkt: String.t(), key_attestation: KeyAttestation.verified() | nil}
 
   @type verify_error ::

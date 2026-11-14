@@ -97,8 +97,75 @@ defmodule Attesto.URI do
   def normalize_path(path) when path in [nil, ""], do: "/"
   def normalize_path(path) when is_binary(path), do: path
 
+  @doc """
+  Extract the normalized WHATWG origin (`scheme://host[:port]`) of an absolute URL.
+
+  Returns `{:ok, origin}` or `{:error, :invalid_uri}`.
+  """
+  @spec origin(term()) :: {:ok, String.t()} | {:error, :invalid_uri}
+  def origin(uri) when is_binary(uri) do
+    with {:ok, %Elixir.URI{scheme: scheme, host: host} = parsed}
+         when is_binary(scheme) and scheme != "" and is_binary(host) and host != "" <- Elixir.URI.new(uri),
+         true <- is_nil(parsed.userinfo),
+         true <- valid_host?(host),
+         true <- valid_port?(uri, parsed.port) do
+      scheme = String.downcase(scheme)
+      host = host |> String.downcase() |> bracket_ipv6()
+      {:ok, "#{scheme}://#{host}#{origin_port(scheme, parsed.port)}"}
+    else
+      _other -> {:error, :invalid_uri}
+    end
+  end
+
+  def origin(_uri), do: {:error, :invalid_uri}
+
+  @doc "Return `true` when both URIs share the same normalized WHATWG origin."
+  @spec same_origin?(term(), term()) :: boolean()
+  def same_origin?(left, right) do
+    with {:ok, left_origin} <- origin(left),
+         {:ok, right_origin} <- origin(right) do
+      left_origin == right_origin
+    else
+      _ -> false
+    end
+  end
+
+  @doc """
+  Return `true` when `uri` is a pure origin URL (`https://host[:port]` with no
+  non-empty path, query, fragment, or userinfo). Options mirror `https_identifier?/2`.
+  """
+  @spec origin?(term(), keyword()) :: boolean()
+  def origin?(uri, opts \\ [])
+
+  def origin?(uri, opts) when is_binary(uri) and is_list(opts) do
+    https_identifier?(uri, opts) and
+      match?({:ok, %Elixir.URI{path: path, query: nil}} when path in [nil, "", "/"], Elixir.URI.new(uri))
+  end
+
+  def origin?(_uri, _opts), do: false
+
+  @doc """
+  Return `true` when `uri` is a valid OAuth issuer identifier (`https_identifier?/2`
+  with no query or fragment).
+  """
+  @spec issuer_identifier?(term(), keyword()) :: boolean()
+  def issuer_identifier?(uri, opts \\ [])
+
+  def issuer_identifier?(uri, opts) when is_binary(uri) and is_list(opts) do
+    https_identifier?(uri, opts) and match?({:ok, %Elixir.URI{query: nil}}, Elixir.URI.new(uri))
+  end
+
+  def issuer_identifier?(_uri, _opts), do: false
+
   @doc false
   @spec valid_port?(String.t(), term()) :: boolean()
+  def valid_port?(value, nil) when is_binary(value) do
+    case Elixir.URI.parse(value).authority do
+      authority when is_binary(authority) -> not String.ends_with?(authority, ":")
+      _ -> true
+    end
+  end
+
   def valid_port?(value, port) when is_binary(value) and is_integer(port) and port in 1..65_535 do
     case Elixir.URI.parse(value).authority do
       authority when is_binary(authority) -> not String.ends_with?(authority, ":")
@@ -144,23 +211,27 @@ defmodule Attesto.URI do
   """
   @spec loopback_host?(term()) :: boolean()
   def loopback_host?(host) when is_binary(host) do
-    host
-    |> String.downcase()
-    |> String.trim_trailing(".")
-    |> case do
-      "localhost" ->
-        true
-
-      literal ->
-        case :inet.parse_strict_address(String.to_charlist(literal)) do
-          {:ok, {127, _b, _c, _d}} -> true
-          {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
-          _other -> false
-        end
+    if String.contains?(host, "%") do
+      false
+    else
+      host
+      |> String.downcase()
+      |> strip_root_dot()
+      |> loopback_literal?()
     end
   end
 
   def loopback_host?(_host), do: false
+
+  defp loopback_literal?("localhost"), do: true
+
+  defp loopback_literal?(literal) do
+    case :inet.parse_strict_address(String.to_charlist(literal)) do
+      {:ok, {127, _b, _c, _d}} -> true
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
+      _other -> false
+    end
+  end
 
   defp http_policy(true, _allow_loopback_http?), do: :any
   defp http_policy(false, true), do: :loopback
@@ -188,5 +259,19 @@ defmodule Attesto.URI do
   defp accepted_scheme?("http", :loopback, host), do: loopback_host?(host)
   defp accepted_scheme?(_scheme, _http_policy, _host), do: false
 
-  defp valid_percent_encoding?(value), do: not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value)
+  @doc "Return `true` when every `%` in `value` starts a valid `%XX` hex escape."
+  @spec valid_percent_encoding?(String.t()) :: boolean()
+  def valid_percent_encoding?(value) when is_binary(value), do: not Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value)
+
+  defp bracket_ipv6(host) do
+    if String.contains?(host, ":"), do: "[#{host}]", else: host
+  end
+
+  defp origin_port(scheme, port) do
+    cond do
+      is_nil(port) -> ""
+      Elixir.URI.default_port(scheme) == port -> ""
+      true -> ":#{port}"
+    end
+  end
 end

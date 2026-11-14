@@ -250,5 +250,11 @@ defmodule Attesto.EndSessionTest do
       assert {:ok, "https://rp.example/after?theme=dark&state=xyz"} =
                EndSession.confirm_redirect(request, [registered])
     end
+
+    test "rejects an unknown :on_invalid_hint option even without an id_token_hint", %{config: config} do
+      assert_raise ArgumentError, ~r/:on_invalid_hint/, fn ->
+        EndSession.parse(config, %{}, on_invalid_hint: :ignore)
+      end
+    end
   end
 end

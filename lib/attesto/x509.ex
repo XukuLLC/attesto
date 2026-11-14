@@ -82,10 +82,23 @@ defmodule Attesto.X509 do
 
   @max_cert_bytes 65_536
   @max_chain_length 8
+  @max_trust_anchors 64
   @extended_key_usage_oid {2, 5, 29, 37}
   @key_usage_oid {2, 5, 29, 15}
+  @basic_constraints_oid {2, 5, 29, 19}
+  @name_constraints_oid {2, 5, 29, 30}
+  @subject_alt_name_oid {2, 5, 29, 17}
+  @subject_key_id_oid {2, 5, 29, 14}
+  @authority_key_id_oid {2, 5, 29, 35}
+  @certificate_policies_oid {2, 5, 29, 32}
   @rsa_pss_oid {1, 2, 840, 113_549, 1, 1, 10}
   @rsa_encryption_oid {1, 2, 840, 113_549, 1, 1, 1}
+  @mgf1_oid {1, 2, 840, 113_549, 1, 1, 8}
+  @sha256_oid {2, 16, 840, 1, 101, 3, 4, 2, 1}
+  @sha384_oid {2, 16, 840, 1, 101, 3, 4, 2, 2}
+  @sha512_oid {2, 16, 840, 1, 101, 3, 4, 2, 3}
+  @ed25519_oid {1, 3, 101, 112}
+  @ed448_oid {1, 3, 101, 113}
   @mdoc_document_signer_oid {1, 0, 18_013, 5, 1, 2}
 
   @type verified :: %{public_key: map(), authority_key_identifiers: [String.t()]}
@@ -95,6 +108,38 @@ defmodule Attesto.X509 do
           | {:certificate_trust, ([binary()] -> :ok | {:error, term()})}
           | {:purpose, :generic | :mdoc_issuer}
           | {:haip, boolean()}
+
+  @doc "Maximum accepted DER certificate size in bytes."
+  @spec max_cert_bytes() :: pos_integer()
+  def max_cert_bytes, do: @max_cert_bytes
+
+  @doc "Maximum accepted X.509 certificate chain length."
+  @spec max_chain_length() :: pos_integer()
+  def max_chain_length, do: @max_chain_length
+
+  @doc "Maximum accepted number of trust anchors in a verification call."
+  @spec max_trust_anchors() :: pos_integer()
+  def max_trust_anchors, do: @max_trust_anchors
+
+  @doc """
+  Return `true` when `anchors` is a non-empty bounded list of valid DER certificate binaries.
+  """
+  @spec valid_trust_anchors?(term()) :: boolean()
+  def valid_trust_anchors?(anchors) when is_list(anchors) and length(anchors) in 1..@max_trust_anchors do
+    Enum.all?(anchors, &certificate_binary?/1)
+  end
+
+  def valid_trust_anchors?(_anchors), do: false
+
+  @doc """
+  Derive an OID4VP `x509_hash:<base64url-sha256>` client identifier from a leaf DER certificate.
+  """
+  @spec x509_hash_client_id(binary()) :: {:ok, String.t()} | {:error, :invalid_certificate}
+  def x509_hash_client_id(leaf) when is_binary(leaf) and byte_size(leaf) in 1..@max_cert_bytes do
+    {:ok, "x509_hash:" <> (:crypto.hash(:sha256, leaf) |> Base.url_encode64(padding: false))}
+  end
+
+  def x509_hash_client_id(_leaf), do: {:error, :invalid_certificate}
 
   @doc """
   Validate a leaf-first DER chain against explicit DER trust anchors.
@@ -109,15 +154,15 @@ defmodule Attesto.X509 do
   @spec verify([binary()], [option()]) :: {:ok, verified()} | {:error, verify_error()}
   def verify(chain, opts) when is_list(chain) and is_list(opts) do
     with true <- valid_chain?(chain),
-         anchors when is_list(anchors) and anchors != [] <-
-           Keyword.get(opts, :trusted_certificates),
-         true <- valid_chain?(anchors),
+         anchors = Keyword.get(opts, :trusted_certificates),
+         true <- valid_trust_anchors?(anchors),
          :ok <- profile_chain(chain, anchors, opts),
          true <- Enum.any?(anchors, &valid_path?(&1, chain, opts)),
          {:ok, key} <- leaf_public_key(hd(chain)),
          :ok <- host_policy(chain, Keyword.get(opts, :certificate_trust)) do
       {:ok, %{public_key: key, authority_key_identifiers: authority_key_identifiers(chain)}}
     else
+      {:error, :invalid_certificate} = error -> error
       _ -> {:error, :untrusted_certificate}
     end
   rescue
@@ -216,50 +261,323 @@ defmodule Attesto.X509 do
 
   defp decode_certificate(_encoded), do: {:error, :invalid_certificate}
 
-  defp valid_chain?(chain),
-    do:
-      length(chain) in 1..@max_chain_length and
-        Enum.all?(chain, &(is_binary(&1) and byte_size(&1) in 1..@max_cert_bytes))
+  defp certificate_binary?(der), do: is_binary(der) and byte_size(der) in 1..@max_cert_bytes
+
+  defp valid_chain?(chain), do: length(chain) in 1..@max_chain_length and Enum.all?(chain, &certificate_binary?/1)
 
   defp valid_path?(anchor, chain, opts) do
-    path = if List.last(chain) == anchor, do: Enum.drop(chain, -1), else: chain
-    # An anchor alone still needs to be a valid, currently usable leaf certificate.
-    path = if path == [], do: [anchor], else: path
-    pkix_opts = pkix_options(hd(chain), Keyword.get(opts, :purpose, :generic))
+    purpose = Keyword.get(opts, :purpose, :generic)
 
-    Enum.all?(Enum.uniq([anchor | chain]), &certificate_key_algorithm_allowed?/1) and
-      match?({:ok, _}, :public_key.pkix_path_validation(anchor, Enum.reverse(path), pkix_opts))
+    if purpose in [:generic, :mdoc_issuer] do
+      path_to_leaf =
+        case Enum.find_index(chain, &(&1 == anchor)) do
+          nil -> chain
+          idx -> Enum.take(chain, idx)
+        end
+
+      certs_in_path = Enum.uniq([anchor | path_to_leaf])
+
+      Enum.all?(
+        certs_in_path,
+        &(certificate_key_algorithm_allowed?(&1) and certificate_signature_algorithm_allowed?(&1))
+      ) and
+        validate_anchored_path(anchor, path_to_leaf, purpose) and
+        dns_constraints_hold_for_uri_sans?(anchor, path_to_leaf)
+    else
+      false
+    end
   rescue
     _ -> false
   catch
     _, _ -> false
   end
 
-  defp pkix_options(leaf, :mdoc_issuer), do: [verify_fun: {&verify_mdoc_extension/4, leaf}]
+  defp validate_anchored_path(anchor, [], purpose) do
+    anchor_otp = :public_key.pkix_decode_cert(anchor, :otp)
 
-  defp pkix_options(_leaf, :generic), do: []
+    if :public_key.pkix_is_self_signed(anchor_otp) do
+      match?(
+        {:ok, _},
+        :public_key.pkix_path_validation(anchor, [anchor], pkix_options(anchor, purpose, nil))
+      )
+    else
+      valid_pinned_leaf_anchor?(anchor_otp, purpose)
+    end
+  end
 
-  defp verify_mdoc_extension(_cert, _der, {:bad_cert, reason}, _leaf), do: {:fail, reason}
+  defp validate_anchored_path(anchor, path_to_leaf, purpose) do
+    issuer_path = Enum.reverse(path_to_leaf)
+    leaf = hd(path_to_leaf)
+    anchor_otp = :public_key.pkix_decode_cert(anchor, :otp)
+    waive_anchor = if !:public_key.pkix_is_self_signed(anchor_otp), do: anchor
+    pkix_opts = pkix_options(leaf, purpose, waive_anchor)
 
-  defp verify_mdoc_extension(
+    match?(
+      {:ok, _},
+      :public_key.pkix_path_validation(anchor, [anchor | issuer_path], pkix_opts)
+    )
+  end
+
+  defp valid_pinned_leaf_anchor?(anchor_otp, purpose) do
+    tbs = certificate(anchor_otp, :tbsCertificate)
+    extensions = otp_extensions(tbs)
+
+    valid_certificate_time?(tbs) and
+      Enum.all?(extensions, &valid_pinned_leaf_extension?(&1, purpose))
+  end
+
+  defp valid_pinned_leaf_extension?(extension(extnID: @key_usage_oid, extnValue: usages), _purpose)
+       when is_list(usages) do
+    :digitalSignature in usages
+  end
+
+  defp valid_pinned_leaf_extension?(
+         extension(extnID: @extended_key_usage_oid, critical: true, extnValue: purposes),
+         purpose
+       ) do
+    purpose == :mdoc_issuer and is_list(purposes) and @mdoc_document_signer_oid in purposes
+  end
+
+  defp valid_pinned_leaf_extension?(extension(critical: true, extnID: oid), _purpose) do
+    oid in [
+      @basic_constraints_oid,
+      @subject_alt_name_oid,
+      @subject_key_id_oid,
+      @authority_key_id_oid,
+      @certificate_policies_oid
+    ]
+  end
+
+  defp valid_pinned_leaf_extension?(_extension, _purpose), do: true
+
+  defp dns_constraints_hold_for_uri_sans?(_anchor, []), do: true
+
+  defp dns_constraints_hold_for_uri_sans?(anchor, [leaf | intermediates]) do
+    uri_sans =
+      for {:uniformResourceIdentifier, uri} <- subject_alternative_names(leaf) do
+        to_string(uri)
+      end
+
+    if uri_sans == [] do
+      true
+    else
+      Enum.all?([anchor | intermediates], &ca_dns_constraints_allow_uris?(&1, uri_sans))
+    end
+  end
+
+  defp ca_dns_constraints_allow_uris?(ca_der, uri_sans) do
+    extensions =
+      ca_der
+      |> :public_key.pkix_decode_cert(:otp)
+      |> certificate(:tbsCertificate)
+      |> otp_extensions()
+
+    case Enum.find(extensions, &(extension(&1, :extnID) == @name_constraints_oid)) do
+      nil ->
+        true
+
+      extension(extnValue: {:NameConstraints, permitted, excluded}) ->
+        uri_sans_allowed_by_name_constraints?(subtree_list(permitted), subtree_list(excluded), uri_sans)
+
+      _other ->
+        false
+    end
+  end
+
+  defp uri_sans_allowed_by_name_constraints?(permitted_list, excluded_list, uri_sans) do
+    # Only a permitted URI subtree bounds which URI hosts are allowed; an excluded
+    # URI subtree leaves permitted dNSName constraints governing the leaf URIs.
+    if Enum.any?(permitted_list, &(subtree_form(&1) == :uniformResourceIdentifier)) do
+      true
+    else
+      dns_permitted = for {:GeneralSubtree, {:dNSName, constraint}, _, _} <- permitted_list, do: to_string(constraint)
+      dns_excluded = for {:GeneralSubtree, {:dNSName, constraint}, _, _} <- excluded_list, do: to_string(constraint)
+
+      (dns_permitted == [] and dns_excluded == []) or
+        Enum.all?(uri_sans, &uri_satisfies_dns_constraints?(&1, dns_permitted, dns_excluded))
+    end
+  end
+
+  defp uri_satisfies_dns_constraints?(uri, dns_permitted, dns_excluded) do
+    case URI.new(uri) do
+      {:ok, %URI{host: host}} when is_binary(host) and host != "" ->
+        not Enum.any?(dns_excluded, &dns_matches_constraint?(host, &1)) and
+          (dns_permitted == [] or Enum.any?(dns_permitted, &dns_matches_constraint?(host, &1)))
+
+      _other ->
+        dns_permitted == []
+    end
+  end
+
+  defp subtree_list(:asn1_NOVALUE), do: []
+  defp subtree_list(list) when is_list(list), do: list
+
+  defp subtree_form({:GeneralSubtree, name, _min, _max}), do: elem(name, 0)
+
+  defp dns_matches_constraint?(host, constraint) do
+    host = host |> String.downcase() |> String.trim_trailing(".")
+    constraint = constraint |> String.downcase() |> String.trim_trailing(".")
+
+    cond do
+      constraint == "" -> true
+      String.starts_with?(constraint, ".") -> String.ends_with?(host, constraint)
+      true -> host == constraint or String.ends_with?(host, "." <> constraint)
+    end
+  end
+
+  defp valid_certificate_time?(tbs) do
+    {:Validity, not_before, not_after} = tbs_certificate(tbs, :validity)
+    now = System.system_time(:second)
+
+    with {:ok, from_unix} <- asn1_time_to_unix(not_before),
+         {:ok, to_unix} <- asn1_time_to_unix(not_after) do
+      now >= from_unix and now <= to_unix
+    else
+      _ -> false
+    end
+  end
+
+  defp asn1_time_to_unix({:utcTime, chars}) do
+    with [y1, y2, m1, m2, d1, d2, h1, h2, min1, min2, s1, s2, ?Z] <- chars,
+         {:ok, two_digit_year} <- parse_two_digits(y1, y2) do
+      year = if two_digit_year >= 50, do: 1900 + two_digit_year, else: 2000 + two_digit_year
+      fields_to_unix(year, [m1, m2], [d1, d2], [h1, h2], [min1, min2], [s1, s2])
+    else
+      _ -> :error
+    end
+  end
+
+  defp asn1_time_to_unix({:generalTime, chars}) do
+    with [y1, y2, y3, y4, m1, m2, d1, d2, h1, h2, min1, min2, s1, s2, ?Z] <- chars,
+         {year, ""} <- Integer.parse(List.to_string([y1, y2, y3, y4])) do
+      fields_to_unix(year, [m1, m2], [d1, d2], [h1, h2], [min1, min2], [s1, s2])
+    else
+      _ -> :error
+    end
+  end
+
+  defp asn1_time_to_unix(_time), do: :error
+
+  defp parse_two_digits(d1, d2) when d1 in ?0..?9 and d2 in ?0..?9 do
+    {:ok, (d1 - ?0) * 10 + (d2 - ?0)}
+  end
+
+  defp parse_two_digits(_d1, _d2), do: :error
+
+  defp fields_to_unix(year, m, d, h, min, s) do
+    with {month, ""} <- Integer.parse(List.to_string(m)),
+         {day, ""} <- Integer.parse(List.to_string(d)),
+         {hour, ""} <- Integer.parse(List.to_string(h)),
+         {minute, ""} <- Integer.parse(List.to_string(min)),
+         {second, ""} <- Integer.parse(List.to_string(s)),
+         {:ok, ndt} <- NaiveDateTime.new(year, month, day, hour, minute, second),
+         {:ok, dt} <- DateTime.from_naive(ndt, "Etc/UTC") do
+      {:ok, DateTime.to_unix(dt)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp otp_extensions(tbs) do
+    case tbs_certificate(tbs, :extensions) do
+      list when is_list(list) -> list
+      :asn1_NOVALUE -> []
+    end
+  end
+
+  defp certificate_signature_algorithm_allowed?(der) do
+    otp = :public_key.pkix_decode_cert(der, :otp)
+    tbs = certificate(otp, :tbsCertificate)
+    outer_alg = certificate(otp, :signatureAlgorithm)
+    tbs_alg = tbs_certificate(tbs, :signature)
+
+    normalized_sig_alg(outer_alg) == normalized_sig_alg(tbs_alg) and
+      allowed_signature_algorithm?(outer_alg)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp normalized_sig_alg({:SignatureAlgorithm, oid, :asn1_NOVALUE}), do: {:SignatureAlgorithm, oid, :NULL}
+
+  defp normalized_sig_alg(alg), do: alg
+
+  defp allowed_signature_algorithm?({:SignatureAlgorithm, @rsa_pss_oid, params}) do
+    allowed_pss_signature_params?(params)
+  end
+
+  defp allowed_signature_algorithm?({:SignatureAlgorithm, oid, _params}) do
+    case :public_key.pkix_sign_types(oid) do
+      {hash, _alg} when hash in [:sha256, :sha384, :sha512] -> true
+      {:none, :eddsa} when oid in [@ed25519_oid, @ed448_oid] -> true
+      _other -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp allowed_signature_algorithm?(_alg), do: false
+
+  defp allowed_pss_signature_params?(encoded) when is_binary(encoded) do
+    :"RSASSA-PSS-params"
+    |> :public_key.der_decode(encoded)
+    |> allowed_pss_signature_params?()
+  end
+
+  defp allowed_pss_signature_params?({tag, hash_alg, mgf_alg, _salt_len, _trailer})
+       when tag in [:RSASSA_PSS_params, :"RSASSA-PSS-params"] do
+    with {:HashAlgorithm, hash_oid, hash_params}
+         when hash_oid in [@sha256_oid, @sha384_oid, @sha512_oid] and
+                hash_params in [:NULL, :asn1_NOVALUE] <- hash_alg,
+         {:MaskGenAlgorithm, @mgf1_oid, {:HashAlgorithm, ^hash_oid, mgf_params}}
+         when mgf_params in [:NULL, :asn1_NOVALUE] <- mgf_alg do
+      true
+    else
+      _other -> false
+    end
+  end
+
+  defp allowed_pss_signature_params?(_params), do: false
+
+  defp pkix_options(_leaf, :generic, nil), do: []
+
+  defp pkix_options(leaf, purpose, waive_anchor) do
+    [verify_fun: {&verify_cert_extension/4, %{leaf: leaf, purpose: purpose, waive_anchor: waive_anchor}}]
+  end
+
+  defp verify_cert_extension(_cert, der, {:bad_cert, reason}, %{waive_anchor: anchor} = state)
+       when is_binary(anchor) and der == anchor and reason in [:invalid_issuer, :invalid_signature] do
+    {:valid, state}
+  end
+
+  defp verify_cert_extension(_cert, _der, {:bad_cert, reason}, _state), do: {:fail, reason}
+
+  defp verify_cert_extension(
          _cert,
          der,
          {:extension, extension(extnID: @extended_key_usage_oid, critical: true, extnValue: purposes)},
-         leaf
+         %{purpose: :mdoc_issuer, leaf: leaf} = state
        )
        when der == leaf and is_list(purposes) do
-    if @mdoc_document_signer_oid in purposes, do: {:valid, leaf}, else: {:unknown, leaf}
+    if @mdoc_document_signer_oid in purposes, do: {:valid, state}, else: {:unknown, state}
   end
 
-  defp verify_mdoc_extension(_cert, _der, {:extension, _extension}, leaf), do: {:unknown, leaf}
+  defp verify_cert_extension(_cert, _der, {:extension, _extension}, state), do: {:unknown, state}
 
-  defp verify_mdoc_extension(_cert, _der, valid, leaf) when valid in [:valid, :valid_peer], do: {:valid, leaf}
+  defp verify_cert_extension(_cert, _der, valid, state) when valid in [:valid, :valid_peer], do: {:valid, state}
 
   defp profile_chain(chain, anchors, opts) do
-    if Keyword.get(opts, :haip, false) and
-         (:public_key.pkix_is_self_signed(hd(chain)) or Enum.any?(chain, &(&1 in anchors))),
-       do: {:error, :invalid_certificate},
-       else: :ok
+    case Keyword.get(opts, :haip, false) do
+      haip when is_boolean(haip) ->
+        if haip and
+             (:public_key.pkix_is_self_signed(hd(chain)) or Enum.any?(chain, &(&1 in anchors))),
+           do: {:error, :untrusted_certificate},
+           else: :ok
+
+      _invalid ->
+        {:error, :invalid_certificate}
+    end
   end
 
   defp host_policy(_chain, nil), do: :ok
@@ -287,8 +605,7 @@ defmodule Attesto.X509 do
         |> :public_key.pem_entry_decode()
         |> JOSE.JWK.from_key()
 
-      {_type, public} = JOSE.JWK.to_public_map(key)
-      {:ok, public}
+      {:ok, Attesto.Key.public_map(key)}
     else
       false -> {:error, :unsupported_certificate_key}
     end

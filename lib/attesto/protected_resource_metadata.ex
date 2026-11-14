@@ -122,6 +122,40 @@ defmodule Attesto.ProtectedResourceMetadata do
     build_metadata(resource(nil, opts), opts)
   end
 
+  @well_known_prefix "/.well-known/oauth-protected-resource"
+
+  @doc """
+  Return the RFC 9728 §3.1 well-known metadata request path for `resource_path`.
+
+  Empty or root paths map to `"/.well-known/oauth-protected-resource"`; non-root
+  paths append cleanly (e.g. `"/mcp"` -> `"/.well-known/oauth-protected-resource/mcp"`).
+  """
+  @spec well_known_path(String.t() | nil) :: String.t()
+  def well_known_path(path) when path in [nil, "", "/"], do: @well_known_prefix
+
+  def well_known_path("/" <> _rest = path), do: @well_known_prefix <> path
+  def well_known_path(path) when is_binary(path), do: @well_known_prefix <> "/" <> path
+
+  @doc """
+  Derive the RFC 9728 §3.1 well-known metadata URL for a protected resource URL.
+
+  Inserts `/.well-known/oauth-protected-resource` between the origin and any
+  resource path, preserving query components when present.
+  """
+  @spec well_known_uri(String.t()) :: {:ok, String.t()} | {:error, :invalid_uri}
+  def well_known_uri(resource_url) when is_binary(resource_url) do
+    case Elixir.URI.new(resource_url) do
+      {:ok, %Elixir.URI{scheme: scheme, host: host} = parsed}
+      when is_binary(scheme) and scheme != "" and is_binary(host) and host != "" ->
+        {:ok, Elixir.URI.to_string(%{parsed | path: well_known_path(parsed.path)})}
+
+      _other ->
+        {:error, :invalid_uri}
+    end
+  end
+
+  def well_known_uri(_other), do: {:error, :invalid_uri}
+
   defp build_metadata(resource, opts) do
     base = %{"resource" => resource}
 

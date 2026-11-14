@@ -128,4 +128,14 @@ defmodule Attesto.DeviceCodeStore do
   'consumed' WHERE status = 'approved' AND expires_at > $now RETURNING`.
   """
   @callback consume(device_code_hash(), opts :: map()) :: {:ok, entry()} | :error
+
+  @doc """
+  Delete every unconsumed (`:pending` or `:approved`) device code matching `criteria`
+  and return `{:ok, deleted_count}`.
+
+  See `Attesto.RevocationCriteria`. Optional on custom stores.
+  """
+  @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+
+  @optional_callbacks delete_unconsumed: 1
 end

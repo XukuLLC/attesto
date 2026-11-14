@@ -659,6 +659,24 @@ defmodule Attesto.PresentationSessionTest do
 
       assert_pending(session.id)
     end
+
+    test "forwards :dc_api_origin into mdoc verification and rejects malformed origins", ctx do
+      {:ok, session} = mdoc_create_session(ctx, response_uri: nil)
+      vp_token = mdoc_vp_token(ctx, session.nonce)
+
+      assert_raise ArgumentError, ~r/:dc_api_origin/, fn ->
+        PresentationSession.verify_response(Store, {:state, session.id}, vp_token,
+          now: ctx.now,
+          dc_api_origin: "https://verifier.example/"
+        )
+      end
+
+      assert {:error, {:invalid_presentation, {@mdoc_query_id, :invalid_signature}}} =
+               PresentationSession.verify_response(Store, {:state, session.id}, vp_token,
+                 now: ctx.now,
+                 dc_api_origin: "https://verifier.example"
+               )
+    end
   end
 
   defp create_session(ctx, overrides \\ []) do

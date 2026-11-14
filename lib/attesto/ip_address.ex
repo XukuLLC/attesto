@@ -63,7 +63,9 @@ defmodule Attesto.IPAddress do
 
   defp parse_cidr!(cidr) when is_binary(cidr) do
     with [address, prefix] <- String.split(cidr, "/"),
+         false <- String.contains?(address, "%"),
          {:ok, ip} <- :inet.parse_strict_address(String.to_charlist(address)),
+         false <- match?({0, 0, 0, 0, 0, 0xFFFF, _, _}, ip),
          {length, ""} <- Integer.parse(prefix),
          true <- prefix == Integer.to_string(length),
          true <- length >= 1 and length <= address_bits(ip),
@@ -102,8 +104,10 @@ defmodule Attesto.IPAddress do
 
   defp in_cidr?(_address, _cidr), do: false
 
-  defp unmap_ipv4({0, 0, 0, 0, 0, 0xFFFF, high, low}), do: embedded_ipv4(high, low)
-  defp unmap_ipv4(address), do: address
+  @doc "Unmap an IPv4-mapped IPv6 tuple (`::ffff:a.b.c.d`) to its 4-tuple IPv4 address."
+  @spec unmap_ipv4(:inet.ip_address()) :: :inet.ip_address()
+  def unmap_ipv4({0, 0, 0, 0, 0, 0xFFFF, high, low}), do: embedded_ipv4(high, low)
+  def unmap_ipv4(address), do: address
 
   defp network_address?(ip, length) do
     host_bits = address_bits(ip) - length

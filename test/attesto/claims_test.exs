@@ -161,4 +161,30 @@ defmodule Attesto.ClaimsTest do
                Claims.merge_registered(%{iss: "spoof"}, %{"iss" => "i"}, atom_keys: :convert)
     end
   end
+
+  describe "storable_text?/1, no_terminal_controls?/2, and typ_matches?/3" do
+    test "checks valid UTF-8 without NUL in storable_text?/1" do
+      assert Claims.storable_text?("hello")
+      refute Claims.storable_text?("nul\0byte")
+      refute Claims.storable_text?(<<255>>)
+      refute Claims.storable_text?(123)
+    end
+
+    test "rejects C0, DEL, and C1 terminal control characters unless allow_multiline?: true permits LF/TAB" do
+      assert Claims.no_terminal_controls?("normal café UTF-8")
+      refute Claims.no_terminal_controls?("esc\e[31m")
+      refute Claims.no_terminal_controls?("c1\u009B")
+      refute Claims.no_terminal_controls?("del\x7f")
+      refute Claims.no_terminal_controls?("line1\nline2")
+      assert Claims.no_terminal_controls?("line1\n\tline2", allow_multiline?: true)
+      refute Claims.no_terminal_controls?("line1\r\n\tline2", allow_multiline?: true)
+      refute Claims.no_terminal_controls?("line1\u0085line2", allow_multiline?: true)
+    end
+
+    test "typ_matches?/3 supports exact, :application_subtype, and :case_insensitive normalization" do
+      assert Claims.typ_matches?("dc+sd-jwt", ["application/dc+sd-jwt"], normalization: :application_subtype)
+      assert Claims.typ_matches?("ID_TOKEN+JWT", ["id_token+jwt"], normalization: :case_insensitive)
+      refute Claims.typ_matches?("JWT", ["at+jwt"], normalization: :case_insensitive)
+    end
+  end
 end

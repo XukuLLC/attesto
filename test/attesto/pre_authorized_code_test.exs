@@ -301,4 +301,13 @@ defmodule Attesto.PreAuthorizedCodeTest do
     assert winners == 1
     assert losers == @racers - 1
   end
+
+  test "ETS.delete_unconsumed/1 drops unconsumed codes for a revoked subject" do
+    {:ok, code1} = PreAuthorizedCode.issue(Store, attrs(%{subject: "usr_revoked"}), now: @now)
+    {:ok, code2} = PreAuthorizedCode.issue(Store, attrs(%{subject: "usr_kept"}), now: @now)
+
+    assert {:ok, 1} = Store.delete_unconsumed(subject: "usr_revoked")
+    assert {:error, :invalid_grant} = PreAuthorizedCode.redeem(Store, code1, %{}, now: @now)
+    assert {:ok, %{subject: "usr_kept"}} = PreAuthorizedCode.redeem(Store, code2, %{}, now: @now)
+  end
 end

@@ -173,5 +173,19 @@ defmodule Attesto.ProtectedResourceMetadataTest do
       meta = PRM.metadata(config(), not_a_real_field: "x")
       refute Map.has_key?(meta, "not_a_real_field")
     end
+
+    test "well_known_path/1 and well_known_uri/1 build RFC 9728 metadata paths and URLs" do
+      assert PRM.well_known_path(nil) == "/.well-known/oauth-protected-resource"
+      assert PRM.well_known_path("/") == "/.well-known/oauth-protected-resource"
+      assert PRM.well_known_path("/mcp") == "/.well-known/oauth-protected-resource/mcp"
+
+      assert PRM.well_known_uri("https://rs.example") ==
+               {:ok, "https://rs.example/.well-known/oauth-protected-resource"}
+
+      assert PRM.well_known_uri("https://rs.example/mcp?v=1") ==
+               {:ok, "https://rs.example/.well-known/oauth-protected-resource/mcp?v=1"}
+
+      assert PRM.well_known_uri("/relative") == {:error, :invalid_uri}
+    end
   end
 end

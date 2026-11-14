@@ -8,33 +8,52 @@ defmodule Attesto.PresentationRequest do
   """
 
   alias Attesto.MapParams
+  alias Attesto.Mdoc.Origin
 
   @default_response_mode "direct_post"
-  @response_modes ["direct_post", "direct_post.jwt"]
+  @dc_api_response_modes ["dc_api", "dc_api.jwt"]
+  @response_modes ["direct_post", "direct_post.jwt" | @dc_api_response_modes]
   @dcql_identifier ~r/\A[A-Za-z0-9_-]+\z/
+
+  @doc """
+  Return whether `value` is a syntactically valid DCQL query or claim
+  identifier (`[A-Za-z0-9_-]+`).
+  """
+  @spec valid_dcql_id?(term()) :: boolean()
+  def valid_dcql_id?(value), do: is_binary(value) and Regex.match?(@dcql_identifier, value)
 
   @doc """
   Build an OID4VP Authorization Request.
 
-  The request requires a client identifier, nonce, response URI, and a DCQL
-  query. Optional values are included only when supplied with a non-`nil`
-  value.
+  Standard redirect responses (`"direct_post"` and `"direct_post.jwt"`) require
+  `:client_id`, `:nonce`, `:response_uri`, and `:dcql_query`. DC API responses
+  (`"dc_api"` and `"dc_api.jwt"`) require `:expected_origins` instead of
+  `:response_uri` and omit `"state"` and `"response_uri"`. Optional values are
+  included only when supplied with a non-`nil` value.
   """
   @spec build(keyword()) :: %{required(String.t()) => term()}
   def build(opts) when is_list(opts) do
     opts = MapParams.ensure_keyword!(opts)
+    response_mode = response_mode!(Keyword.get(opts, :response_mode, @default_response_mode))
 
-    %{
-      "client_id" => MapParams.required_string!(Keyword.get(opts, :client_id), :client_id),
-      "nonce" => MapParams.required_string!(Keyword.get(opts, :nonce), :nonce),
-      "response_uri" => MapParams.required_string!(Keyword.get(opts, :response_uri), :response_uri),
-      "response_type" => "vp_token",
-      "response_mode" => response_mode!(Keyword.get(opts, :response_mode, @default_response_mode)),
-      "dcql_query" => required_dcql_query!(opts, :dcql_query)
-    }
-    |> MapParams.put_optional("state", Keyword.get(opts, :state), &MapParams.optional_string!/2)
-    |> MapParams.put_optional("client_metadata", Keyword.get(opts, :client_metadata), &map!/2)
-    |> MapParams.put_optional("client_id_scheme", Keyword.get(opts, :client_id_scheme), &MapParams.optional_string!/2)
+    base =
+      %{
+        "client_id" => MapParams.required_string!(Keyword.get(opts, :client_id), :client_id),
+        "nonce" => MapParams.required_string!(Keyword.get(opts, :nonce), :nonce),
+        "response_type" => "vp_token",
+        "response_mode" => response_mode,
+        "dcql_query" => required_dcql_query!(opts, :dcql_query)
+      }
+      |> MapParams.put_optional("client_metadata", Keyword.get(opts, :client_metadata), &map!/2)
+      |> MapParams.put_optional("client_id_scheme", Keyword.get(opts, :client_id_scheme), &MapParams.optional_string!/2)
+
+    if response_mode in @dc_api_response_modes do
+      Map.put(base, "expected_origins", expected_origins!(Keyword.get(opts, :expected_origins)))
+    else
+      base
+      |> Map.put("response_uri", MapParams.required_string!(Keyword.get(opts, :response_uri), :response_uri))
+      |> MapParams.put_optional("state", Keyword.get(opts, :state), &MapParams.optional_string!/2)
+    end
   end
 
   def build(opts) when not is_list(opts) do
@@ -103,8 +122,20 @@ defmodule Attesto.PresentationRequest do
 
   defp response_mode!(value) do
     raise ArgumentError,
-          ~s(Attesto.PresentationRequest :response_mode must be "direct_post" or "direct_post.jwt"; ) <>
+          ~s(Attesto.PresentationRequest :response_mode must be "direct_post", "direct_post.jwt", "dc_api", or "dc_api.jwt"; ) <>
             "got #{inspect(value)}"
+  end
+
+  defp expected_origins!(origins) do
+    origins = non_empty_string_list!(origins, :expected_origins)
+
+    if Enum.all?(origins, &Origin.valid?/1) do
+      origins
+    else
+      raise ArgumentError,
+            "Attesto.PresentationRequest :expected_origins entries must be valid unprefixed origins; " <>
+              "got #{inspect(origins)}"
+    end
   end
 
   defp normalize_dcql_query!(value) when is_map(value) do
@@ -325,20 +356,14 @@ defmodule Attesto.PresentationRequest do
     end
   end
 
-  defp identifier!(value, key) when is_binary(value) do
-    if Regex.match?(@dcql_identifier, value) do
+  defp identifier!(value, key) do
+    if valid_dcql_id?(value) do
       value
     else
       raise ArgumentError,
             "Attesto.PresentationRequest :#{key} must contain only letters, digits, underscores, or hyphens; " <>
               "got #{inspect(value)}"
     end
-  end
-
-  defp identifier!(value, key) do
-    raise ArgumentError,
-          "Attesto.PresentationRequest :#{key} must contain only letters, digits, underscores, or hyphens; " <>
-            "got #{inspect(value)}"
   end
 
   defp boolean!(value, _key) when is_boolean(value), do: value

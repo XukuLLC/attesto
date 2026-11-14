@@ -88,6 +88,19 @@ defmodule Attesto.JWE do
 
   def decrypt(_recipient, _compact, _opts), do: {:error, :invalid_jwe}
 
+  @doc """
+  Split a compact JWE and decode its protected header without decrypting it,
+  enforcing core's #{@max_header_bytes}-byte protected-header limit.
+  """
+  @spec peek_protected_header(binary()) :: {:ok, map()} | {:error, :invalid_jwe | :invalid_header}
+  def peek_protected_header(compact) when is_binary(compact) do
+    with {:ok, %{protected: protected}} <- split_compact(compact) do
+      decode_header(protected)
+    end
+  end
+
+  def peek_protected_header(_compact), do: {:error, :invalid_jwe}
+
   defp decrypt_bytes(key, compact) do
     case JOSE.JWE.block_decrypt(key, compact) do
       {plaintext, %JOSE.JWE{}} when is_binary(plaintext) -> {:ok, plaintext}

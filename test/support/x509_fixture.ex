@@ -11,16 +11,21 @@ defmodule Attesto.Test.X509Fixture do
   @curve {:namedCurve, {1, 2, 840, 10_045, 3, 1, 7}}
 
   def root do
-    :public_key.pkix_test_root_cert(~c"synthetic-x509-root", key: @curve)
+    :public_key.pkix_test_root_cert(~c"synthetic-x509-root", key: @curve, digest: :sha256)
   end
 
   def chain(root, opts \\ []) do
-    peer = Keyword.merge([key: @curve], Keyword.get(opts, :peer, []))
+    peer = Keyword.merge([key: @curve, digest: :sha256], Keyword.get(opts, :peer, []))
+
+    intermediates =
+      opts
+      |> Keyword.get(:intermediates, [])
+      |> Enum.map(&Keyword.put_new(&1, :digest, :sha256))
 
     data =
       :public_key.pkix_test_data(%{
         root: root,
-        intermediates: Keyword.get(opts, :intermediates, []),
+        intermediates: intermediates,
         peer: peer
       })
 

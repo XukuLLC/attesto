@@ -14,8 +14,12 @@ defmodule Attesto.StatusList do
 
   @header_typ "statuslist+jwt"
   @valid_bits [1, 2, 4, 8]
-  @expiry_leeway_seconds 60
+  @expiry_leeway_seconds NumericDate.default_clock_skew_seconds()
   @max_status_list_token_bytes 1_048_576
+
+  @doc "Maximum accepted wire size in bytes of a compact `statuslist+jwt`."
+  @spec max_status_list_token_bytes() :: pos_integer()
+  def max_status_list_token_bytes, do: @max_status_list_token_bytes
 
   @type bits :: 1 | 2 | 4 | 8
   @type verified :: %{

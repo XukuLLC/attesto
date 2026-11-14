@@ -468,4 +468,38 @@ defmodule Attesto.TokenMintTest do
       assert payload!(jwt)["cnf"]["x5t#S256"] == thumbprint
     end
   end
+
+  describe "mint/3 pairwise access subjects" do
+    test "puts derived sub and encrypted host subject in the access token, and unseals on verify", %{config: config} do
+      salt = String.duplicate("p", 32)
+      principal = user_principal(%{})
+      expected_sub = Attesto.PairwiseSubject.derive("rp.example", principal.sub, salt)
+
+      assert {:ok, %{access_token: jwt1}} = Token.mint(config, principal, pairwise: {"rp.example", salt})
+      assert {:ok, %{access_token: jwt2}} = Token.mint(config, principal, pairwise: {"rp.example", salt})
+
+      claims1 = payload!(jwt1)
+      claims2 = payload!(jwt2)
+
+      assert claims1["sub"] == expected_sub
+      assert claims2["sub"] == expected_sub
+      refute claims1["attesto.pairwise_subject"] == claims2["attesto.pairwise_subject"]
+
+      assert {:error, :invalid_claims} = Token.verify(config, jwt1)
+
+      assert {:ok, verified} = Token.verify(config, jwt1, pairwise_subject_salt: salt)
+      assert verified["sub"] == principal.sub
+      refute Map.has_key?(verified, "attesto.pairwise_subject")
+    end
+
+    test "refuses reserved pairwise claim in free-form principal claims or malformed pairwise opt", %{config: config} do
+      principal = client_principal(%{claims: %{"client_id" => "oc_abc123", "attesto.pairwise_subject" => "forged"}})
+      assert {:error, :reserved_claim_conflict} = Token.mint(config, principal)
+
+      assert {:error, :invalid_pairwise} =
+               Token.mint(config, user_principal(%{}), pairwise: {"", String.duplicate("p", 32)})
+
+      assert {:error, :invalid_pairwise} = Token.mint(config, user_principal(%{}), pairwise: {"rp.example", "short"})
+    end
+  end
 end

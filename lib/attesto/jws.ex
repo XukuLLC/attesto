@@ -13,6 +13,18 @@ defmodule Attesto.JWS do
   @max_protected_segment_bytes 256 * 1_024
   @max_signature_segment_bytes 256 * 1_024
 
+  @doc "Default maximum wire size in bytes of a compact JWS."
+  @spec default_max_compact_bytes() :: pos_integer()
+  def default_max_compact_bytes, do: @default_max_compact_bytes
+
+  @doc "Maximum encoded size in bytes of a JWS compact protected header segment."
+  @spec max_protected_segment_bytes() :: pos_integer()
+  def max_protected_segment_bytes, do: @max_protected_segment_bytes
+
+  @doc "Maximum encoded size in bytes of a JWS compact signature segment."
+  @spec max_signature_segment_bytes() :: pos_integer()
+  def max_signature_segment_bytes, do: @max_signature_segment_bytes
+
   # Curves whose keys can verify a JWS signature Attesto supports.
   @signature_ec_curves ~w(P-256 P-384 P-521 secp256k1)
   @signature_okp_curves ~w(Ed25519 Ed448)

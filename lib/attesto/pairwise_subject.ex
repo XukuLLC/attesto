@@ -35,6 +35,17 @@ defmodule Attesto.PairwiseSubject do
 
   @min_salt_bytes 32
   @subject_types ["public", "pairwise"]
+  @sealed_claim "attesto.pairwise_subject"
+  @seal_key_info "attesto.pairwise_subject.v1"
+  @seal_nonce_bytes 32
+  @seal_block_bytes 64
+  @max_sealed_subject_bytes 65_535
+  @zero_iv <<0::96>>
+  @gcm_tag_bytes 16
+
+  @doc false
+  @spec sealed_claim() :: String.t()
+  def sealed_claim, do: @sealed_claim
 
   @doc ~s(The subject types this module knows: `["public", "pairwise"]`.)
   @spec subject_types() :: [String.t()]
@@ -99,10 +110,85 @@ defmodule Attesto.PairwiseSubject do
     |> Base.url_encode64(padding: false)
   end
 
+  @doc """
+  Encrypt `local_subject` for recovery by the authorization server or a same-deployment
+  resource server sharing `salt`.
+
+  Pads the length-prefixed subject to a multiple of #{@seal_block_bytes} bytes
+  and derives a single-use AES-256-GCM key per call from a fresh random 32-byte
+  token nonce via HMAC-SHA256, with `pairwise_sub` as associated authenticated
+  data. Two tokens therefore carry distinct ciphertexts that cannot be
+  correlated, short subjects share the same ciphertext size, and the ciphertext
+  is bound to its `sub`.
+  """
+  @spec seal_subject(String.t(), String.t(), binary()) :: String.t()
+  def seal_subject(subject, pairwise_sub, salt) do
+    if non_empty?(subject) and byte_size(subject) <= @max_sealed_subject_bytes and non_empty?(pairwise_sub) and
+         valid_salt?(salt) do
+      token_nonce = :crypto.strong_rand_bytes(@seal_nonce_bytes)
+      key = per_token_seal_key(salt, token_nonce)
+      plaintext = pad_subject(subject)
+
+      {ciphertext, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, @zero_iv, plaintext, pairwise_sub, true)
+      Base.url_encode64(token_nonce <> tag <> ciphertext, padding: false)
+    else
+      raise ArgumentError,
+            "pairwise subject sealing needs non-empty subject (<= #{@max_sealed_subject_bytes} bytes), " <>
+              "non-empty pairwise_sub, and a salt of at least #{@min_salt_bytes} bytes"
+    end
+  end
+
+  defp non_empty?(value), do: is_binary(value) and value != ""
+
+  @doc """
+  Decrypt a sealed subject produced by `seal_subject/3`, authenticating against
+  `pairwise_sub` and `salt`.
+  """
+  @spec unseal_subject(term(), term(), term()) :: {:ok, String.t()} | :error
+  def unseal_subject(sealed, pairwise_sub, salt)
+      when is_binary(sealed) and is_binary(pairwise_sub) and pairwise_sub != "" and is_binary(salt) and
+             byte_size(salt) >= @min_salt_bytes do
+    with {:ok, <<token_nonce::binary-size(@seal_nonce_bytes), tag::binary-size(@gcm_tag_bytes), ciphertext::binary>>}
+         when byte_size(ciphertext) >= @seal_block_bytes and rem(byte_size(ciphertext), @seal_block_bytes) == 0 <-
+           Base.url_decode64(sealed, padding: false),
+         key = per_token_seal_key(salt, token_nonce),
+         plaintext when is_binary(plaintext) <-
+           :crypto.crypto_one_time_aead(:aes_256_gcm, key, @zero_iv, ciphertext, pairwise_sub, tag, false) do
+      unpad_subject(plaintext)
+    else
+      _ -> :error
+    end
+  end
+
+  def unseal_subject(_sealed, _pairwise_sub, _salt), do: :error
+
+  defp per_token_seal_key(salt, token_nonce) do
+    master = :crypto.mac(:hmac, :sha256, salt, @seal_key_info)
+    :crypto.mac(:hmac, :sha256, master, token_nonce)
+  end
+
+  defp pad_subject(subject) do
+    payload = <<byte_size(subject)::16, subject::binary>>
+    rem_bytes = rem(byte_size(payload), @seal_block_bytes)
+    pad_bytes = if rem_bytes == 0, do: 0, else: @seal_block_bytes - rem_bytes
+    payload <> :binary.copy(<<0>>, pad_bytes)
+  end
+
+  defp unpad_subject(<<len::16, subject::binary-size(len), rest::binary>>) when len > 0 do
+    expected = :binary.copy(<<0>>, byte_size(rest))
+    if :crypto.hash_equals(rest, expected), do: {:ok, subject}, else: :error
+  end
+
+  defp unpad_subject(_plaintext), do: :error
+
   defp host(uri) when is_binary(uri) do
-    case URI.new(uri) do
-      {:ok, %URI{host: host}} when is_binary(host) and host != "" -> String.downcase(host)
-      _ -> nil
+    with true <- Attesto.URI.https_identifier?(uri),
+         {:ok, %URI{host: host}} when is_binary(host) and host != "" <- URI.new(uri),
+         downcased = String.downcase(host),
+         false <- Attesto.URI.loopback_host?(downcased) do
+      downcased
+    else
+      _other -> nil
     end
   end
 
