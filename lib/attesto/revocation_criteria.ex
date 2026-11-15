@@ -1,8 +1,8 @@
 defmodule Attesto.RevocationCriteria do
   @moduledoc """
   The criteria a store uses to select authorization codes or refresh-token
-  families for bulk removal: `Attesto.CodeStore.delete_unconsumed/1` and
-  `Attesto.RefreshStore.revoke_families/1`.
+  families for bulk removal: `c:Attesto.CodeStore.delete_unconsumed/1` and
+  `c:Attesto.RefreshStore.revoke_families/1`.
 
   Criteria are a keyword list with at least one of:
 

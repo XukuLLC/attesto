@@ -167,7 +167,7 @@ defaults in a minor release.
   invalid-hint/type errors. JWT media types `JWT` and `application/jwt` are
   accepted case-insensitively by ID Token verification (RFC 8725 §3.11;
   RFC 7515 §4.1.9).
-- Optional `Attesto.RefreshStore.with_family_lock/2` callback serializes retry
+- Optional `c:Attesto.RefreshStore.with_family_lock/2` callback serializes retry
   recovery with rotation and revocation. Recovery re-reads the parent and
   successor under the lock when available (RFC 9700 §4.14.2; RFC 7009 §2.1).
   Store behaviours document the code/refresh-table and family lock order.

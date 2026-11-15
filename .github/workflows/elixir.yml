@@ -146,6 +146,12 @@ jobs:
           MIX_ENV: dev
         run: mix dialyzer
 
+      - name: Build docs (warnings as errors)
+        if: ${{ matrix.lint }}
+        env:
+          MIX_ENV: dev
+        run: mix docs --warnings-as-errors
+
   # attesto declares `:cbor` and `:plug` as `optional: true`. The build & test
   # job above fetches those for attesto's OWN build, so its `--warnings-as-errors`
   # compile always sees the optional-dep modules in their real form and never

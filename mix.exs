@@ -118,6 +118,18 @@ defmodule Attesto.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
+      # Hidden functions and modules that released changelog entries name;
+      # render them as code without links.
+      skip_code_autolink_to: [
+        "Attesto.JWS",
+        "Attesto.JWS.decode64/2",
+        "Attesto.JWS.sign_compact/3",
+        "Attesto.JWS.verify_strict/3",
+        "Attesto.JWS.verify_trusted/4",
+        "Attesto.Plug.Authenticate.init/1",
+        "Attesto.RefreshStore.ETS.rotate/4",
+        "Attesto.URI.valid_port?/2"
+      ],
       extras: ["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
       groups_for_extras: [
         Changelog: ~r/CHANGELOG\.md/,

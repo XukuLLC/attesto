@@ -486,9 +486,9 @@ defmodule Attesto.StatusList do
   `{:credential_status, value}`. Fails closed with `{:error, reason}` when the reference or list token
   cannot be fetched or verified.
 
-  `resolver` may be a 1-arity `(uri -> {:ok, binary()} | {:error, term()})` or
-  2-arity `(uri, accept_media_type -> {:ok, binary()} | {:error, term()})`
-  function. `:status_trusted_certificates` restricts list signers to the
+  `resolver` is a 1-arity function of the URI or a 2-arity function of the URI
+  and the accepted media type. Either returns `{:ok, binary()}` or
+  `{:error, term()}`. `:status_trusted_certificates` restricts list signers to the
   supplied DER anchors without changing credential verification trust.
   """
   @spec check_status(map() | nil, function(), term(), keyword()) :: :ok | {:error, term()}
