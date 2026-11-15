@@ -1027,4 +1027,37 @@ defmodule Attesto.DPoP.ReplayCacheIntegrationTest do
     assert :ok = ReplayCache.check_and_record(jti)
     assert {:error, :replay} = ReplayCache.check_and_record(jti)
   end
+
+  test "accepts HTTP QUERY method (RFC 10008) case-sensitively" do
+    {proof, _jkt} = Factory.dpop_proof(htm: "QUERY", htu: @http_uri)
+    assert {:ok, %{htm: "QUERY"}} = DPoP.verify_proof(proof, DPoPFixtures.verification_options("QUERY", @http_uri))
+
+    {lower_proof, _jkt} = Factory.dpop_proof(htm: "query", htu: @http_uri)
+
+    assert {:error, :invalid_htm} =
+             DPoP.verify_proof(lower_proof, DPoPFixtures.verification_options("QUERY", @http_uri))
+  end
+
+  test "accepts http htu only when allow_http is true and host is loopback" do
+    loopback_uri = "http://localhost:4000/mcp"
+    {proof, _jkt} = Factory.dpop_proof(htm: "POST", htu: loopback_uri)
+
+    assert {:error, :invalid_htu} =
+             DPoP.verify_proof(proof, DPoPFixtures.verification_options("POST", loopback_uri))
+
+    assert {:ok, %{htu: ^loopback_uri}} =
+             DPoP.verify_proof(
+               proof,
+               Keyword.put(DPoPFixtures.verification_options("POST", loopback_uri), :allow_http, true)
+             )
+
+    non_loopback_uri = "http://mcp.example/mcp"
+    {non_loopback_proof, _jkt} = Factory.dpop_proof(htm: "POST", htu: non_loopback_uri)
+
+    assert {:error, :invalid_htu} =
+             DPoP.verify_proof(
+               non_loopback_proof,
+               Keyword.put(DPoPFixtures.verification_options("POST", non_loopback_uri), :allow_http, true)
+             )
+  end
 end

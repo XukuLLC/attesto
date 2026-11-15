@@ -6,6 +6,37 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.21.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.SigningAlg.infer/1` and `Attesto.Federation.EntityStatement` infer the RFC 9864 identifiers `"Ed25519"` and `"Ed448"` for OKP keys, where 2.20.0 inferred `"EdDSA"`. A host with an Ed25519 or Ed448 signing key and no explicit algorithm signs new tokens with the curve-specific identifier and publishes it as the JWKS `alg`; keeping the same key does not keep the old identifier. Verification accepts `"EdDSA"` and the curve-specific identifier for an OKP key on the matching curve, within any explicit `:accepted_algs`, so tokens signed before the upgrade still verify. A relying party whose JOSE library does not know the RFC 9864 identifiers rejects the new tokens; set `"EdDSA"` in keystore metadata to keep the old identifier.
+- `Attesto.SdJwtVc.verify/3`, `Attesto.Mdoc.verify/3`, `Attesto.Mdoc.verify_device_response/4` and `Attesto.VpToken.verify/2` fetch and enforce a credential's status reference by default, through `Attesto.StatusList.fetch/3`. A revoked or suspended credential, an invalid list and a failed fetch are errors. `resolve_status: false` skips the check for offline inspection; a 1- or 2-arity function replaces the fetch. Status `1` returns `:credential_revoked`, `2` returns `:credential_suspended`, and any other non-zero value returns `{:credential_status, value}`.
+- `Attesto.SdJwtVc` follows `draft-ietf-oauth-sd-jwt-vc-26`: `issue/2` emits and `verify/3` accepts `typ: "dc+sd-jwt"` only. `"vc+sd-jwt"` is refused.
+- `Attesto.ClientIdMetadata` follows `draft-ietf-oauth-client-id-metadata-document-03`. It refuses a Client Identifier URL whose path is `"/"`; treats a document with neither `token_endpoint_auth_methods_supported` nor `token_endpoint_auth_method` as `"none"`; prefers the plural member and refuses a singular value that is not in it; refuses symmetric methods in either member; requires `jwks` or `jwks_uri` for `private_key_jwt` and refuses both together; and refuses a redirect URI whose query carries an authorization request or response parameter.
+- `Attesto.AuthorizationRequest.resolve_request_object/2` and `validate/2` answer `:invalid_request_object` for an `alg: "none"` request object when `require_request_object: true` is set, where they answered `:request_not_supported`.
+
+### Added
+
+- `Attesto.StatusList` verifies JWT and CWT status lists and ISO mdoc identifier lists (`check_status/4`, `verify_cwt/3`, `verify_identifier_list_cwt/3`) and issues the CWT forms (`issue_cwt/4`, `issue_identifier_list_cwt/4`). `fetch/3` is a bounded HTTPS fetcher: it screens the target address, pins the connection, refuses redirects, requires the requested media type, and needs the optional `:mint` dependency. `Attesto.Mdoc` reads and issues MSO status references and exposes `peek_status/1`.
+- `Attesto.StatusList.Cache` holds lists fetched by the default fetcher. Only a list that verified is stored, a hit is verified again under the caller's trust, and an entry expires at the earliest of its signed `ttl`, its signed `exp` and five minutes. It holds at most 64 entries and 16 MiB. A custom resolver is cached only with `cache_status: true`.
+- `Attesto.CredentialEncryption`: OpenID4VCI 1.0 Credential Request decryption and Credential Response encryption (ECDH-ES on P-256 with A128GCM or A256GCM), recipient key validation, and the `credential_request_encryption` and `credential_response_encryption` metadata blocks. A wallet may request `zip: "DEF"` for the response; `Attesto.JWE.encrypt_deflated/4` compresses outbound plaintext only, and every inbound JWE path still refuses `zip`. `Attesto.CredentialIssuerMetadata` accepts `:credential_request_encryption` and refuses a key that carries private JWK members.
+- `Attesto.IdentityAssertion.sign/3` signs a JWT authorization grant as the configured issuer, with `typ: "oauth-id-jag+jwt"` by default or `"JWT"` for a plain RFC 7523 grant used in identity chaining. Missing or malformed attributes return `:missing_claim` or `:invalid_claims`.
+- `Attesto.PinnedHTTP`: a one-shot Mint connection to a caller-screened address that keeps TLS SNI and hostname verification on the original host, with bounded response reads. Requires the optional `:mint >= 1.10.2 and < 2.0.0`.
+- `Attesto.CodeStore` has an optional `pending_revoked?/1` callback, implemented by `Attesto.CodeStore.ETS`. `Attesto.AuthorizationCode.issue_refresh_and_finalize/6` uses it to revoke the refresh family and access token of a code that was taken before a subject, client or session revocation and finalized after it. A custom store that does not implement the callback keeps that race.
+- `Attesto.X509.verify/2` returns the selected `:trust_anchor`.
+- `Attesto.Cose.peek_headers/2`; `Attesto.Cose.sign1/3` takes `:typ`, `:tagged` and `:protected_x5chain`; `Attesto.Cose.verify1/3` takes `:allow_tagged`.
+- `Attesto.DPoP.Proof.build/4` and `Attesto.DPoP.verify_proof/2` take `allow_http: true` to accept an `http` `htu` on a loopback host.
+- `Attesto.Plug.Authenticate.normalize_options/2` validates plug options for a wrapper plug that supplies `:htu` per request.
+- `Attesto.Scope.new_catalog/2` takes `:hierarchy`, a map from a broader scope to the scopes it implies; `Attesto.Plug.RequireScopes` takes `:scope_hierarchy`.
+- `Attesto.RedirectURI.reserved_query_params/0` and `reserved_query_param?/1` detect a redirect URI whose query carries an authorization request or response parameter.
+- `Attesto.ClientIdMetadata.auth_methods/1` returns the token endpoint authentication methods a CIMD document declares.
+
+### Changed
+
+- `Attesto.StatusList.verify/3` and `Attesto.SdJwt` compare the `typ` header as a media type, so `"application/statuslist+jwt"` and `"application/dc+sd-jwt"` are accepted beside the short forms.
+- ID tokens, request objects, SIOP, credential proofs and requests, key attestations and federation statements share one implementation of audience, nonce, expiry and trusted-key signature checks.
+
 ## [2.20.0] - 2026-11-14
 
 ### Security

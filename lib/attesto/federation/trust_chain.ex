@@ -1,6 +1,6 @@
 defmodule Attesto.Federation.TrustChain do
   @moduledoc """
-  Validate an already-resolved OpenID Federation 1.0 Trust Chain.
+  Validate an already-resolved OpenID Federation 1.0 Final (2026-02-17) Trust Chain.
 
   The input is ordered leaf first: the leaf Entity Configuration followed by
   Subordinate Statements issued successively toward the Trust Anchor,

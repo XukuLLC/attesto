@@ -22,7 +22,7 @@ defmodule Attesto.SdJwt do
   does not depend on how any party serialises JSON.
 
   This module is the base SD-JWT mechanism. `Attesto.SdJwtVc` layers the
-  IETF SD-JWT VC profile (`vct`, `cnf`, `vc+sd-jwt` typing) on top.
+  IETF SD-JWT VC profile (`vct`, `cnf`, `dc+sd-jwt` typing) on top.
 
   ## What is implemented
 
@@ -40,7 +40,7 @@ defmodule Attesto.SdJwt do
   Like the rest of attesto core this module is conn-free and fail-closed.
   """
 
-  alias Attesto.{JWS, Key, MapParams, NumericDate, Options, Secret, SecureCompare, SigningAlg}
+  alias Attesto.{Claims, JWS, Key, MapParams, NumericDate, Options, Secret, SecureCompare, SigningAlg}
 
   @default_sd_alg "sha-256"
   @separator "~"
@@ -175,7 +175,7 @@ defmodule Attesto.SdJwt do
     * exactly one of `:pem` (legacy extractable private key) or `:keystore`
       (an `Attesto.Keystore` that may also implement `Attesto.Signer`).
     * `:alg` - the JWS algorithm; inferred from the key when omitted.
-    * `:typ` - the JOSE `typ` header (e.g. `"vc+sd-jwt"`); omitted when nil.
+    * `:typ` - the JOSE `typ` header (e.g. `"dc+sd-jwt"`); omitted when nil.
     * `:kid` - the JOSE `kid` header; omitted when nil.
     * `:sd_alg` - the hashing algorithm name for `_sd_alg`. Default
       `#{@default_sd_alg}`.
@@ -541,11 +541,13 @@ defmodule Attesto.SdJwt do
   end
 
   # Enforce the Issuer-signed JWT's `typ` header against a caller allowlist (e.g.
-  # SD-JWT VC's `vc+sd-jwt`). No constraint when `:accepted_typ` is absent.
+  # SD-JWT VC's `dc+sd-jwt`). No constraint when `:accepted_typ` is absent.
   defp check_typ(_header, nil), do: :ok
 
-  defp check_typ(%{"typ" => typ}, accepted) when is_list(accepted) do
-    if typ in accepted, do: :ok, else: {:error, :invalid_typ}
+  defp check_typ(header, accepted) when is_list(accepted) do
+    if Claims.typ_matches?(Map.get(header, "typ"), accepted, normalization: :application_subtype),
+      do: :ok,
+      else: {:error, :invalid_typ}
   end
 
   defp check_typ(_header, _accepted), do: {:error, :invalid_typ}

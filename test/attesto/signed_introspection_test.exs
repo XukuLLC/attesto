@@ -52,7 +52,7 @@ defmodule Attesto.SignedIntrospectionTest do
 
     assert typ == "token-introspection+jwt"
     assert typ == SignedIntrospection.header_typ()
-    assert alg in ~w(RS256 PS256 ES256 EdDSA)
+    assert alg in ~w(RS256 PS256 ES256 Ed25519 EdDSA)
     assert is_binary(kid) and kid != ""
   end
 

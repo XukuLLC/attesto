@@ -133,7 +133,7 @@ defmodule Attesto.Parity.NodeParityTest do
           curve = unquote(curve)
           maybe_enable_ed448(curve)
           pem = if curve == "Ed448", do: Factory.ed448_pem(), else: Factory.ed_pem()
-          config_opts = if alg in ["Ed25519", "Ed448"], do: [signing_alg: alg], else: []
+          config_opts = if alg == "EdDSA", do: [signing_alg: alg], else: []
           config = Factory.config(pem, config_opts)
           access_token = "#{String.downcase(alg)}-#{String.downcase(curve)}-reference-access-token"
 

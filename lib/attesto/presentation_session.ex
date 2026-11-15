@@ -457,7 +457,8 @@ defmodule Attesto.PresentationSession do
           :enforce_fapi_alg_policy,
           :certificate_trust,
           :haip,
-          :dc_api_origin
+          :dc_api_origin,
+          :resolve_status
         ])
       )
 

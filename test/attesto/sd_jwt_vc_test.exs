@@ -59,7 +59,7 @@ defmodule Attesto.SdJwtVcTest do
         )
 
       [jwt | _] = String.split(vc, "~")
-      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk)
+      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk, resolve_status: false)
       # cnf is the real holder key, unambiguously (no duplicate member).
       assert verified.cnf == %{"jwk" => holder}
       # The raw payload has exactly one "cnf" member.
@@ -79,7 +79,7 @@ defmodule Attesto.SdJwtVcTest do
 
       [jwt | _disclosures] = String.split(vc, "~")
 
-      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk)
+      assert {:ok, verified} = SdJwtVc.verify(jwt <> "~", jwk, resolve_status: false)
 
       assert verified.claims["status"] == %{
                "status_list" => %{"idx" => 42, "uri" => uri}
@@ -119,14 +119,14 @@ defmodule Attesto.SdJwtVcTest do
       # A holder presenting zero disclosures still gets cnf/status in the
       # clear: they were never behind an `_sd` digest to omit.
       [jwt | _] = String.split(vc, "~")
-      assert {:ok, bare} = SdJwtVc.verify(jwt <> "~", jwk)
+      assert {:ok, bare} = SdJwtVc.verify(jwt <> "~", jwk, resolve_status: false)
       assert bare.claims["cnf"] == %{"jwk" => holder_jwk}
       assert bare.claims["status"] == %{"status_list" => %{"idx" => 1, "uri" => uri}}
       refute Map.has_key?(bare.claims, "given_name")
 
       # The normal subject claim IS disclosable, proving the reject only
       # excludes registered names rather than disabling disclosure entirely.
-      assert {:ok, full} = SdJwtVc.verify(vc, jwk)
+      assert {:ok, full} = SdJwtVc.verify(vc, jwk, resolve_status: false)
       assert full.claims["given_name"] == "Alice"
     end
 
@@ -191,18 +191,25 @@ defmodule Attesto.SdJwtVcTest do
       end
     end
 
-    test "rejects a plain SD-JWT that is not typed as a VC" do
+    test "rejects a plain SD-JWT or legacy vc+sd-jwt typ" do
       {pem, jwk} = keypair()
-      # A base SD-JWT with no vc+sd-jwt typ.
+      # A base SD-JWT with no dc+sd-jwt typ.
       sd_jwt = SdJwt.issue(%{"iss" => "iss", "vct" => "t", "x" => 1}, pem: pem, disclosable: ["x"])
-
       assert {:error, :invalid_typ} = SdJwtVc.verify(sd_jwt, jwk)
+
+      # Legacy vc+sd-jwt is rejected on both issuance and verification per draft-26.
+      legacy = SdJwt.issue(%{"iss" => "iss", "vct" => "t", "x" => 1}, pem: pem, typ: "vc+sd-jwt")
+      assert {:error, :invalid_typ} = SdJwtVc.verify(legacy, jwk)
+
+      assert_raise ArgumentError, ~r/dc\+sd-jwt/, fn ->
+        SdJwtVc.issue([iss: "iss", vct: "t", pem: pem], typ: "vc+sd-jwt")
+      end
     end
 
     test "rejects a credential missing vct" do
       {pem, jwk} = keypair()
-      # Typed vc+sd-jwt but no vct claim.
-      no_vct = SdJwt.issue(%{"iss" => "iss", "x" => 1}, pem: pem, disclosable: ["x"], typ: "vc+sd-jwt")
+      # Typed dc+sd-jwt but no vct claim.
+      no_vct = SdJwt.issue(%{"iss" => "iss", "x" => 1}, pem: pem, disclosable: ["x"], typ: "dc+sd-jwt")
 
       assert {:error, :missing_vct} = SdJwtVc.verify(no_vct, jwk)
     end
@@ -225,7 +232,7 @@ defmodule Attesto.SdJwtVcTest do
         presentation =
           SdJwt.issue(claims,
             pem: pem,
-            typ: "vc+sd-jwt",
+            typ: "dc+sd-jwt",
             disclosable: [claim]
           )
 
@@ -237,8 +244,8 @@ defmodule Attesto.SdJwtVcTest do
       {pem, jwk} = keypair()
       now = System.system_time(:second)
 
-      null_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type", "cnf" => nil}, pem: pem, typ: "vc+sd-jwt")
-      no_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type"}, pem: pem, typ: "vc+sd-jwt")
+      null_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type", "cnf" => nil}, pem: pem, typ: "dc+sd-jwt")
+      no_cnf = SdJwt.issue(%{"iss" => "iss", "vct" => "type"}, pem: pem, typ: "dc+sd-jwt")
 
       assert {:error, :invalid_cnf} = SdJwtVc.verify(null_cnf, jwk, now: now)
       assert {:ok, %{cnf: nil}} = SdJwtVc.verify(no_cnf, jwk, now: now)
@@ -252,7 +259,7 @@ defmodule Attesto.SdJwtVcTest do
         SdJwt.issue(
           %{"iss" => "https://issuer.example", "vct" => "type", "sub" => "holder", "iat" => now},
           pem: pem,
-          typ: "vc+sd-jwt",
+          typ: "dc+sd-jwt",
           disclosable: ["sub", "iat"]
         )
 
@@ -323,5 +330,71 @@ defmodule Attesto.SdJwtVcTest do
                audience: "https://verifier.example",
                now: now
              )
+  end
+
+  test "verify/3 enforces status_list revocation when :resolve_status is supplied" do
+    {issuer_pem, issuer_jwk} = keypair()
+    now = System.system_time(:second)
+    uri = "https://issuer.example/status/1"
+
+    status_jwt =
+      Attesto.JWS.sign_compact(issuer_pem, %{"alg" => "ES256", "typ" => "statuslist+jwt"}, %{
+        "sub" => uri,
+        "iat" => now,
+        "status_list" => Attesto.StatusList.build([0, 1])
+      })
+
+    valid_vc =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "urn:example:pid", pem: issuer_pem],
+        status: Attesto.StatusList.reference(uri, 0),
+        iat: now
+      )
+
+    revoked_vc =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "urn:example:pid", pem: issuer_pem],
+        status: Attesto.StatusList.reference(uri, 1),
+        iat: now
+      )
+
+    no_status_vc =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "urn:example:pid", pem: issuer_pem],
+        iat: now
+      )
+
+    assert {:ok, _} =
+             SdJwtVc.verify(valid_vc, issuer_jwk,
+               now: now,
+               resolve_status: fn ^uri, "application/statuslist+jwt" -> {:ok, status_jwt} end
+             )
+
+    assert {:error, :credential_revoked} =
+             SdJwtVc.verify(revoked_vc, issuer_jwk,
+               now: now,
+               resolve_status: fn ^uri, "application/statuslist+jwt" -> {:ok, status_jwt} end
+             )
+
+    assert {:error, :unreachable} =
+             SdJwtVc.verify(valid_vc, issuer_jwk,
+               now: now,
+               resolve_status: fn _uri, _accept -> {:error, :unreachable} end
+             )
+
+    assert {:ok, _} =
+             SdJwtVc.verify(no_status_vc, issuer_jwk,
+               now: now,
+               resolve_status: fn _uri, _accept -> {:error, :should_not_be_called} end
+             )
+  end
+
+  test "status references are enforced by default and offline inspection is explicit" do
+    {pem, jwk} = keypair()
+
+    credential =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: pem],
+        status: StatusList.reference("https://127.0.0.1/list", 0)
+      )
+
+    assert {:error, {:blocked_ip, _}} = SdJwtVc.verify(credential, jwk)
+    assert {:ok, _} = SdJwtVc.verify(credential, jwk, resolve_status: false)
   end
 end

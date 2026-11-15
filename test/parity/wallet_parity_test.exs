@@ -80,7 +80,7 @@ defmodule Attesto.Parity.WalletParityTest do
                    now: now
                  )
 
-        assert js_header["typ"] == "vc+sd-jwt"
+        assert js_header["typ"] == "dc+sd-jwt"
         assert js_claims == attesto.claims
         assert js_kb == kb_claims
 

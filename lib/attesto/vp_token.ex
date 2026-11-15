@@ -52,6 +52,12 @@ defmodule Attesto.VpToken do
   source quotations and HAIP §5.2 encryption requirement are documented in
   `Attesto.Mdoc`. This function verifies presentations after the host has
   decrypted any response envelope; it does not invoke the browser API.
+  Credential status references are fetched and enforced by default through
+  `Attesto.StatusList.fetch/3` and its bounded verified-token cache. Explicit
+  `resolve_status: false` is for offline inspection; it must not be used to
+  decide whether a credential is acceptable. A custom resolver can replace
+  the transport while retaining signature and status enforcement.
+
   """
 
   # `Attesto.Mdoc` is referenced fully-qualified inside a `Code.ensure_loaded?/1`
@@ -160,6 +166,7 @@ defmodule Attesto.VpToken do
     nonce = required_option!(opts, :nonce)
     audience = required_option!(opts, :audience)
     validate_dc_api_options!(opts)
+    validate_resolve_status!(opts)
     issuer_source = issuer_source!(opts)
     formats = formats!(opts)
     query = Query.normalize!(opts)
@@ -287,7 +294,15 @@ defmodule Attesto.VpToken do
   end
 
   defp verify_presentations(vp_token, issuer_source, nonce, audience, formats, constraints, opts) do
-    verify_opts = Keyword.take(opts, [:now, :accepted_algs, :enforce_fapi_alg_policy, :certificate_trust, :haip])
+    verify_opts =
+      Keyword.take(opts, [
+        :now,
+        :accepted_algs,
+        :enforce_fapi_alg_policy,
+        :certificate_trust,
+        :haip,
+        :resolve_status
+      ])
 
     ctx = %{
       formats: formats,
@@ -556,16 +571,18 @@ defmodule Attesto.VpToken do
   end
 
   defp verify_one(presentation, {:static, jwks}, verify_opts, binding_opts) do
-    with {:ok, verified} <- SdJwtVc.verify(presentation, jwks, verify_opts),
-         :ok <- verify_holder_binding(verified, binding_opts) do
+    with {:ok, verified} <- SdJwtVc.verify(presentation, jwks, Keyword.put(verify_opts, :resolve_status, false)),
+         :ok <- verify_holder_binding(verified, binding_opts),
+         :ok <- verify_sd_jwt_status(verified, jwks, verify_opts) do
       {:ok, verified}
     end
   end
 
   defp verify_one(presentation, {:resolver, resolver}, verify_opts, binding_opts) do
     with {:ok, jwks} <- resolve_issuer_jwks(presentation, resolver),
-         {:ok, verified} <- SdJwtVc.verify(presentation, jwks, verify_opts),
-         :ok <- verify_holder_binding(verified, binding_opts) do
+         {:ok, verified} <- SdJwtVc.verify(presentation, jwks, Keyword.put(verify_opts, :resolve_status, false)),
+         :ok <- verify_holder_binding(verified, binding_opts),
+         :ok <- verify_sd_jwt_status(verified, jwks, verify_opts) do
       {:ok, verified}
     end
   end
@@ -573,9 +590,26 @@ defmodule Attesto.VpToken do
   defp verify_one(presentation, {:certificates, anchors}, verify_opts, binding_opts) do
     opts = Keyword.put(verify_opts, :trusted_certificates, anchors)
 
-    with {:ok, verified} <- SdJwtVc.verify(presentation, nil, opts),
-         :ok <- verify_holder_binding(verified, binding_opts) do
+    with {:ok, verified} <- SdJwtVc.verify(presentation, nil, Keyword.put(opts, :resolve_status, false)),
+         :ok <- verify_holder_binding(verified, binding_opts),
+         :ok <- verify_sd_jwt_status(verified, nil, opts) do
       {:ok, verified}
+    end
+  end
+
+  # Holder binding is part of presentation validation and precedes any fetch.
+  defp verify_sd_jwt_status(verified, keys, opts) do
+    case Attesto.StatusList.resolver(opts) do
+      false ->
+        :ok
+
+      resolver ->
+        Attesto.StatusList.check_status(
+          Map.get(verified.claims, "status"),
+          resolver,
+          keys,
+          Keyword.put(opts, :format, :jwt)
+        )
     end
   end
 
@@ -748,6 +782,23 @@ defmodule Attesto.VpToken do
   defp validate_dc_api_encryption_key!(jwk) do
     if !match?({:ok, _thumbprint}, Attesto.Thumbprint.of_jwk(jwk)) do
       raise ArgumentError, ":response_encryption_jwk must have a computable JWK thumbprint"
+    end
+  end
+
+  defp validate_resolve_status!(opts) do
+    case Keyword.fetch(opts, :resolve_status) do
+      :error ->
+        :ok
+
+      {:ok, false} ->
+        :ok
+
+      {:ok, resolver} when is_function(resolver, 1) or is_function(resolver, 2) ->
+        :ok
+
+      {:ok, other} ->
+        raise ArgumentError,
+              "Attesto.VpToken :resolve_status must be false or a 1-arity or 2-arity function; got #{inspect(other)}"
     end
   end
 

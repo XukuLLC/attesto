@@ -1,7 +1,7 @@
 defmodule Attesto.CredentialProof do
   @moduledoc """
   OID4VCI credential-request key proof of type `jwt`
-  (draft-ietf-oauth-openid4vci §8.2.1.1).
+  (`OpenID4VCI 1.0`, 2025-09-16, §8.2.1.1).
 
   When a wallet asks the credential endpoint for a credential, it proves
   possession of the key the issued credential will be bound to (its `cnf`) with
@@ -35,7 +35,7 @@ defmodule Attesto.CredentialProof do
   key attestation without also supplying trusted keys fails closed.
   """
 
-  alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SecureCompare, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, Key, KeyAttestation, NumericDate, SigningAlg, Thumbprint}
 
   @proof_typ "openid4vci-proof+jwt"
   @default_max_age_seconds 300
@@ -184,17 +184,7 @@ defmodule Attesto.CredentialProof do
 
   defp check_audience(_claims, _opts), do: {:error, :invalid_audience}
 
-  defp check_nonce(claims, opts) do
-    case Keyword.get(opts, :nonce) do
-      nil ->
-        :ok
-
-      expected ->
-        if SecureCompare.equal?(Map.get(claims, "nonce"), expected),
-          do: :ok,
-          else: {:error, :invalid_nonce}
-    end
-  end
+  defp check_nonce(claims, opts), do: Attesto.Claims.check_optional_nonce(claims, opts)
 
   defp check_issuer(claims, opts) do
     case Keyword.get(opts, :client_id) do

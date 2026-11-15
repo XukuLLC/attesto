@@ -152,7 +152,7 @@ boundary, use the lower-level
 ```elixir
 def deps do
   [
-    {:attesto, "~> 2.20"}
+    {:attesto, "~> 2.21"}
   ]
 end
 ```
@@ -380,7 +380,7 @@ mdoc (`mso_mdoc`)**, issued and verified, with holder key binding on both.
   with per-claim disclosures, recursive verify (nested `_sd` + array element
   digests, unused/duplicate-disclosure rejection), and Key Binding JWT
   verification (nonce / audience / `sd_hash`).
-- `Attesto.SdJwtVc` — the IETF SD-JWT VC profile (`vc+sd-jwt` / `dc+sd-jwt`):
+- `Attesto.SdJwtVc` — the IETF SD-JWT VC profile (`dc+sd-jwt`):
   `vct`/`iss`/temporal rules, holder `cnf`, and an optional Token Status List
   reference on issued credentials.
 
@@ -476,6 +476,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 7519 | JSON Web Token (JWT) | Supported |
 | RFC 7515 | JSON Web Signature (JWS) | Supported |
 | RFC 7518 | JSON Web Algorithms (JWA) — the signing/verification alg set behind the JWT/JWS support | Supported (`Attesto.SigningAlg`) |
+| RFC 9864 | Fully-Specified Algorithms for JOSE and COSE (`Ed25519` / `Ed448`) | Supported (`Attesto.SigningAlg`) |
 | RFC 7517 | JSON Web Key (JWK) | Supported |
 | RFC 7638 | JWK Thumbprint | Supported |
 | RFC 7800 | Proof-of-Possession Key Semantics (`cnf`) | Supported |
@@ -485,6 +486,7 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 6749 §6 / §10.4 | Refresh-token rotation + reuse detection | Supported |
 | RFC 6749 §3.3 | Access-token scope | Supported |
 | RFC 9700 | OAuth 2.0 Security BCP — the current best-practice hardening (PKCE-everywhere, refresh rotation + reuse detection, registered redirect URIs) | Supported |
+| RFC 10017 | OAuth 2.0 for Browser-Based Applications (BCP 212) | Supported |
 | RFC 7523 §4 | JWT-assertion grant (`jwt-bearer`; ID-JAG draft) | Supported |
 | RFC 8707 | Resource Indicators (`resource` → token `aud`) | Supported (one or more resources; `Attesto.ResourceIndicator`) |
 | RFC 9470 | Step-Up Authentication Challenge (`acr`/`auth_time`) | Supported (`Attesto.StepUp`) |
@@ -506,18 +508,18 @@ If a decision depends on your business rules, it is yours. If it is a wire-forma
 | RFC 9701 | JWT Response for OAuth Token Introspection | Core primitive |
 | FAPI 2.0 Message Signing | JAR/JARM/signed introspection primitives | Core primitives |
 | SD-JWT (RFC 9901) | Selective Disclosure JWT (issue + recursive verify + KB-JWT) | Supported (`Attesto.SdJwt`) |
-| SD-JWT VC (`draft-ietf-oauth-sd-jwt-vc`) | SD-JWT-based Verifiable Credentials (`vc+sd-jwt`/`dc+sd-jwt`) | Supported (`Attesto.SdJwtVc`) |
+| SD-JWT VC (`draft-ietf-oauth-sd-jwt-vc-26`) | SD-JWT-based Verifiable Digital Credentials (`dc+sd-jwt`) | Supported (`Attesto.SdJwtVc`) |
 | W3C VC Data Model 1.1 / OID4VCI `jwt_vc_json` | W3C Verifiable Credentials signed as compact JWTs | Supported (`Attesto.JwtVc`) |
-| OpenID4VCI 1.0 | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
-| OpenID4VP 1.0 | Verifiable Presentations (verifier role: DCQL, `vp_token` verify, `direct_post`/`direct_post.jwt`, x509 client-id) | Supported (core primitives; endpoints in `attesto_phoenix`) |
+| OpenID4VCI 1.0 (2025-09-16) | Verifiable Credential Issuance (issuer role: metadata, offer, pre-auth + auth_code grants, credential/nonce endpoints, batch) | Supported (core primitives; endpoints in `attesto_phoenix`) |
+| OpenID4VP 1.0 (2025-07-09) | Verifiable Presentations (verifier role: DCQL, `vp_token` verify, `direct_post`/`direct_post.jwt`, x509 client-id) | Supported (core primitives; endpoints in `attesto_phoenix`) |
 | SIOPv2 | Self-Issued OpenID Provider v2 ID Token verification | Supported (`Attesto.Siop`) |
-| OpenID Federation 1.0 | Entity Statements, Entity Configurations, Trust Chains, and metadata policies | Supported (`Attesto.Federation.{EntityStatement, TrustChain, MetadataPolicy}`) |
+| OpenID Federation 1.0 Final (2026-02-17) | Entity Statements, Entity Configurations, Trust Chains, and metadata policies | Supported (`Attesto.Federation.{EntityStatement, TrustChain, MetadataPolicy}`) |
 | W3C DID Core (`did:key` / `did:jwk` / `did:web`) | Connection-free DID resolution and host-mediated `did:web` resolution | Supported (`Attesto.Did`) |
 | OAuth Attestation-Based Client Authentication (`draft-ietf-oauth-attestation-based-client-auth`) | Wallet/Client Attestation JWT + proof-of-possession JWT verification | Supported (`Attesto.WalletAttestation`) |
 | ISO/IEC 18013-5 | Mobile documents (mdoc / `mso_mdoc`: IssuerSigned + MSO + device auth) | Supported (`Attesto.Mdoc`, optional `:cbor`) |
-| RFC 8152 (COSE) | COSE_Sign1 (ES256) + COSE_Key, as used by mdoc | Supported (`Attesto.Cose`, optional `:cbor`) |
-| Token Status List (`draft-ietf-oauth-status-list`) | `statuslist+jwt` revocation | Supported (`Attesto.StatusList`) |
-| OID4VC HAIP 1.0 | High Assurance Interoperability Profile (SD-JWT VC + mdoc, DCQL, encrypted responses) | Supported; [issuer/verifier certification](#certification) with `attesto_phoenix` |
+| RFC 9052 / RFC 9053 (COSE) | COSE_Sign1 (ES256) + COSE_Key, as used by mdoc | Supported (`Attesto.Cose`, optional `:cbor`) |
+| Token Status List (`draft-ietf-oauth-status-list-21`) | `statuslist+jwt` revocation | Supported (`Attesto.StatusList`) |
+| OID4VC HAIP 1.0 (2025-12-24) | High Assurance Interoperability Profile (SD-JWT VC + mdoc, DCQL, encrypted responses) | Supported; [issuer/verifier certification](#certification) with `attesto_phoenix` |
 
 ## Plug integration (optional)
 

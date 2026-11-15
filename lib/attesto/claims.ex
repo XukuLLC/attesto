@@ -256,4 +256,28 @@ defmodule Attesto.Claims do
         down
     end
   end
+
+  @doc false
+  @spec check_audience(map(), term(), audience_mode()) :: :ok | {:error, :invalid_audience}
+  def check_audience(claims, expected, mode \\ :array)
+
+  def check_audience(%{"aud" => aud}, expected, mode) when not is_nil(expected) do
+    if audience_matches?(aud, expected, mode), do: :ok, else: {:error, :invalid_audience}
+  end
+
+  def check_audience(_claims, _expected, _mode), do: {:error, :invalid_audience}
+
+  @doc false
+  @spec check_optional_nonce(map(), keyword()) :: :ok | {:error, :invalid_nonce}
+  def check_optional_nonce(claims, opts) when is_map(claims) and is_list(opts) do
+    case Keyword.get(opts, :nonce) do
+      nil ->
+        :ok
+
+      expected ->
+        if Attesto.SecureCompare.equal?(Map.get(claims, "nonce"), expected),
+          do: :ok,
+          else: {:error, :invalid_nonce}
+    end
+  end
 end

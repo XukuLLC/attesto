@@ -541,4 +541,48 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
 
     Process.delete({TrackingStore, :mark_failure})
   end
+
+  test "delete_unconsumed and revoke_families close the race window between take and finalization", %{
+    challenge: challenge
+  } do
+    now = System.system_time(:second)
+
+    {:ok, code} =
+      AuthorizationCode.issue(CodeETS, %{
+        client_id: @client_id,
+        redirect_uri: @redirect_uri,
+        code_challenge: challenge,
+        subject: "usr_42"
+      })
+
+    assert {:ok, grant} =
+             AuthorizationCode.redeem(CodeETS, code, %{
+               client_id: @client_id,
+               redirect_uri: @redirect_uri,
+               code_verifier: @verifier
+             })
+
+    code_hash = Secret.hash(code)
+    :ok = CodeETS.record_access_token_for_code(code_hash, "jti-before-revoke", now + 300)
+
+    # Revocation runs after take/1 and before refresh issuance creates the family.
+    assert {:ok, 0} = CodeETS.delete_unconsumed(subject: "usr_42")
+    assert {:ok, 0} = RefreshETS.revoke_families(subject: "usr_42")
+
+    assert {:ok, %{token: refresh_token}} =
+             AuthorizationCode.issue_refresh_and_finalize(
+               CodeETS,
+               code,
+               grant,
+               RefreshETS,
+               %{subject: grant.subject, client_id: grant.client_id},
+               now: now
+             )
+
+    :ok = CodeETS.record_access_token_for_code(code_hash, "jti-after-finalize", now + 300)
+
+    assert CodeETS.access_token_revoked?("jti-before-revoke")
+    assert CodeETS.access_token_revoked?("jti-after-finalize")
+    assert :error = RefreshETS.get(Secret.hash(refresh_token))
+  end
 end

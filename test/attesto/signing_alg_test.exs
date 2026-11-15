@@ -81,17 +81,13 @@ defmodule Attesto.SigningAlgTest do
     end
   end
 
-  test "Ed448 infers the curve-independent EdDSA JOSE algorithm" do
-    assert SigningAlg.infer(ed448_jwk()) == "EdDSA"
-  end
-
-  test "allowed algorithms include RFC 9864 identifiers while inference remains legacy" do
+  test "Ed25519 and Ed448 infer their explicit RFC 9864 JOSE identifiers" do
     assert "Ed25519" in SigningAlg.allowed()
     assert "Ed448" in SigningAlg.allowed()
     assert "Ed25519" in SigningAlg.fapi_algs()
     refute "Ed448" in SigningAlg.fapi_algs()
-    assert SigningAlg.infer(ed25519_jwk()) == "EdDSA"
-    assert SigningAlg.infer(ed448_jwk()) == "EdDSA"
+    assert SigningAlg.infer(ed25519_jwk()) == "Ed25519"
+    assert SigningAlg.infer(ed448_jwk()) == "Ed448"
   end
 
   test "compatible_algs/1 returns every supported algorithm for the key" do

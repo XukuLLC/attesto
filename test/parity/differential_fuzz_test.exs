@@ -222,7 +222,7 @@ defmodule Attesto.Parity.DifferentialFuzzTest do
       dup_jwt =
         JWS.sign_compact(
           k.ec_pem,
-          %{"alg" => "ES256", "typ" => "vc+sd-jwt"},
+          %{"alg" => "ES256", "typ" => "dc+sd-jwt"},
           %{"iss" => "https://issuer.example", "_sd_alg" => "sha-256", "_sd" => [SdJwt.digest(dup_d)]}
         )
 
@@ -952,7 +952,7 @@ defmodule Attesto.Parity.DifferentialFuzzTest do
     dig2 = SdJwt.digest(d2, sd_alg)
     arr_dig = SdJwt.digest(arr_d, sd_alg)
 
-    header = %{"alg" => "ES256", "typ" => "vc+sd-jwt"}
+    header = %{"alg" => "ES256", "typ" => "dc+sd-jwt"}
     base_payload = %{"iss" => "https://issuer.example", "_sd_alg" => sd_alg, "_sd" => [dig1, dig2]}
     base_jwt = JWS.sign_compact(k.ec_pem, header, base_payload)
 

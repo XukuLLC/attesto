@@ -1,6 +1,6 @@
 defmodule Attesto.CredentialResponse do
   @moduledoc """
-  OID4VCI Credential Response (`draft-ietf-oauth-openid4vci` §8.3).
+  OID4VCI Credential Response (`OpenID4VCI 1.0`, 2025-09-16, §8.3).
 
   Build the string-keyed response body returned by a credential endpoint. This
   module is pure and conn-free; credential issuance is the caller's concern.

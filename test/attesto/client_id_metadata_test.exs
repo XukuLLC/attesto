@@ -172,17 +172,102 @@ defmodule Attesto.ClientIdMetadataTest do
       assert metadata["token_endpoint_auth_method"] == "none"
     end
 
-    test "accepts token_endpoint_auth_method private_key_jwt" do
+    test "accepts token_endpoint_auth_method private_key_jwt with jwks or jwks_uri" do
       client_id = "https://app.example/cb"
 
       doc = %{
         "client_id" => client_id,
         "redirect_uris" => ["https://app.example/callback"],
-        "token_endpoint_auth_method" => "private_key_jwt"
+        "token_endpoint_auth_method" => "private_key_jwt",
+        "jwks_uri" => "https://app.example/jwks.json"
       }
 
       assert {:ok, metadata} = ClientIdMetadata.validate_document(client_id, doc)
       assert metadata["token_endpoint_auth_method"] == "private_key_jwt"
+      assert ClientIdMetadata.auth_methods(metadata) == ["private_key_jwt"]
+    end
+
+    test "rejects private_key_jwt without jwks or jwks_uri (draft 03 §5)" do
+      client_id = "https://app.example/cb"
+
+      for doc <- [
+            %{
+              "client_id" => client_id,
+              "redirect_uris" => ["https://app.example/callback"],
+              "token_endpoint_auth_method" => "private_key_jwt"
+            },
+            %{
+              "client_id" => client_id,
+              "redirect_uris" => ["https://app.example/callback"],
+              "token_endpoint_auth_methods_supported" => ["none", "private_key_jwt"]
+            }
+          ] do
+        assert {:error, :invalid_metadata} = ClientIdMetadata.validate_document(client_id, doc)
+      end
+    end
+
+    test "prefers token_endpoint_auth_methods_supported and assumes none when omitted (draft 03 §5)" do
+      client_id = "https://app.example/cb"
+
+      omitted = %{"client_id" => client_id, "redirect_uris" => ["https://app.example/callback"]}
+      assert {:ok, omitted_meta} = ClientIdMetadata.validate_document(client_id, omitted)
+      assert ClientIdMetadata.auth_methods(omitted_meta) == ["none"]
+
+      array_doc = %{
+        "client_id" => client_id,
+        "redirect_uris" => ["https://app.example/callback"],
+        "token_endpoint_auth_methods_supported" => ["none", "private_key_jwt"],
+        "jwks_uri" => "https://app.example/jwks.json"
+      }
+
+      assert {:ok, array_meta} = ClientIdMetadata.validate_document(client_id, array_doc)
+      assert array_meta["token_endpoint_auth_methods_supported"] == ["none", "private_key_jwt"]
+      assert ClientIdMetadata.auth_methods(array_meta) == ["none", "private_key_jwt"]
+    end
+
+    for method <- ~w(client_secret_basic client_secret_post client_secret_jwt) do
+      test "rejects token_endpoint_auth_methods_supported containing #{method}" do
+        client_id = "https://app.example/cb"
+
+        doc = %{
+          "client_id" => client_id,
+          "redirect_uris" => ["https://app.example/callback"],
+          "token_endpoint_auth_methods_supported" => ["none", unquote(method)]
+        }
+
+        assert {:error, :symmetric_auth_method} = ClientIdMetadata.validate_document(client_id, doc)
+      end
+    end
+
+    test "rejects inconsistent token_endpoint_auth_method vs token_endpoint_auth_methods_supported" do
+      client_id = "https://app.example/cb"
+
+      inconsistent = %{
+        "client_id" => client_id,
+        "redirect_uris" => ["https://app.example/callback"],
+        "token_endpoint_auth_methods_supported" => ["private_key_jwt"],
+        "token_endpoint_auth_method" => "none",
+        "jwks_uri" => "https://app.example/jwks.json"
+      }
+
+      assert {:error, :invalid_metadata} = ClientIdMetadata.validate_document(client_id, inconsistent)
+
+      consistent = Map.put(inconsistent, "token_endpoint_auth_methods_supported", ["none", "private_key_jwt"])
+      assert {:ok, meta} = ClientIdMetadata.validate_document(client_id, consistent)
+      assert ClientIdMetadata.auth_methods(meta) == ["none", "private_key_jwt"]
+    end
+
+    test "rejects document containing both jwks and jwks_uri (draft 03 §4.1)" do
+      client_id = "https://app.example/cb"
+
+      doc = %{
+        "client_id" => client_id,
+        "redirect_uris" => ["https://app.example/callback"],
+        "jwks" => %{"keys" => []},
+        "jwks_uri" => "https://app.example/jwks.json"
+      }
+
+      assert {:error, :invalid_metadata} = ClientIdMetadata.validate_document(client_id, doc)
     end
   end
 
@@ -287,6 +372,38 @@ defmodule Attesto.ClientIdMetadataTest do
                "expected #{inspect(uri)} to be rejected"
       end
     end
+
+    test "rejects redirect_uris whose query carries authorization request or response parameters (OAuth 2.1 §2.3 / §7.12)" do
+      client_id = "https://app.example/meta"
+
+      for uri <- [
+            "https://app.example/cb?code=1",
+            "https://app.example/cb?state=s",
+            "https://app.example/cb?iss=https%3A%2F%2Fas.example",
+            "https://app.example/cb?error=access_denied",
+            "https://app.example/cb?access_token=tok",
+            "https://app.example/cb?response_type=code",
+            "https://app.example/cb?client_id=c1",
+            "https://app.example/cb?code_challenge=abc",
+            "https://app.example/cb?code_challenge_method=S256",
+            "https://app.example/cb?redirect_uri=https%3A%2F%2Fother.example",
+            "https://app.example/cb?scope=openid",
+            "https://app.example/cb?c%6fde=1",
+            "https://app.example/cb?s%63ope=openid"
+          ] do
+        doc = %{"client_id" => client_id, "redirect_uris" => [uri]}
+
+        assert {:error, :invalid_redirect_uris} =
+                 ClientIdMetadata.validate_document(client_id, doc),
+               "expected #{inspect(uri)} to be rejected"
+      end
+
+      assert {:ok, _} =
+               ClientIdMetadata.validate_document(client_id, %{
+                 "client_id" => client_id,
+                 "redirect_uris" => ["https://app.example/cb?tenant=acme"]
+               })
+    end
   end
 
   describe "validate_document/2 normalization (RFC 7591 §2)" do
@@ -304,7 +421,6 @@ defmodule Attesto.ClientIdMetadataTest do
         "logo_uri" => "https://app.example/logo.png",
         "jwks_uri" => "https://app.example/jwks.json",
         "contacts" => ["ops@app.example"],
-        "jwks" => %{"keys" => []},
         "software_statement" => "ignored"
       }
 
@@ -318,9 +434,17 @@ defmodule Attesto.ClientIdMetadataTest do
       assert metadata["logo_uri"] == "https://app.example/logo.png"
       assert metadata["jwks_uri"] == "https://app.example/jwks.json"
       assert metadata["contacts"] == ["ops@app.example"]
-      assert metadata["jwks"] == %{"keys" => []}
 
       refute Map.has_key?(metadata, "software_statement")
+
+      inline_doc = %{
+        "client_id" => client_id,
+        "redirect_uris" => ["https://app.example/callback"],
+        "jwks" => %{"keys" => []}
+      }
+
+      assert {:ok, inline_meta} = ClientIdMetadata.validate_document(client_id, inline_doc)
+      assert inline_meta["jwks"] == %{"keys" => []}
     end
 
     test "omits absent members rather than rendering them as nil" do
@@ -377,7 +501,13 @@ defmodule Attesto.ClientIdMetadataTest do
       client_id = "https://app.example/metadata"
 
       for grant <- ["client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"] do
-        doc = %{"client_id" => client_id, "grant_types" => [grant], "token_endpoint_auth_method" => "private_key_jwt"}
+        doc = %{
+          "client_id" => client_id,
+          "grant_types" => [grant],
+          "token_endpoint_auth_method" => "private_key_jwt",
+          "jwks_uri" => "https://app.example/jwks.json"
+        }
+
         assert {:ok, metadata} = ClientIdMetadata.validate_document(client_id, doc)
         assert metadata["redirect_uris"] == []
       end

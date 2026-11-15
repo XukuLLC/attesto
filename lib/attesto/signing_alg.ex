@@ -5,12 +5,13 @@ defmodule Attesto.SigningAlg do
   Attesto treats the algorithm as metadata of the trusted key selected by
   `kid`, never as policy learned from the presented token. RSA keys infer
   RS256 (RSASSA-PKCS1-v1_5) as the JWA default for the `RSA` key type, while
-  EC/OKP keys infer their JOSE algorithm from the public JWK curve. For wire
-  compatibility, Ed25519 and Ed448 inference retains the legacy `EdDSA`
-  identifier; trusted keystore metadata can opt into RFC 9864's explicit
-  `Ed25519` or `Ed448` identifiers. RSA deployments that intentionally use
-  PS256 can likewise label the key through keystore metadata. Ed448 requires
-  a JOSE backend with Curve448 and SHAKE256 support.
+  EC and OKP keys infer their explicit curve-specific JOSE algorithm from the
+  public JWK curve (`ES256`/`ES384`/`ES512`, and RFC 9864 `Ed25519`/`Ed448`).
+  Legacy `EdDSA` remains accepted for verification and can still be selected
+  explicitly through keystore metadata; RFC 9864 deprecates `EdDSA`. RSA
+  deployments that intentionally use PS256 can likewise label the key through
+  keystore metadata. Ed448 requires a JOSE backend with Curve448 and SHAKE256
+  support.
   """
 
   alias Attesto.{Key, Thumbprint}
@@ -78,6 +79,33 @@ defmodule Attesto.SigningAlg do
   end
 
   def valid_verification_algorithms?(_algs), do: false
+
+  @doc false
+  @spec verification_algs(alg(), JOSE.JWK.t()) :: [alg()]
+  def verification_algs(alg, %JOSE.JWK{keys: :undefined} = jwk) when alg in ["EdDSA", "Ed25519", "Ed448"] do
+    case public_fields(jwk) do
+      %{"kty" => "OKP", "crv" => "Ed25519"} when alg in ["EdDSA", "Ed25519"] ->
+        if alg == "EdDSA", do: ["EdDSA", "Ed25519"], else: ["Ed25519", "EdDSA"]
+
+      %{"kty" => "OKP", "crv" => "Ed448"} when alg in ["EdDSA", "Ed448"] ->
+        if alg == "EdDSA", do: ["EdDSA", "Ed448"], else: ["Ed448", "EdDSA"]
+
+      _other ->
+        [alg]
+    end
+  end
+
+  def verification_algs(alg, _jwk), do: [alg]
+
+  @doc false
+  @spec equivalent_okp_algs?(term(), term(), map()) :: boolean()
+  def equivalent_okp_algs?(alg, alg, _fields), do: true
+
+  def equivalent_okp_algs?("EdDSA", crv, %{"kty" => "OKP", "crv" => crv}) when crv in ["Ed25519", "Ed448"], do: true
+
+  def equivalent_okp_algs?(crv, "EdDSA", %{"kty" => "OKP", "crv" => crv}) when crv in ["Ed25519", "Ed448"], do: true
+
+  def equivalent_okp_algs?(_alg_a, _alg_b, _fields), do: false
 
   @doc """
   Resolve the algorithm for a key in `keystore`.
@@ -400,7 +428,7 @@ defmodule Attesto.SigningAlg do
   defp infer_from_fields(%{"kty" => "EC", "crv" => "P-256"}), do: "ES256"
   defp infer_from_fields(%{"kty" => "EC", "crv" => "P-384"}), do: "ES384"
   defp infer_from_fields(%{"kty" => "EC", "crv" => "P-521"}), do: "ES512"
-  defp infer_from_fields(%{"kty" => "OKP", "crv" => crv}) when crv in ["Ed25519", "Ed448"], do: "EdDSA"
+  defp infer_from_fields(%{"kty" => "OKP", "crv" => crv}) when crv in ["Ed25519", "Ed448"], do: crv
 
   defp infer_from_fields(%{"kty" => kty} = fields) do
     raise ArgumentError,

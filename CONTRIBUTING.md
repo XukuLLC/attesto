@@ -15,3 +15,8 @@ preserves Git commit authorship or an appropriate `Co-authored-by` trailer.
 
 Credit is added when the contribution lands, not while it is still under
 review. Security reporters may request anonymous or alternate attribution.
+
+Before releasing Attesto or req_dpop, run
+`scripts/check_dpop_vectors.sh /path/to/req_dpop` from the Attesto checkout.
+Both packages vendor the HTU normalization vectors for standalone CI; this
+release check requires both copies and fails when either is missing or differs.

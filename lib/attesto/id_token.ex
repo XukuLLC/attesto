@@ -78,7 +78,6 @@ defmodule Attesto.IDToken do
   alias Attesto.Claims
   alias Attesto.Config
   alias Attesto.JWS
-  alias Attesto.Key
   alias Attesto.NumericDate
   alias Attesto.Record
   alias Attesto.SigningAlg
@@ -95,9 +94,6 @@ defmodule Attesto.IDToken do
   # may only be shortened, mirroring `Attesto.Token`'s lifetime cap.
   @default_lifetime_seconds 3600
 
-  # Modest tolerance for a verifier clock running slightly ahead of the
-  # issuer's, applied to the future-`iat` check, mirroring `Attesto.Token`.
-  @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   # An ID Token hint is read at the end-session endpoint before any
   # authentication.
   @max_token_bytes 64 * 1_024
@@ -408,17 +404,7 @@ defmodule Attesto.IDToken do
   defp check_header_typ(_header, true), do: {:error, :unexpected_typ}
   defp check_header_typ(_header, false), do: :ok
 
-  defp verify_against_trusted(config, jwt, header) do
-    JWS.verify_trusted(jwt, header, config.keystore.verification_pems(),
-      malformed_key: :raise,
-      candidate_builder: fn pem ->
-        {Key.kid(pem), SigningAlg.for_key(config.keystore, pem), Key.jwk(pem)}
-      end,
-      terminal_error: :invalid_signature,
-      malformed_result: :halt,
-      malformed_error: :invalid_token
-    )
-  end
+  defp verify_against_trusted(config, jwt, header), do: Attesto.Token.verify_against_trusted(config, jwt, header)
 
   # ----- internal: claim checks -----
 
@@ -454,13 +440,7 @@ defmodule Attesto.IDToken do
   # OIDC Core §3.1.3.7 item 3: the client MUST be present in `aud`, which
   # may be a single string or an array of strings (a mixed array carrying a
   # non-string is malformed and rejected, not silently tolerated).
-  defp check_audience(%{"aud" => aud}, client_id) do
-    if Claims.audience_matches?(aud, client_id, :array),
-      do: :ok,
-      else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _client_id), do: {:error, :invalid_audience}
+  defp check_audience(claims, client_id), do: Claims.check_audience(claims, client_id, :array)
 
   # OIDC Core §3.1.3.7 item 4/5: multiple audiences require `azp`, and any
   # present `azp` MUST equal the client. Absent `azp` is permitted only for a
@@ -486,23 +466,11 @@ defmodule Attesto.IDToken do
     end
   end
 
-  defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
-    if NumericDate.not_expired?(exp, NumericDate.now(opts), leeway: 0),
-      do: :ok,
-      else: {:error, :expired}
-  end
-
-  defp check_expiry(_claims, _opts), do: {:error, :expired}
+  defp check_expiry(claims, opts), do: Attesto.Token.check_expiry(claims, opts)
 
   # An `iat` meaningfully in the future was issued by a clock far ahead of
   # ours or forged; reject it (with the same modest skew as Attesto.Token).
-  defp check_iat_not_future(%{"iat" => iat}, opts) when is_integer(iat) do
-    if NumericDate.not_before_reached?(iat, NumericDate.now(opts), skew: @clock_skew_seconds),
-      do: :ok,
-      else: {:error, :not_yet_valid}
-  end
-
-  defp check_iat_not_future(_claims, _opts), do: :ok
+  defp check_iat_not_future(claims, opts), do: Attesto.Token.check_iat_not_future(claims, opts)
 
   # OIDC Core §3.1.3.7 item 11: when the request carried a nonce, the claim
   # MUST be present and identical. No supplied nonce means the caller

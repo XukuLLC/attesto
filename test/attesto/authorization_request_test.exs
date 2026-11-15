@@ -505,6 +505,17 @@ defmodule Attesto.AuthorizationRequestTest do
       assert err.error == "request_not_supported"
       assert err.redirect_uri == @redirect_uri
       assert err.state == "xyz"
+
+      assert {:error, {:redirect, strict_err}} =
+               AuthorizationRequest.validate(base_params(%{"request" => request}),
+                 registered_redirect_uris: @registered,
+                 request_object_jwks: %{"keys" => []},
+                 request_object_policy: Policy.fapi_message_signing()
+               )
+
+      assert strict_err.error == "invalid_request_object"
+      assert strict_err.redirect_uri == @redirect_uri
+      assert strict_err.state == "xyz"
     end
 
     test "a server without request-object support answers request_not_supported" do

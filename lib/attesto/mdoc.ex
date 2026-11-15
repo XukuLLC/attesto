@@ -1,102 +1,108 @@
 if Code.ensure_loaded?(CBOR) do
   defmodule Attesto.Mdoc do
     @moduledoc """
-    Issue and verify ISO 18013-5 mdoc credentials and OID4VP mdoc
-    presentations.
+      Issue and verify ISO 18013-5 mdoc credentials and OID4VP mdoc
+      presentations.
 
-    Issuance builds the MobileSecurityObject (MSO), binds the holder's device
-    key, and signs issuer authentication with ES256 `COSE_Sign1`. `verify/3`
-    checks issuer signatures, item digests, and validity for a bare
-    `IssuerSigned` structure. The document type is bound ONLY when
-    `:expected_doc_type` is supplied — without it, any doc type from a trusted
-    issuer is accepted, so a caller that needs a specific doc type (e.g. a DCQL
-    `mso_mdoc` query) MUST pass it. `Attesto.VpToken` threads this via its
-    `:query_constraints` for the OID4VP path.
+      Issuance builds the MobileSecurityObject (MSO), binds the holder's device
+      key, and signs issuer authentication with ES256 `COSE_Sign1`. `verify/3`
+      checks issuer signatures, item digests, and validity for a bare
+      `IssuerSigned` structure. The document type is bound ONLY when
+      `:expected_doc_type` is supplied — without it, any doc type from a trusted
+      issuer is accepted, so a caller that needs a specific doc type (e.g. a DCQL
+      `mso_mdoc` query) MUST pass it. `Attesto.VpToken` threads this via its
+      `:query_constraints` for the OID4VP path.
 
-    `verify_device_response/4` additionally verifies an OID4VP presentation: a
-    full ISO 18013-5 `DeviceResponse` whose `DeviceSigned.deviceAuth` is an
-    ES256 `COSE_Sign1` (detached payload) over `DeviceAuthentication =
-    ["DeviceAuthentication", SessionTranscript, DocType,
-    DeviceNameSpacesBytes]`, where `SessionTranscript`'s `Handover` is OID4VP's
-    `OpenID4VPHandover` by default, or `OpenID4VPDCAPIHandover` when
-    `:dc_api_origin` is supplied. `COSE_Mac0` device authentication is not
-    supported. Device signatures and device keys remain ES256/P-256 only.
+      `verify_device_response/4` additionally verifies an OID4VP presentation: a
+      full ISO 18013-5 `DeviceResponse` whose `DeviceSigned.deviceAuth` is an
+      ES256 `COSE_Sign1` (detached payload) over `DeviceAuthentication =
+      ["DeviceAuthentication", SessionTranscript, DocType,
+      DeviceNameSpacesBytes]`, where `SessionTranscript`'s `Handover` is OID4VP's
+      `OpenID4VPHandover` by default, or `OpenID4VPDCAPIHandover` when
+      `:dc_api_origin` is supplied. `COSE_Mac0` device authentication is not
+      supported. Device signatures and device keys remain ES256/P-256 only.
 
-    ## Handover and issuer algorithms
+      ## Handover and issuer algorithms
 
-    [OpenID4VP 1.0 §B.2.6.2](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html#section-b.2.6.2)
-    says of the origin: "It MUST NOT be prefixed with `origin:`." The DC API
-    transcript hashes CBOR `[origin, nonce, jwkThumbprint]`, using a byte-string
-    SHA-256 JWK thumbprint for encrypted responses and `null` otherwise.
-    §2 defines web origins as scheme, host and non-default port; platform
-    application URIs are also permitted. Supply the exact platform origin,
-    without a path or trailing slash for web origins. No normalization occurs.
-    §B.2.6.1 continues to govern the default redirect transcript.
+      [OpenID4VP 1.0 §B.2.6.2](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html#section-b.2.6.2)
+      says of the origin: "It MUST NOT be prefixed with `origin:`." The DC API
+      transcript hashes CBOR `[origin, nonce, jwkThumbprint]`, using a byte-string
+      SHA-256 JWK thumbprint for encrypted responses and `null` otherwise.
+      §2 defines web origins as scheme, host and non-default port; platform
+      application URIs are also permitted. Supply the exact platform origin,
+      without a path or trailing slash for web origins. No normalization occurs.
+      §B.2.6.1 continues to govern the default redirect transcript.
 
-    [ISO/IEC TS 18013-7:2025 §6.4.3.1, Table 1](https://standards.iteh.ai/catalog/standards/iso/fe4f4976-3fc0-4d1e-8d8e-157582eda4fd/iso-iec-ts-18013-7-2025)
-    distinguishes "OID4VP" (Annex B) from "Digital credentials API retrieval"
-    (Annex C). This module implements the OpenID4VP 1.0 handover, not the
-    separate ISO Annex C protocol; ISO §2 references OpenID4VP draft 18.
+      [ISO/IEC TS 18013-7:2025 §6.4.3.1, Table 1](https://standards.iteh.ai/catalog/standards/iso/fe4f4976-3fc0-4d1e-8d8e-157582eda4fd/iso-iec-ts-18013-7-2025)
+      distinguishes "OID4VP" (Annex B) from "Digital credentials API retrieval"
+      (Annex C). This module implements the OpenID4VP 1.0 handover, not the
+      separate ISO Annex C protocol; ISO §2 references OpenID4VP draft 18.
 
-    [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf#page=57)
-    requires readers to "support all of these signature algorithms and curves".
-    It permits ES256/P-256, ES384/P-384 and ES512/P-521 for issuerAuth.
-    §9.1.3.6 applies these pairings to device signatures too; §9.1.5.2,
-    Table 22 also requires EdDSA and brainpool support from readers. Those
-    additional curves are unimplemented, so this is a subset of ISO reader
-    functionality. §9.1.5.1 defines the underlying session transcript.
+      [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf#page=57)
+      requires readers to "support all of these signature algorithms and curves".
+      It permits ES256/P-256, ES384/P-384 and ES512/P-521 for issuerAuth.
+      §9.1.3.6 applies these pairings to device signatures too; §9.1.5.2,
+      Table 22 also requires EdDSA and brainpool support from readers. Those
+      additional curves are unimplemented, so this is a subset of ISO reader
+      functionality. §9.1.5.1 defines the underlying session transcript.
 
-    [HAIP 1.0 §7](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-7)
-    specifies ES256 "at a minimum", allowing ecosystem cryptographic suites.
-    It does not prohibit ES384 or ES512 issuer signatures. Its
-    [§5.2](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-5.2)
-    says the verifier "MUST use the Response Mode `dc_api.jwt`"; unencrypted DC API verification
-    here does not satisfy that flow profile. `:haip` controls certificate
-    policy only, not transport compliance.
+      [HAIP 1.0 §7](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-7)
+      specifies ES256 "at a minimum", allowing ecosystem cryptographic suites.
+      It does not prohibit ES384 or ES512 issuer signatures. Its
+      [§5.2](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-5.2)
+      says the verifier "MUST use the Response Mode `dc_api.jwt`"; unencrypted DC API verification
+      here does not satisfy that flow profile. `:haip` controls certificate
+      policy only, not transport compliance.
 
-    Issuer verification accepts ES256 by default for compatibility. Opt into
-    `accepted_algs: ["ES256", "ES384", "ES512"]` on `verify/3`,
-    `verify_device_response/4`, or `Attesto.VpToken.verify/2`. A supported COSE
-    algorithm paired with the wrong EC curve returns `:algorithm_key_mismatch`,
-    including under certificate trust. See `Attesto.Cose` for RFC 9053 details.
+      Issuer verification accepts ES256 by default for compatibility. Opt into
+      `accepted_algs: ["ES256", "ES384", "ES512"]` on `verify/3`,
+      `verify_device_response/4`, or `Attesto.VpToken.verify/2`. A supported COSE
+      algorithm paired with the wrong EC curve returns `:algorithm_key_mismatch`,
+      including under certificate trust. See `Attesto.Cose` for RFC 9053 details.
 
-    `peek_doc_type/1` reads an unverified `docType` out of a `DeviceResponse`
-    for issuer-key resolution ahead of verification; see `Attesto.VpToken`.
+      `peek_doc_type/1` reads an unverified `docType` out of a `DeviceResponse`
+      for issuer-key resolution ahead of verification; see `Attesto.VpToken`.
 
-    ## Certificate trust
+      ## Certificate trust
 
-    With `:trusted_certificates`, issuer authentication validates the leaf-first
-    `x5chain` in issuerAuth's unprotected header (COSE label 33), then uses only
-    that leaf's public key. The following text informs this path:
+      With `:trusted_certificates`, issuer authentication validates the leaf-first
+      `x5chain` in issuerAuth's unprotected header (COSE label 33), then uses only
+      that leaf's public key. The following text informs this path:
 
-    * [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf)
-      places the MSO signing certificate in `x5chain` as an "unprotected header
-      element". §9.3.3 requires "RFC 5280, section 6.1 basic path validation";
-      §9.3.1 steps 1–2 use the validated certificate key for issuerAuth.
-      Annex B.1.1 puts the document signer first and excludes the IACA root.
-    * [HAIP 1.0 §3.4](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-3.4)
-      leaves "authorization of an Issuer to issue certain types of credentials"
-      outside its scope. Its §6.1.1 issuer-key rules explicitly concern SD-JWT
-      VC. Attesto also defaults mdoc to `haip: true`, refusing a self-signed
-      leaf or an embedded configured anchor. `haip: false` disables these two
-      restrictions while retaining path validation.
+      * [ISO/IEC 18013-5:2021 §9.1.2.4](https://archive.org/download/pub.cfr.iec.18013-5.2021/iec.18013-5.2021.pdf)
+        places the MSO signing certificate in `x5chain` as an "unprotected header
+        element". §9.3.3 requires "RFC 5280, section 6.1 basic path validation";
+        §9.3.1 steps 1–2 use the validated certificate key for issuerAuth.
+        Annex B.1.1 puts the document signer first and excludes the IACA root.
+      * [HAIP 1.0 §3.4](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html#section-3.4)
+        leaves "authorization of an Issuer to issue certain types of credentials"
+        outside its scope. Its §6.1.1 issuer-key rules explicitly concern SD-JWT
+        VC. Attesto also defaults mdoc to `haip: true`, refusing a self-signed
+        leaf or an embedded configured anchor. `haip: false` disables these two
+        restrictions while retaining path validation.
 
-    There is no docType-to-certificate-name binding in these provisions.
-    §9.3.1 step 4 binds the MSO's docType to the presented document's docType,
-    which `verify_device_response/4` checks. Requested types are constrained
-    separately by `:expected_doc_type` or `Attesto.VpToken`'s DCQL checks.
-    Trust in a certificate does not itself establish authorization for every
-    document type; hosts supply their ecosystem's authorization policy.
+      There is no docType-to-certificate-name binding in these provisions.
+      §9.3.1 step 4 binds the MSO's docType to the presented document's docType,
+      which `verify_device_response/4` checks. Requested types are constrained
+      separately by `:expected_doc_type` or `Attesto.VpToken`'s DCQL checks.
+      Trust in a certificate does not itself establish authorization for every
+      document type; hosts supply their ecosystem's authorization policy.
 
-    This path uses `Attesto.X509` with `purpose: :mdoc_issuer`, recognizing the
-    critical document-signer extended key usage. It does not implement every
-    ISO certificate-profile rule: IACA country/state matching, revocation,
-    and the MSO signing-time check against certificate validity remain outside
-    this path. Hosts can add certificate policy via `:certificate_trust`.
-    No certificate or revocation data is fetched.
+      This path uses `Attesto.X509` with `purpose: :mdoc_issuer`, recognizing the
+      critical document-signer extended key usage. It does not implement every
+      ISO certificate-profile rule: IACA country/state matching, revocation,
+      and the MSO signing-time check against certificate validity remain outside
+      this path. Hosts can add certificate policy via `:certificate_trust`.
+      No certificate or revocation data is fetched.
+      Credential status references are fetched and enforced by default through
+    `Attesto.StatusList.fetch/3` and its bounded verified-token cache. Explicit
+    `resolve_status: false` is for offline inspection; it must not be used to
+    decide whether a credential is acceptable. A custom resolver can replace
+    the transport while retaining signature and status enforcement.
+
     """
 
-    alias Attesto.{Cose, JWS, NumericDate, SecureCompare, Thumbprint, X509}
+    alias Attesto.{Cose, JWS, MapParams, NumericDate, SecureCompare, StatusList, Thumbprint, X509}
     alias Attesto.Mdoc.Origin
 
     @clock_skew_seconds NumericDate.default_clock_skew_seconds()
@@ -116,33 +122,46 @@ if Code.ensure_loaded?(CBOR) do
           }
 
     @type verified :: %{
-            doc_type: String.t(),
-            namespaces: %{String.t() => %{String.t() => term()}},
-            device_key: map(),
-            key_authorizations: key_authorizations(),
-            validity: validity()
+            required(:doc_type) => String.t(),
+            required(:namespaces) => %{String.t() => %{String.t() => term()}},
+            required(:device_key) => map(),
+            required(:key_authorizations) => key_authorizations(),
+            required(:validity) => validity(),
+            optional(:status) => map()
           }
 
     @type verified_presentation :: %{
-            doc_type: String.t(),
-            namespaces: %{String.t() => %{String.t() => term()}},
-            device_namespaces: %{String.t() => %{String.t() => term()}},
-            validity: validity()
+            required(:doc_type) => String.t(),
+            required(:namespaces) => %{String.t() => %{String.t() => term()}},
+            required(:device_namespaces) => %{String.t() => %{String.t() => term()}},
+            required(:validity) => validity(),
+            optional(:status) => map()
           }
 
     @type verify_error ::
             :algorithm_key_mismatch
+            | :credential_revoked
             | :digest_mismatch
             | :expired
             | :invalid_cose
+            | :invalid_identifier_list
             | :invalid_key
             | :invalid_mdoc
             | :invalid_signature
+            | {:credential_status, non_neg_integer()}
+            | :credential_suspended
+            | :invalid_status_list
+            | :invalid_status_list_signature
+            | :invalid_status_list_token
+            | :invalid_status_reference
             | :not_yet_valid
+            | :status_index_out_of_range
+            | :status_list_uri_mismatch
             | :unauthorized_device_element
             | :unexpected_doc_type
             | :unsupported_algorithm
             | X509.verify_error()
+            | term()
 
     @typedoc """
     What the issuer authorized the device key to sign, from the MSO's
@@ -205,8 +224,9 @@ if Code.ensure_loaded?(CBOR) do
     def verify(input, trusted, opts) when is_binary(input) and is_list(opts) do
       safe(:invalid_mdoc, fn ->
         with {:ok, issuer_signed_bytes} <- issuer_signed_bytes(input),
-             {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes) do
-          verify_issuer_signed(issuer_signed, trusted, opts)
+             {:ok, issuer_signed} <- decode_complete(issuer_signed_bytes),
+             {:ok, result, _status_context} <- verify_issuer_signed(issuer_signed, trusted, opts) do
+          {:ok, result}
         end
       end)
     end
@@ -308,6 +328,24 @@ if Code.ensure_loaded?(CBOR) do
     def decode_issuer_signed(_input), do: {:error, :invalid_mdoc}
 
     @doc """
+    Read an IssuerSigned mdoc's unverified status reference. This only detects
+    whether revocation checking is required; callers must verify the credential
+    before fetching any URI from this result.
+    """
+    @spec peek_status(binary()) :: {:ok, map() | nil} | {:error, :invalid_mdoc}
+    def peek_status(input) do
+      safe(:invalid_mdoc, fn ->
+        with {:ok, %{"issuerAuth" => [_protected, _unprotected, payload, _signature]}} <- decode_issuer_signed(input),
+             {:ok, payload_bytes} <- byte_string(payload),
+             {:ok, mso} <- decode_embedded(payload_bytes) do
+          parse_mso_status(Map.get(mso, "status"))
+        else
+          _ -> {:error, :invalid_mdoc}
+        end
+      end)
+    end
+
+    @doc """
     Extract the `x5chain` (COSE unprotected header label 33) DER certificate list
     from an IssuerSigned mdoc binary, decoded IssuerSigned map, or `issuerAuth` list.
     """
@@ -333,14 +371,15 @@ if Code.ensure_loaded?(CBOR) do
 
     defp verify_issuer_signed(issuer_signed, trusted, opts) do
       with {:ok, encoded_issuer_auth, name_spaces} <- issuer_signed_parts(issuer_signed),
-           {:ok, issuer_key} <- issuer_key(issuer_signed["issuerAuth"], trusted, opts),
+           {:ok, issuer_key, status_trust} <- issuer_key(issuer_signed["issuerAuth"], trusted, opts),
            {:ok, mso_payload} <- Cose.verify1(encoded_issuer_auth, issuer_key, Keyword.take(opts, [:accepted_algs])),
            {:ok, mso} <- decode_embedded(mso_payload),
            {:ok, mso_parts} <- validate_mso(mso),
            :ok <- check_expected_doc_type(mso_parts.doc_type, opts),
            {:ok, namespaces} <- verify_namespaces(name_spaces, mso_parts.value_digests),
            :ok <- check_validity(mso_parts.validity, opts),
-           {:ok, device_key} <- device_key(mso_parts.device_key) do
+           {:ok, device_key} <- device_key(mso_parts.device_key),
+           :ok <- check_mso_status(mso_parts.status, issuer_key, Keyword.merge(opts, status_trust)) do
         {:ok,
          %{
            device_key: device_key,
@@ -348,7 +387,36 @@ if Code.ensure_loaded?(CBOR) do
            key_authorizations: mso_parts.key_authorizations,
            namespaces: namespaces,
            validity: mso_parts.validity
-         }}
+         }
+         |> maybe_put_verified_status(mso_parts.status), {issuer_key, status_trust}}
+      end
+    end
+
+    defp maybe_put_verified_status(map, nil), do: map
+    defp maybe_put_verified_status(map, status), do: Map.put(map, :status, status)
+
+    defp check_mso_status(nil, _issuer_key, _opts), do: :ok
+
+    defp check_mso_status(status, issuer_key, opts) when is_map(status) do
+      case StatusList.resolver(opts) do
+        false ->
+          :ok
+
+        resolver when is_function(resolver, 1) or is_function(resolver, 2) ->
+          status_opts =
+            opts
+            |> Keyword.take([
+              :now,
+              :accepted_algs,
+              :trusted_certificates,
+              :status_trusted_certificates,
+              :haip,
+              :certificate_trust,
+              :cache_status
+            ])
+            |> Keyword.put(:format, :cwt)
+
+          StatusList.check_status(status, resolver, issuer_key, status_opts)
       end
     end
 
@@ -358,10 +426,10 @@ if Code.ensure_loaded?(CBOR) do
 
         with {:ok, chain} <- issuer_x5chain(issuer_auth),
              {:ok, verified} <- X509.verify(chain, trust_opts) do
-          {:ok, verified.public_key}
+          {:ok, verified.public_key, [status_trusted_certificates: [verified.trust_anchor]]}
         end
       else
-        {:ok, trusted}
+        {:ok, trusted, []}
       end
     end
 
@@ -416,7 +484,8 @@ if Code.ensure_loaded?(CBOR) do
            opts
          )
          when is_binary(doc_type) and doc_type != "" and is_map(issuer_signed) and is_map(device_signed) do
-      with {:ok, issuer_result} <- verify_issuer_signed(issuer_signed, trusted, opts),
+      with {:ok, issuer_result, {issuer_key, status_trust}} <-
+             verify_issuer_signed(issuer_signed, trusted, Keyword.put(opts, :resolve_status, false)),
            true <- doc_type == issuer_result.doc_type,
            {:ok, device_namespaces_bytes} <- device_namespaces_bytes(device_signed),
            {:ok, device_namespaces} <- decode_device_namespaces(device_namespaces_bytes),
@@ -428,14 +497,16 @@ if Code.ensure_loaded?(CBOR) do
                issuer_result.device_key,
                []
              ),
-           :ok <- check_device_authorizations(device_namespaces, issuer_result.key_authorizations) do
+           :ok <- check_device_authorizations(device_namespaces, issuer_result.key_authorizations),
+           :ok <- check_mso_status(Map.get(issuer_result, :status), issuer_key, Keyword.merge(opts, status_trust)) do
         {:ok,
          %{
            device_namespaces: device_namespaces,
            doc_type: doc_type,
            namespaces: issuer_result.namespaces,
            validity: issuer_result.validity
-         }}
+         }
+         |> maybe_put_verified_status(Map.get(issuer_result, :status))}
       else
         false -> {:error, :unexpected_doc_type}
         {:error, _reason} = error -> error
@@ -603,9 +674,10 @@ if Code.ensure_loaded?(CBOR) do
       validity = opts |> Keyword.fetch!(:validity) |> validate_validity!()
       x5chain = Keyword.get(opts, :x5chain)
       key_authorizations = opts |> Keyword.get(:key_authorizations) |> validate_key_authorizations!()
+      status = opts |> Keyword.get(:status) |> validate_mso_status!()
 
       {issuer_namespaces, value_digests} = build_namespaces(namespaces)
-      mso = build_mso(doc_type, value_digests, device_key, validity, key_authorizations)
+      mso = build_mso(doc_type, value_digests, device_key, validity, key_authorizations, status)
       mso_payload = mso |> embedded_cbor() |> CBOR.encode()
       issuer_auth = issuer_pem |> Cose.sign1(mso_payload, x5chain: x5chain) |> decode_complete!()
 
@@ -698,7 +770,7 @@ if Code.ensure_loaded?(CBOR) do
     defp device_key_info(device_key, key_authorizations),
       do: %{"deviceKey" => device_key, "keyAuthorizations" => key_authorizations}
 
-    defp build_mso(doc_type, value_digests, device_key, validity, key_authorizations) do
+    defp build_mso(doc_type, value_digests, device_key, validity, key_authorizations, status) do
       %{
         "deviceKeyInfo" => device_key_info(device_key, key_authorizations),
         "digestAlgorithm" => @digest_algorithm,
@@ -711,7 +783,42 @@ if Code.ensure_loaded?(CBOR) do
         "valueDigests" => value_digests,
         "version" => "1.0"
       }
+      |> put_optional_mso_status(status)
     end
+
+    defp put_optional_mso_status(mso, nil), do: mso
+    defp put_optional_mso_status(mso, status), do: Map.put(mso, "status", status)
+
+    defp validate_mso_status!(nil), do: nil
+
+    defp validate_mso_status!(status) when is_map(status) do
+      case parse_mso_status(status) do
+        {:ok, parsed} -> encode_mso_status(parsed)
+        {:error, _reason} -> raise ArgumentError, ":status must be a valid status_list or identifier_list map"
+      end
+    end
+
+    defp validate_mso_status!(_other),
+      do: raise(ArgumentError, ":status must be a valid status_list or identifier_list map")
+
+    defp encode_mso_status(%{"status_list" => %{"idx" => idx, "uri" => uri} = ref}) do
+      encoded =
+        %{"idx" => idx, "uri" => uri}
+        |> maybe_put_encoded_bytes("certificate", Map.get(ref, "certificate"))
+
+      %{"status_list" => encoded}
+    end
+
+    defp encode_mso_status(%{"identifier_list" => %{"id" => id, "uri" => uri} = ref}) do
+      encoded =
+        %{"id" => bytes(id), "uri" => uri}
+        |> maybe_put_encoded_bytes("certificate", Map.get(ref, "certificate"))
+
+      %{"identifier_list" => encoded}
+    end
+
+    defp maybe_put_encoded_bytes(map, _key, nil), do: map
+    defp maybe_put_encoded_bytes(map, key, bin) when is_binary(bin), do: Map.put(map, key, bytes(bin))
 
     defp issuer_signed_bytes(input) do
       if base64url?(input) do
@@ -750,21 +857,25 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
-    defp validate_mso(%{
-           "deviceKeyInfo" => %{"deviceKey" => device_key} = device_key_info,
-           "digestAlgorithm" => @digest_algorithm,
-           "docType" => doc_type,
-           "validityInfo" => validity_info,
-           "valueDigests" => value_digests,
-           "version" => "1.0"
-         })
+    defp validate_mso(
+           %{
+             "deviceKeyInfo" => %{"deviceKey" => device_key} = device_key_info,
+             "digestAlgorithm" => @digest_algorithm,
+             "docType" => doc_type,
+             "validityInfo" => validity_info,
+             "valueDigests" => value_digests,
+             "version" => "1.0"
+           } = mso
+         )
          when is_binary(doc_type) and doc_type != "" and is_map(value_digests) do
-      with {:ok, validity} <- parse_validity(validity_info) do
+      with {:ok, validity} <- parse_validity(validity_info),
+           {:ok, status} <- parse_mso_status(Map.get(mso, "status")) do
         {:ok,
          %{
            device_key: device_key,
            doc_type: doc_type,
            key_authorizations: key_authorizations(device_key_info),
+           status: status,
            validity: validity,
            value_digests: value_digests
          }}
@@ -773,6 +884,72 @@ if Code.ensure_loaded?(CBOR) do
 
     defp validate_mso(%{"digestAlgorithm" => _other}), do: {:error, :unsupported_algorithm}
     defp validate_mso(_mso), do: {:error, :invalid_mdoc}
+
+    defp parse_mso_status(nil), do: {:ok, nil}
+
+    defp parse_mso_status(status) when is_map(status) and not is_struct(status) do
+      has_status_list = not is_nil(MapParams.fetch(status, :status_list))
+      has_identifier_list = not is_nil(MapParams.fetch(status, :identifier_list))
+
+      case {has_status_list, has_identifier_list} do
+        {true, false} -> parse_mso_status_list(MapParams.fetch(status, :status_list))
+        {false, true} -> parse_mso_identifier_list(MapParams.fetch(status, :identifier_list))
+        _other -> {:error, :invalid_mdoc}
+      end
+    end
+
+    defp parse_mso_status(_other), do: {:error, :invalid_mdoc}
+
+    defp parse_mso_status_list(ref) when is_map(ref) and not is_struct(ref) do
+      with idx when is_integer(idx) and idx >= 0 <- MapParams.fetch(ref, :idx),
+           uri when is_binary(uri) and uri != "" <- MapParams.fetch(ref, :uri),
+           {:ok, cert} <- parse_optional_mso_cert(MapParams.fetch(ref, :certificate)) do
+        parsed =
+          %{"idx" => idx, "uri" => uri}
+          |> MapParams.put_optional("certificate", cert)
+
+        {:ok, %{"status_list" => parsed}}
+      else
+        _other -> {:error, :invalid_mdoc}
+      end
+    end
+
+    defp parse_mso_status_list(_other), do: {:error, :invalid_mdoc}
+
+    defp parse_mso_identifier_list(ref) when is_map(ref) and not is_struct(ref) do
+      with {:ok, id} <- parse_mso_raw_bytes(MapParams.fetch(ref, :id)),
+           uri when is_binary(uri) and uri != "" <- MapParams.fetch(ref, :uri),
+           {:ok, cert} <- parse_optional_mso_cert(MapParams.fetch(ref, :certificate)) do
+        parsed =
+          %{"id" => id, "uri" => uri}
+          |> MapParams.put_optional("certificate", cert)
+
+        {:ok, %{"identifier_list" => parsed}}
+      else
+        _other -> {:error, :invalid_mdoc}
+      end
+    end
+
+    defp parse_mso_identifier_list(_other), do: {:error, :invalid_mdoc}
+
+    defp parse_optional_mso_cert(nil), do: {:ok, nil}
+
+    defp parse_optional_mso_cert(value) do
+      case parse_mso_raw_bytes(value) do
+        {:ok, cert} ->
+          if byte_size(cert) in 1..X509.max_cert_bytes(), do: {:ok, cert}, else: {:error, :invalid_mdoc}
+
+        _other ->
+          {:error, :invalid_mdoc}
+      end
+    end
+
+    defp parse_mso_raw_bytes(value) when is_binary(value) and value != "", do: {:ok, value}
+
+    defp parse_mso_raw_bytes(%CBOR.Tag{tag: :bytes, value: value}) when is_binary(value) and value != "",
+      do: {:ok, value}
+
+    defp parse_mso_raw_bytes(_other), do: {:error, :invalid_mdoc}
 
     # What the MSO authorizes the device key to sign. Read leniently: a part
     # that is absent or not in the expected shape authorizes nothing, which
@@ -1038,6 +1215,7 @@ else
     def verify_device_response(_device_response, _context, _trusted, _opts \\ []), do: raise(@dep_error)
     def peek_doc_type(_device_response), do: raise(@dep_error)
     def decode_issuer_signed(_input), do: raise(@dep_error)
+    def peek_status(_input), do: raise(@dep_error)
     def extract_x5chain(_input), do: raise(@dep_error)
     def session_transcript(_context), do: raise(@dep_error)
     def device_authentication_bytes(_session_transcript, _doc_type, _device_namespaces), do: raise(@dep_error)

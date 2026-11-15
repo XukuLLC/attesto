@@ -130,5 +130,60 @@ defmodule Attesto.DPoP.ProofTest do
       assert {:error, :unsupported_alg} = Proof.build(ec_key(), "GET", @htu, alg: "none")
       assert {:error, :invalid_kid} = Proof.build(ec_key(), "GET", @htu, kid: nil)
     end
+
+    @htu_vector_path Path.expand("../fixtures/dpop_htu_vectors.json", __DIR__)
+
+    test "verifies shared htu normalization vectors" do
+      key = ec_key()
+      %{"vectors" => vectors} = @htu_vector_path |> File.read!() |> JSON.decode!()
+
+      for vector <- vectors do
+        input = vector["input"]
+        server_expected = vector["server_expected"]
+
+        case vector["core_proof_build"] do
+          "ok" ->
+            assert {:ok, proof} = Proof.build(key, "GET", input, now: @now), input
+            assert {:ok, _} = Proof.build(key, "GET", input, now: @now)
+
+            case vector["core_verify_accepts"] do
+              true ->
+                assert {:ok, _} = DPoP.verify_proof(proof, http_method: "GET", http_uri: server_expected, now: @now),
+                       input
+
+              false ->
+                assert {:error, :invalid_htu} =
+                         DPoP.verify_proof(proof, http_method: "GET", http_uri: server_expected, now: @now),
+                       input
+            end
+
+          "allow_http_ok" ->
+            assert {:error, :invalid_htu} = Proof.build(key, "GET", input, now: @now), input
+            assert {:ok, proof} = Proof.build(key, "GET", input, allow_http: true, now: @now), input
+
+            assert {:error, :invalid_htu} =
+                     DPoP.verify_proof(proof, http_method: "GET", http_uri: server_expected, now: @now),
+                   input
+
+            assert {:ok, _} =
+                     DPoP.verify_proof(proof,
+                       http_method: "GET",
+                       http_uri: server_expected,
+                       allow_http: true,
+                       now: @now
+                     ),
+                   input
+
+          "error" ->
+            assert {:error, :invalid_htu} = Proof.build(key, "GET", input, now: @now), input
+        end
+      end
+
+      req_dpop_vectors = Path.expand("../../../req_dpop/test/fixtures/dpop_htu_vectors.json", __DIR__)
+
+      if File.exists?(req_dpop_vectors) do
+        assert File.read!(req_dpop_vectors) == File.read!(@htu_vector_path)
+      end
+    end
   end
 end

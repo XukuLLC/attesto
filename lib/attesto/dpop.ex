@@ -121,6 +121,7 @@ defmodule Attesto.DPoP do
           | {:max_age_seconds, pos_integer()}
           | {:replay_check, replay_check_fun() | nil}
           | {:nonce_check, nonce_check_fun() | nil}
+          | {:allow_http, boolean()}
         ]
 
   @type verified_proof :: %{
@@ -456,9 +457,10 @@ defmodule Attesto.DPoP do
 
   defp check_htu(%{"htu" => htu}, opts) when is_binary(htu) do
     expected = require_string!(opts, :http_uri)
+    allow_http? = Keyword.get(opts, :allow_http, false) == true
 
-    with {:ok, proof_uri} <- normalize_htu(htu),
-         {:ok, expected_uri} <- normalize_htu(expected) do
+    with {:ok, proof_uri} <- normalize_htu(htu, allow_http?),
+         {:ok, expected_uri} <- normalize_htu(expected, allow_http?) do
       if proof_uri == expected_uri, do: :ok, else: {:error, :invalid_htu}
     end
   end
@@ -466,16 +468,19 @@ defmodule Attesto.DPoP do
   defp check_htu(_claims, _opts), do: {:error, :invalid_htu}
 
   # RFC 9449 §4.3: compare the effective target URI without query/fragment.
-  # URI scheme and host are case-insensitive, and an explicit HTTPS default
-  # port is equivalent to an omitted port.
-  defp normalize_htu(uri) when is_binary(uri) and uri != "" do
+  # URI scheme and host are case-insensitive, and an explicit scheme default
+  # port (443 for https, 80 for http) is equivalent to an omitted port.
+  # HTTP is permitted only when `:allow_http` is explicitly `true` AND the host
+  # is a loopback address (`localhost` / `127.0.0.0/8` / `::1`).
+  defp normalize_htu(uri, allow_http?) when is_binary(uri) and uri != "" do
     with true <- String.valid?(uri),
          {:ok, %Elixir.URI{} = parsed} <- Elixir.URI.new(uri),
-         "https" <- parsed.scheme && String.downcase(parsed.scheme),
+         scheme when scheme in ["https", "http"] <- parsed.scheme && String.downcase(parsed.scheme),
          host when is_binary(host) and host != "" <- parsed.host && String.downcase(parsed.host),
+         true <- scheme == "https" or (allow_http? and Attesto.URI.loopback_host?(host)),
          nil <- parsed.userinfo,
          true <- Attesto.URI.valid_port?(uri, parsed.port) do
-      {:ok, {"https", host, normalize_htu_port(parsed.port), Attesto.URI.normalize_path(parsed.path)}}
+      {:ok, {scheme, host, normalize_htu_port(scheme, parsed.port), Attesto.URI.normalize_path(parsed.path)}}
     else
       _ -> {:error, :invalid_htu}
     end
@@ -483,10 +488,11 @@ defmodule Attesto.DPoP do
     _ -> {:error, :invalid_htu}
   end
 
-  defp normalize_htu(_uri), do: {:error, :invalid_htu}
+  defp normalize_htu(_uri, _allow_http?), do: {:error, :invalid_htu}
 
-  defp normalize_htu_port(443), do: nil
-  defp normalize_htu_port(port), do: port
+  defp normalize_htu_port("https", 443), do: nil
+  defp normalize_htu_port("http", 80), do: nil
+  defp normalize_htu_port(_scheme, port), do: port
 
   # RFC 3986 section 6.2.3: an empty path is equivalent to "/" for an
   # authority-based HTTP URI.

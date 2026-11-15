@@ -608,11 +608,7 @@ defmodule Attesto.RefreshToken.Rotation do
     end
   end
 
-  defp call_store_callback(callback) do
-    {:returned, callback.()}
-  catch
-    kind, value -> {:failed, kind, value, __STACKTRACE__}
-  end
+  defp call_store_callback(callback), do: Attesto.RefreshToken.call_store_callback(callback)
 
   defp retry_window(record, opts) do
     grace = Keyword.fetch!(opts, :rotation_grace_seconds)

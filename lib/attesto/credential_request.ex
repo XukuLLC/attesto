@@ -1,13 +1,13 @@
 defmodule Attesto.CredentialRequest do
   @moduledoc """
-  OID4VCI Credential Request (`draft-ietf-oauth-openid4vci` §8.2).
+  OID4VCI Credential Request (`OpenID4VCI 1.0`, 2025-09-16, §8.2).
 
   Parse and validate the decoded JSON object a wallet posts to a credential
   endpoint. This module is pure and conn-free; proof verification and
   credential issuance are the caller's concern.
   """
 
-  alias Attesto.MapParams
+  alias Attesto.{CredentialEncryption, MapParams}
 
   # Cap the number of proofs a single request may carry. Each proof is
   # cryptographically verified by the caller, so an unbounded `proofs` batch is
@@ -45,7 +45,7 @@ defmodule Attesto.CredentialRequest do
     with {:ok, selector} <- parse_selector(request),
          {:ok, proofs} <- parse_proofs(request),
          :ok <- check_proof_count(proofs, max_proofs),
-         {:ok, response_encryption} <- parse_response_encryption(request) do
+         {:ok, response_encryption} <- CredentialEncryption.parse_response_encryption(request) do
       {:ok,
        %{
          selector: selector,
@@ -177,33 +177,6 @@ defmodule Attesto.CredentialRequest do
 
   defp batch_proof_values(_proof_type, values), do: {:ok, values}
 
-  defp parse_response_encryption(request) do
-    if key_present?(request, :credential_response_encryption) do
-      normalize_response_encryption(MapParams.fetch(request, :credential_response_encryption))
-    else
-      {:ok, nil}
-    end
-  end
-
-  defp normalize_response_encryption(value) when is_map(value) do
-    jwk = MapParams.fetch(value, :jwk)
-    alg = MapParams.fetch(value, :alg)
-    enc = MapParams.fetch(value, :enc)
-
-    if is_map(jwk) and non_empty_string?(alg) and non_empty_string?(enc) do
-      {:ok,
-       %{
-         "jwk" => MapParams.string_keyed_map(jwk),
-         "alg" => alg,
-         "enc" => enc
-       }}
-    else
-      {:error, :invalid_credential_response_encryption}
-    end
-  end
-
-  defp normalize_response_encryption(_value), do: {:error, :invalid_credential_response_encryption}
-
   defp proof_type(value) when is_binary(value) and value != "", do: {:ok, value}
   defp proof_type(_value), do: {:error, :invalid_proof_type}
 
@@ -212,8 +185,6 @@ defmodule Attesto.CredentialRequest do
 
   defp proof_type_sort_key(value) when is_atom(value), do: Atom.to_string(value)
   defp proof_type_sort_key(value), do: value
-
-  defp non_empty_string?(value), do: is_binary(value) and value != ""
 
   defp key_present?(map, key), do: Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
 end

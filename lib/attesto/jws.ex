@@ -488,7 +488,9 @@ defmodule Attesto.JWS do
   # the builtin OTP backend yields `:null`, Jason and Poison yield `nil`. The
   # strict decode always yields `nil`, so every caller sees one representation.
   defp verify_allowed_candidate(candidate, acc, jwt, claims, opts) do
-    case JOSE.JWT.verify_strict(candidate_jwk(candidate), [candidate_alg(candidate)], jwt) do
+    allowed_algs = allowed_verification_algs(candidate, opts)
+
+    case JOSE.JWT.verify_strict(candidate_jwk(candidate), allowed_algs, jwt) do
       {true, %JOSE.JWT{}, %JOSE.JWS{}} ->
         if signature_parameters_valid?(jwt, candidate, opts),
           do: verified_candidate_result(claims, candidate, acc, opts),
@@ -653,18 +655,28 @@ defmodule Attesto.JWS do
 
   defp validate_candidate!(_candidate), do: raise(ArgumentError, "verification candidate must be {kid, alg, jwk}")
 
-  defp candidate_allowed?({_kid, alg, jwk}, opts) do
-    accepted? =
-      case Keyword.fetch(opts, :accepted_algs) do
-        :error -> true
-        {:ok, accepted_algs} when is_list(accepted_algs) -> alg in accepted_algs
-        {:ok, _invalid} -> false
-      end
+  defp candidate_allowed?(candidate, opts), do: allowed_verification_algs(candidate, opts) != []
 
-    fapi? = Keyword.get(opts, :fapi?, false)
+  defp allowed_verification_algs({_kid, alg, jwk}, opts) do
+    if minimum_rsa_strength?(jwk, Keyword.get(opts, :min_rsa_bits)) do
+      fapi? = Keyword.get(opts, :fapi?, false)
 
-    accepted? and (not fapi? or SigningAlg.fapi_compatible?(alg, jwk)) and
-      minimum_rsa_strength?(jwk, Keyword.get(opts, :min_rsa_bits))
+      alg
+      |> SigningAlg.verification_algs(jwk)
+      |> Enum.filter(fn candidate_alg ->
+        alg_accepted?(candidate_alg, opts) and (not fapi? or SigningAlg.fapi_compatible?(candidate_alg, jwk))
+      end)
+    else
+      []
+    end
+  end
+
+  defp alg_accepted?(alg, opts) do
+    case Keyword.fetch(opts, :accepted_algs) do
+      :error -> true
+      {:ok, accepted_algs} when is_list(accepted_algs) -> alg in accepted_algs
+      {:ok, _invalid} -> false
+    end
   end
 
   defp allow_verification_candidate(candidate, opts, :raise), do: candidate_allowed?(candidate, opts)
@@ -714,7 +726,6 @@ defmodule Attesto.JWS do
   defp malformed_verification_result(_acc, :halt, malformed_error), do: {:halt, {:error, malformed_error}}
 
   defp candidate_jwk({_kid, _alg, jwk}), do: jwk
-  defp candidate_alg({_kid, alg, _jwk}), do: alg
 
   defp validate_malformed_key!(mode) when mode in [:reject_set, :skip, :raise], do: :ok
 

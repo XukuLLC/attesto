@@ -1,6 +1,7 @@
 defmodule Attesto.ClientAssertion do
   @moduledoc """
-  `private_key_jwt` client authentication verification (RFC 7523 / OIDC Core).
+  `private_key_jwt` client authentication verification (RFC 7523, as updated by
+  RFC 10070, and OIDC Core).
 
   The host owns client registration and key storage. This module only verifies
   a compact client assertion against trusted client JWKs supplied by the host
@@ -164,9 +165,9 @@ defmodule Attesto.ClientAssertion do
       else: :ok
   end
 
-  # FAPI 2 requires a single-valued string `aud`. An array audience is
-  # rejected even when it contains an accepted value, and the string must
-  # match one of the expected audiences exactly.
+  # FAPI 2.0 (§5.3.2.1) requires a scalar string `aud`, and RFC 10070 §4
+  # requires the AS issuer identifier as the sole audience value. Array
+  # audiences — including one-element arrays — are rejected via `:scalar_only`.
   defp check_audience(%{"aud" => aud}, expected) do
     if Claims.audience_matches?(aud, expected, :scalar_only),
       do: :ok,

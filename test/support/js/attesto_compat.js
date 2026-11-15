@@ -85,7 +85,7 @@ async function verifySdJwtVc(
     disableStatusVerification: true,
   });
 
-  if (!verified.header || !["vc+sd-jwt", "dc+sd-jwt"].includes(verified.header.typ))
+  if (!verified.header || verified.header.typ !== "dc+sd-jwt")
     throw new Error("unexpected SD-JWT VC typ");
   if (verified.header.alg !== "ES256")
     throw new Error("unexpected SD-JWT VC algorithm");

@@ -74,11 +74,11 @@ defmodule Attesto.Keystore do
   Optional per-key JOSE algorithm metadata, keyed by RFC 7638 `kid`.
 
   When omitted, Attesto infers an algorithm from the public key type and curve:
-  RSA -> RS256, P-256 -> ES256, P-384 -> ES384, P-521 -> ES512, and
-  Ed25519/Ed448 -> legacy EdDSA. Use this callback to label RSA keys that
-  should verify as PS256, select RFC 9864 `Ed25519` / `Ed448` for the matching
-  curve, or make a rotation window explicit. Ed448 deployments must configure
-  JOSE with Curve448 and SHAKE256 support.
+  RSA -> RS256, P-256 -> ES256, P-384 -> ES384, P-521 -> ES512,
+  Ed25519 -> Ed25519, and Ed448 -> Ed448 (RFC 9864). Use this callback to
+  label RSA keys that should verify as PS256, opt into legacy `EdDSA` during
+  a migration window, or make a rotation window explicit. Ed448 deployments
+  must configure JOSE with Curve448 and SHAKE256 support.
   """
   @callback key_algs() :: %{String.t() => String.t()} | keyword(String.t())
 

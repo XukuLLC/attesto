@@ -19,7 +19,7 @@ defmodule Attesto.CredentialIssuerMetadata do
 
   alias Attesto.{JWS, Key, MapParams, SigningAlg}
 
-  @sd_jwt_vc_formats ["vc+sd-jwt", "dc+sd-jwt"]
+  @sd_jwt_vc_formats ["dc+sd-jwt"]
 
   # OID4VCI §12.2.3: the JOSE `typ` of the signed credential issuer metadata JWT.
   @signed_metadata_typ "openidvci-issuer-metadata+jwt"
@@ -36,14 +36,15 @@ defmodule Attesto.CredentialIssuerMetadata do
 
   Optional options are `:authorization_servers`, `:nonce_endpoint`,
   `:deferred_credential_endpoint`, `:notification_endpoint`,
-  `:credential_response_encryption`, `:batch_credential_issuance`, and
-  `:display`. Each is included only when supplied with a non-`nil` value.
+  `:credential_request_encryption`, `:credential_response_encryption`,
+  `:batch_credential_issuance`, and `:display`. Each is included only when
+  supplied with a non-`nil` value.
 
   Configuration maps are normalized to the supported OID4VCI members and
   their nil values are omitted. A `format` is required for every
-  configuration. `vct` is additionally required for `vc+sd-jwt` and
-  `dc+sd-jwt` configurations. `mso_mdoc` requires a non-empty `doctype` and
-  uses integer COSE identifiers for `credential_signing_alg_values_supported`;
+  configuration. `vct` is additionally required for `dc+sd-jwt` configurations
+  (`draft-ietf-oauth-sd-jwt-vc-26`). `mso_mdoc` requires a non-empty `doctype`
+  and uses integer COSE identifiers for `credential_signing_alg_values_supported`;
   JWT credential formats use string JOSE algorithm names.
 
   Current display and ordered claims descriptions belong in the optional
@@ -77,6 +78,11 @@ defmodule Attesto.CredentialIssuerMetadata do
       "notification_endpoint",
       Keyword.get(opts, :notification_endpoint),
       &MapParams.optional_string!/2
+    )
+    |> MapParams.put_optional(
+      "credential_request_encryption",
+      Keyword.get(opts, :credential_request_encryption),
+      &normalize_request_encryption!/2
     )
     |> MapParams.put_optional(
       "credential_response_encryption",
@@ -288,6 +294,108 @@ defmodule Attesto.CredentialIssuerMetadata do
           "Attesto.CredentialIssuerMetadata :#{key} must be a list of maps; got #{inspect(value)}"
   end
 
+  defp normalize_request_encryption!(value, key) when is_map(value) and not is_struct(value) do
+    jwks = normalize_encryption_jwks!(MapParams.fetch(value, :jwks), key)
+
+    enc_values_supported =
+      required_non_empty_string_list!(MapParams.fetch(value, :enc_values_supported), key, :enc_values_supported)
+
+    encryption_required = required_boolean!(MapParams.fetch(value, :encryption_required), key, :encryption_required)
+
+    %{
+      "jwks" => jwks,
+      "enc_values_supported" => enc_values_supported,
+      "encryption_required" => encryption_required
+    }
+    |> MapParams.put_optional(
+      "zip_values_supported",
+      MapParams.fetch(value, :zip_values_supported),
+      &MapParams.string_list!/2
+    )
+  end
+
+  defp normalize_request_encryption!(value, key) do
+    raise ArgumentError,
+          "Attesto.CredentialIssuerMetadata :#{key} must be a map; got #{inspect(value)}"
+  end
+
+  defp normalize_encryption_jwks!(jwks, key) when is_map(jwks) and not is_struct(jwks) do
+    keys =
+      case MapParams.fetch(jwks, :keys) do
+        list when is_list(list) and list != [] ->
+          normalize_encryption_jwk_list!(list, key)
+
+        other ->
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{key}.jwks.keys must be a non-empty list; got #{inspect(other)}"
+      end
+
+    MapParams.string_keyed_map(jwks)
+    |> Map.put("keys", keys)
+  end
+
+  defp normalize_encryption_jwks!(jwks, key) do
+    raise ArgumentError,
+          "Attesto.CredentialIssuerMetadata :#{key}.jwks must be a map; got #{inspect(jwks)}"
+  end
+
+  defp normalize_encryption_jwk_list!(keys, metadata_key) do
+    {normalized, _kids} =
+      Enum.map_reduce(keys, MapSet.new(), fn item, seen_kids ->
+        if not (is_map(item) and not is_struct(item)) do
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{metadata_key}.jwks.keys entries must be maps; got #{inspect(item)}"
+        end
+
+        jwk = MapParams.string_keyed_map(item)
+
+        if Key.private_members?(jwk) do
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{metadata_key}.jwks.keys must contain public keys only"
+        end
+
+        kty = Map.get(jwk, "kty")
+        kid = Map.get(jwk, "kid")
+
+        if not (is_binary(kty) and kty != "") do
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{metadata_key}.jwks.keys entry requires a non-empty \"kty\""
+        end
+
+        if not (is_binary(kid) and kid != "") do
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{metadata_key}.jwks.keys entry requires a non-empty \"kid\""
+        end
+
+        if MapSet.member?(seen_kids, kid) do
+          raise ArgumentError,
+                "Attesto.CredentialIssuerMetadata :#{metadata_key}.jwks.keys contains duplicate \"kid\" #{inspect(kid)}"
+        end
+
+        {jwk, MapSet.put(seen_kids, kid)}
+      end)
+
+    normalized
+  end
+
+  defp required_non_empty_string_list!(value, metadata_key, field) do
+    list = MapParams.string_list!(value, :"#{metadata_key}.#{field}")
+
+    if list == [] do
+      raise ArgumentError,
+            "Attesto.CredentialIssuerMetadata :#{metadata_key}.#{field} must be a non-empty list of strings"
+    end
+
+    list
+  end
+
+  defp required_boolean!(value, _metadata_key, _field) when is_boolean(value), do: value
+
+  defp required_boolean!(value, metadata_key, field) do
+    raise ArgumentError,
+          "Attesto.CredentialIssuerMetadata :#{metadata_key}.#{field} must be a boolean; got #{inspect(value)}"
+  end
+
   defp normalize_response_encryption!(value, _key) when is_map(value) do
     alg_values_supported = MapParams.fetch(value, :alg_values_supported)
 
@@ -296,6 +404,11 @@ defmodule Attesto.CredentialIssuerMetadata do
     |> MapParams.put_optional(
       "enc_values_supported",
       MapParams.fetch(value, :enc_values_supported),
+      &MapParams.string_list!/2
+    )
+    |> MapParams.put_optional(
+      "zip_values_supported",
+      MapParams.fetch(value, :zip_values_supported),
       &MapParams.string_list!/2
     )
     |> MapParams.put_optional(

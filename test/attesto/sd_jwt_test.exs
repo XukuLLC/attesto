@@ -61,7 +61,7 @@ defmodule Attesto.SdJwtTest do
           %{"iss" => "https://issuer.example", "vct" => "demo", "given_name" => "Alice", "family_name" => "Example"},
           pem: pem,
           disclosable: ["given_name", "family_name"],
-          typ: "vc+sd-jwt"
+          typ: "dc+sd-jwt"
         )
 
       assert {:ok, %{claims: claims}} = SdJwt.verify(issuance, jwk)
@@ -590,7 +590,7 @@ defmodule Attesto.SdJwtTest do
         jwt =
           Attesto.JWS.sign_compact(
             issuer_pem,
-            %{"alg" => "ES256", "typ" => "vc+sd-jwt"},
+            %{"alg" => "ES256", "typ" => "dc+sd-jwt"},
             %{"iss" => "https://issuer.example", "_sd_alg" => "sha-256", "_sd" => [digest]}
           )
 

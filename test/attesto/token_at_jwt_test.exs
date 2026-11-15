@@ -91,7 +91,7 @@ defmodule Attesto.TokenAtJwtTest do
       test "#{alg} mint, verify, and signed-claims inspection agree" do
         alg = unquote(alg)
         pem = signing_pem(unquote(Macro.escape(key)))
-        config_opts = if alg in ["PS256", "Ed25519"], do: [signing_alg: alg], else: []
+        config_opts = if alg in ["PS256", "EdDSA"], do: [signing_alg: alg], else: []
         config = Factory.config(pem, config_opts)
 
         assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
@@ -112,7 +112,7 @@ defmodule Attesto.TokenAtJwtTest do
       pem = Factory.ed448_pem()
 
       for alg <- ["EdDSA", "Ed448"] do
-        config_opts = if alg == "Ed448", do: [signing_alg: alg], else: []
+        config_opts = if alg == "EdDSA", do: [signing_alg: alg], else: []
         config = Factory.config(pem, config_opts)
 
         assert {:ok, %{access_token: jwt}} = Token.mint(config, client_principal())
@@ -137,6 +137,38 @@ defmodule Attesto.TokenAtJwtTest do
 
       assert {:error, :invalid_signature} = Token.verify(ps256_config, jwt)
       assert {:error, :invalid_signature} = Token.peek_signed_claims(ps256_config, jwt)
+    end
+
+    test "an Ed25519 token signed as legacy EdDSA verifies under the default Ed25519 keystore policy" do
+      pem = Factory.ed_pem()
+      legacy_config = Factory.config(pem, signing_alg: "EdDSA")
+      assert {:ok, %{access_token: legacy_jwt}} = Token.mint(legacy_config, client_principal())
+      assert protected_header(legacy_jwt)["alg"] == "EdDSA"
+
+      upgraded_config = Factory.config(pem)
+      assert {:ok, _claims} = Token.verify(upgraded_config, legacy_jwt)
+      assert {:ok, _claims} = Token.peek_signed_claims(upgraded_config, legacy_jwt)
+
+      assert {:ok, %{access_token: explicit_jwt}} = Token.mint(upgraded_config, client_principal())
+      assert protected_header(explicit_jwt)["alg"] == "Ed25519"
+      reverted_config = Factory.config(pem, signing_alg: "EdDSA")
+      assert {:ok, _claims} = Token.verify(reverted_config, explicit_jwt)
+    end
+
+    test "an Ed448 token signed as legacy EdDSA verifies under the default Ed448 keystore policy" do
+      enable_ed448_support()
+      pem = Factory.ed448_pem()
+      legacy_config = Factory.config(pem, signing_alg: "EdDSA")
+      assert {:ok, %{access_token: legacy_jwt}} = Token.mint(legacy_config, client_principal())
+      assert protected_header(legacy_jwt)["alg"] == "EdDSA"
+
+      upgraded_config = Factory.config(pem)
+      assert {:ok, _claims} = Token.verify(upgraded_config, legacy_jwt)
+
+      assert {:ok, %{access_token: explicit_jwt}} = Token.mint(upgraded_config, client_principal())
+      assert protected_header(explicit_jwt)["alg"] == "Ed448"
+      reverted_config = Factory.config(pem, signing_alg: "EdDSA")
+      assert {:ok, _claims} = Token.verify(reverted_config, explicit_jwt)
     end
   end
 

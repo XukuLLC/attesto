@@ -1,0 +1,185 @@
+{
+  "description": "Shared RFC 9449 DPoP htu normalization parity vectors read by both attesto core and req_dpop.",
+  "vectors": [
+    {
+      "input": "https://API.Example/a",
+      "req_dpop_normalized": "https://api.example/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/a",
+      "core_verify_accepts": true,
+      "notes": "Host and scheme case-folding; core verify normalizes both sides."
+    },
+    {
+      "input": "HTTPS://API.Example.com/r",
+      "req_dpop_normalized": "https://api.example.com/r",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example.com/r",
+      "core_verify_accepts": true,
+      "notes": "Mixed-case scheme and host."
+    },
+    {
+      "input": "https://api.example:443/a",
+      "req_dpop_normalized": "https://api.example/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/a",
+      "core_verify_accepts": true,
+      "notes": "Default HTTPS port stripped."
+    },
+    {
+      "input": "https://api.example:8443/a",
+      "req_dpop_normalized": "https://api.example:8443/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example:8443/a",
+      "core_verify_accepts": true,
+      "notes": "Non-default port preserved."
+    },
+    {
+      "input": "https://api.example",
+      "req_dpop_normalized": "https://api.example/",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/",
+      "core_verify_accepts": true,
+      "notes": "Empty path normalized to /."
+    },
+    {
+      "input": "https://api.example/a?x=1#frag",
+      "req_dpop_normalized": "https://api.example/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/a",
+      "core_verify_accepts": true,
+      "notes": "Query and fragment excluded per RFC 9449 §4.2."
+    },
+    {
+      "input": "https://[::1]:8443/a",
+      "req_dpop_normalized": "https://[::1]:8443/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://[::1]:8443/a",
+      "core_verify_accepts": true,
+      "notes": "IPv6 literal preserved."
+    },
+    {
+      "input": "https://api.example/caf%E9",
+      "req_dpop_normalized": "https://api.example/caf%E9",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/caf%E9",
+      "core_verify_accepts": true,
+      "notes": "Valid uppercase/hex percent-encoding kept verbatim."
+    },
+    {
+      "input": "https://user:pw@api.example/a",
+      "req_dpop_normalized": "https://api.example/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "error",
+      "server_expected": "https://api.example/a",
+      "core_verify_accepts": true,
+      "notes": "ReqDPoP strips userinfo; Attesto Proof.build refuses userinfo."
+    },
+    {
+      "input": "https://api.example/a%zz",
+      "req_dpop_normalized": "https://api.example/a%zz",
+      "req_dpop_valid": true,
+      "core_proof_build": "error",
+      "server_expected": "https://api.example/a%zz",
+      "core_verify_accepts": true,
+      "notes": "Attesto Proof.build rejects invalid percent escape %zz."
+    },
+    {
+      "input": "https://api.example./a",
+      "req_dpop_normalized": "https://api.example./a",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/a",
+      "core_verify_accepts": false,
+      "notes": "Trailing root dot does not match canonical host."
+    },
+    {
+      "input": "https://api.example/a%2fb",
+      "req_dpop_normalized": "https://api.example/a%2fb",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/a%2Fb",
+      "core_verify_accepts": false,
+      "notes": "Case-sensitive path percent-encoding mismatch rejected by server."
+    },
+    {
+      "input": "https://api.example/a/../b",
+      "req_dpop_normalized": "https://api.example/a/../b",
+      "req_dpop_valid": true,
+      "core_proof_build": "ok",
+      "server_expected": "https://api.example/b",
+      "core_verify_accepts": false,
+      "notes": "Dot-segment path kept verbatim by client and rejected by server."
+    },
+    {
+      "input": "https://api.example/café",
+      "req_dpop_normalized": "https://api.example/café",
+      "req_dpop_valid": true,
+      "core_proof_build": "error",
+      "server_expected": "https://api.example/café",
+      "core_verify_accepts": false,
+      "notes": "Raw non-ASCII UTF-8 rejected by Attesto URI validation."
+    },
+    {
+      "input": "http://api.example/a",
+      "req_dpop_normalized": "http://api.example/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "error",
+      "server_expected": "http://api.example/a",
+      "core_verify_accepts": false,
+      "notes": "Non-loopback HTTP accepted by ReqDPoP normalize_htu, refused by Attesto core."
+    },
+    {
+      "input": "http://localhost:8080/a?x=1",
+      "req_dpop_normalized": "http://localhost:8080/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "allow_http_ok",
+      "server_expected": "http://localhost:8080/a",
+      "core_verify_accepts": "allow_http",
+      "notes": "Loopback HTTP permitted on Attesto only with allow_http: true."
+    },
+    {
+      "input": "http://127.0.0.1:80/a",
+      "req_dpop_normalized": "http://127.0.0.1/a",
+      "req_dpop_valid": true,
+      "core_proof_build": "allow_http_ok",
+      "server_expected": "http://127.0.0.1/a",
+      "core_verify_accepts": "allow_http",
+      "notes": "Default HTTP port 80 stripped; loopback HTTP permitted with allow_http: true."
+    },
+    {
+      "input": "/relative",
+      "req_dpop_normalized": null,
+      "req_dpop_valid": false,
+      "core_proof_build": "error",
+      "server_expected": "/relative",
+      "core_verify_accepts": false,
+      "notes": "Relative URI refused everywhere."
+    },
+    {
+      "input": "ftp://api.example/a",
+      "req_dpop_normalized": null,
+      "req_dpop_valid": false,
+      "core_proof_build": "error",
+      "server_expected": "ftp://api.example/a",
+      "core_verify_accepts": false,
+      "notes": "Non-HTTP scheme refused everywhere."
+    },
+    {
+      "input": "https:///a",
+      "req_dpop_normalized": null,
+      "req_dpop_valid": false,
+      "core_proof_build": "error",
+      "server_expected": "https:///a",
+      "core_verify_accepts": false,
+      "notes": "Empty host refused everywhere."
+    }
+  ]
+}

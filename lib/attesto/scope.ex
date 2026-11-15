@@ -58,24 +58,35 @@ defmodule Attesto.Scope do
   @full_wildcard "*"
 
   @enforce_keys [:entries, :resources]
-  defstruct entries: MapSet.new(), resources: MapSet.new()
+  defstruct entries: MapSet.new(), resources: MapSet.new(), hierarchy: %{}
 
-  @type t :: %__MODULE__{entries: MapSet.t(String.t()), resources: MapSet.t(String.t())}
+  @type t :: %__MODULE__{
+          entries: MapSet.t(String.t()),
+          resources: MapSet.t(String.t()),
+          hierarchy: %{optional(String.t()) => MapSet.t(String.t())}
+        }
 
   @doc """
   Build a catalog from the list of concrete scope strings your API
   understands. Computes the distinct resources (left-of-dot segments)
   once so per-request matching is allocation-light.
+
+  Options:
+
+    * `:hierarchy` - an optional map of `broader_scope => [narrower_scopes]`
+      describing scope implication (for example `%{"mcp:admin" => ["mcp:tools:read"]}`).
+      Implication is closed transitively in a cycle-safe manner.
   """
-  @spec new_catalog([String.t()]) :: t()
-  def new_catalog(scopes) when is_list(scopes) do
+  @spec new_catalog([String.t()], keyword()) :: t()
+  def new_catalog(scopes, opts \\ []) when is_list(scopes) and is_list(opts) do
+    hierarchy = opts |> Keyword.get(:hierarchy, %{}) |> build_hierarchy!()
     entries = MapSet.new(scopes)
 
     resources =
       scopes
       |> MapSet.new(&(&1 |> String.split(".", parts: 2) |> hd()))
 
-    %__MODULE__{entries: entries, resources: resources}
+    %__MODULE__{entries: entries, resources: resources, hierarchy: hierarchy}
   end
 
   @doc "The concrete scope strings in the catalog, sorted."
@@ -271,9 +282,15 @@ defmodule Attesto.Scope do
   defp classify_granted(_catalog, @full_wildcard, acc), do: %{acc | full?: true}
 
   defp classify_granted(catalog, scope, acc) do
-    case parse_resource_wildcard(catalog, scope) do
-      {:ok, resource} -> %{acc | resources: MapSet.put(acc.resources, resource)}
-      :error -> %{acc | exact: MapSet.put(acc.exact, scope)}
+    acc =
+      case parse_resource_wildcard(catalog, scope) do
+        {:ok, resource} -> %{acc | resources: MapSet.put(acc.resources, resource)}
+        :error -> %{acc | exact: MapSet.put(acc.exact, scope)}
+      end
+
+    case Map.fetch(catalog.hierarchy, scope) do
+      {:ok, implied} -> %{acc | exact: MapSet.union(acc.exact, implied)}
+      :error -> acc
     end
   end
 
@@ -297,11 +314,57 @@ defmodule Attesto.Scope do
         scope_resource(required) == resource and known?(catalog, required)
 
       :error ->
-        granted == required and known?(catalog, required)
+        (granted == required or implied_by_hierarchy?(catalog, granted, required)) and known?(catalog, required)
     end
   end
 
   defp covers?(_catalog, _, _), do: false
+
+  defp implied_by_hierarchy?(%__MODULE__{hierarchy: hierarchy}, granted, required) do
+    case Map.fetch(hierarchy, granted) do
+      {:ok, implied} -> MapSet.member?(implied, required)
+      :error -> false
+    end
+  end
+
+  defp build_hierarchy!(hierarchy) when is_map(hierarchy) do
+    Enum.each(hierarchy, fn
+      {broad, narrow_list} ->
+        if not valid_token?(broad) or not valid_list?(narrow_list, allow_empty?: false) do
+          raise ArgumentError,
+                "Attesto.Scope :hierarchy must map valid scope tokens to non-empty lists of valid scope tokens"
+        end
+
+      _other ->
+        raise ArgumentError, "Attesto.Scope :hierarchy entries must be {broad_scope, narrower_scopes}"
+    end)
+
+    Map.new(hierarchy, fn {broad, _narrow} ->
+      {broad, transitive_narrow(broad, hierarchy)}
+    end)
+  end
+
+  defp build_hierarchy!(other) do
+    raise ArgumentError, "Attesto.Scope :hierarchy must be a map; got #{inspect(other)}"
+  end
+
+  defp transitive_narrow(root, hierarchy) do
+    MapSet.new(do_transitive_narrow(Map.get(hierarchy, root, []), hierarchy, MapSet.new([root]), []))
+  end
+
+  defp do_transitive_narrow([], _hierarchy, _visited, acc), do: acc
+
+  defp do_transitive_narrow([scope | rest], hierarchy, visited, acc) do
+    acc = [scope | acc]
+
+    if MapSet.member?(visited, scope) do
+      do_transitive_narrow(rest, hierarchy, visited, acc)
+    else
+      visited = MapSet.put(visited, scope)
+      next = Map.get(hierarchy, scope, []) ++ rest
+      do_transitive_narrow(next, hierarchy, visited, acc)
+    end
+  end
 
   # Parses a resource-level wildcard `<resource>.*` strictly: exactly two
   # segments, the second being `*` and the first a non-empty resource that

@@ -223,9 +223,13 @@ defmodule Attesto.Key do
 
   defp validate_jwk_alg(jwk_map, alg) do
     case Map.fetch(jwk_map, "alg") do
-      :error -> :ok
-      {:ok, ^alg} -> :ok
-      {:ok, _other} -> {:error, :alg_mismatch}
+      :error ->
+        :ok
+
+      {:ok, jwk_alg} ->
+        if Attesto.SigningAlg.equivalent_okp_algs?(jwk_alg, alg, jwk_map),
+          do: :ok,
+          else: {:error, :alg_mismatch}
     end
   end
 

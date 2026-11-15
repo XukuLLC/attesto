@@ -271,15 +271,7 @@ defmodule Attesto.RequestObject do
   defp check_issuer(%{"iss" => iss}, iss), do: :ok
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  defp check_audience(_claims, nil), do: {:error, :invalid_audience}
-
-  defp check_audience(%{"aud" => aud}, expected) do
-    if Claims.audience_matches?(aud, expected, :array),
-      do: :ok,
-      else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
+  defp check_audience(claims, expected), do: Claims.check_audience(claims, expected, :array)
 
   defp check_resource_claim(%{"resource" => resource}) when is_binary(resource), do: :ok
 

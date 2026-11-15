@@ -1,6 +1,6 @@
 defmodule Attesto.CredentialOffer do
   @moduledoc """
-  OID4VCI Credential Offer (`draft-ietf-oauth-openid4vci` §4.1).
+  OID4VCI Credential Offer (`OpenID4VCI 1.0`, 2025-09-16, §4.1).
 
   Build the string-keyed Credential Offer object and its by-value or
   by-reference `openid-credential-offer://` deep-link forms. This module is

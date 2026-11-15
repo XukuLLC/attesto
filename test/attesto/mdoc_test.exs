@@ -479,6 +479,34 @@ defmodule Attesto.MdocTest do
       |> Keyword.merge(overrides)
     end
 
+    test "an invalid device signature never fetches an MSO status list", ctx do
+      {issuer_pem, issuer_public} = keypair()
+      holder_public = ctx.holder_pem |> JOSE.JWK.from_pem() |> JOSE.JWK.to_public_map() |> elem(1)
+
+      {:ok, issued} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, holder_public, ctx.now,
+            status: Attesto.StatusList.reference("https://issuer.example/status", 0)
+          )
+        )
+
+      issuer_signed = issued |> Base.url_decode64!(padding: false) |> decode!()
+      {wrong_pem, _} = keypair()
+      invalid = build_device_response(%{ctx | issuer_signed: issuer_signed, holder_pem: wrong_pem})
+      caller = self()
+
+      assert {:error, :invalid_signature} =
+               Mdoc.verify_device_response(invalid, context(ctx), issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn _, _ ->
+                   send(caller, :status_fetched)
+                   {:error, :unreachable}
+                 end
+               )
+
+      refute_received :status_fetched
+    end
+
     test "verifies a valid presentation and returns doc_type, disclosed elements, and device namespaces", ctx do
       device_response = build_device_response(ctx, device_namespaces: %{@mdl_namespace => %{"age_over_21" => true}})
 
@@ -912,6 +940,67 @@ defmodule Attesto.MdocTest do
       bad_ns = Base.url_encode64(CBOR.encode(Map.put(ctx.issuer_signed, "nameSpaces", [])), padding: false)
       assert {:error, :invalid_mdoc} = Mdoc.verify(bad_ns, ctx.issuer_public, now: ctx.now)
     end
+
+    test "verifies MSO status_list and identifier_list CWT revocation references and fails closed", ctx do
+      {issuer_pem, issuer_public} = keypair()
+      uri = "https://issuer.example.test/status/mdoc"
+      cwt_valid = Attesto.StatusList.issue_cwt(issuer_pem, uri, [0, 1], now: ctx.now)
+      cwt_id_list = Attesto.StatusList.issue_identifier_list_cwt(issuer_pem, uri, [<<0xDE, 0xAD>>], now: ctx.now)
+
+      {:ok, valid_sl_mdoc} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, ctx.holder_public, ctx.now, status: %{"status_list" => %{"idx" => 0, "uri" => uri}})
+        )
+
+      {:ok, revoked_sl_mdoc} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, ctx.holder_public, ctx.now, status: %{"status_list" => %{"idx" => 1, "uri" => uri}})
+        )
+
+      assert {:ok, %{status: %{"status_list" => %{"idx" => 0, "uri" => ^uri}}}} =
+               Mdoc.verify(valid_sl_mdoc, issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn ^uri, "application/statuslist+cwt" -> {:ok, cwt_valid} end
+               )
+
+      assert {:error, :credential_revoked} =
+               Mdoc.verify(revoked_sl_mdoc, issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn ^uri, "application/statuslist+cwt" -> {:ok, cwt_valid} end
+               )
+
+      assert {:error, :network_error} =
+               Mdoc.verify(valid_sl_mdoc, issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn _uri, _accept -> {:error, :network_error} end
+               )
+
+      {:ok, valid_id_mdoc} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, ctx.holder_public, ctx.now,
+            status: %{"identifier_list" => %{"id" => <<0xCA, 0xFE>>, "uri" => uri}}
+          )
+        )
+
+      {:ok, revoked_id_mdoc} =
+        Mdoc.issue(
+          issue_opts(issuer_pem, ctx.holder_public, ctx.now,
+            status: %{"identifier_list" => %{"id" => <<0xDE, 0xAD>>, "uri" => uri}}
+          )
+        )
+
+      assert {:ok, %{status: %{"identifier_list" => %{"id" => <<0xCA, 0xFE>>, "uri" => ^uri}}}} =
+               Mdoc.verify(valid_id_mdoc, issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn ^uri, "application/identifierlist+cwt" -> {:ok, cwt_id_list} end
+               )
+
+      assert {:error, :credential_revoked} =
+               Mdoc.verify(revoked_id_mdoc, issuer_public,
+                 now: ctx.now,
+                 resolve_status: fn ^uri, "application/identifierlist+cwt" -> {:ok, cwt_id_list} end
+               )
+    end
   end
 
   test "rejects a DeviceResponse in which a map repeats a key" do
@@ -966,5 +1055,42 @@ defmodule Attesto.MdocTest do
 
     no_ns = CBOR.encode(%{"issuerAuth" => {[], <<>>, %{}, <<>>}})
     assert {:ok, %{"issuerAuth" => _}} = Mdoc.decode_issuer_signed(no_ns)
+  end
+
+  test "an MSO list signer without an explicit reference certificate must chain to the credential's IACA", ctx do
+    root = X509Fixture.root()
+    other_root = X509Fixture.root()
+    issuer = X509Fixture.chain(root, peer: [extensions: [X509Fixture.signer_usage()]])
+    list_signer = X509Fixture.chain(root)
+    unrelated = X509Fixture.chain(other_root)
+    pem = issuer.key |> JOSE.JWK.to_pem() |> elem(1)
+    uri = "https://issuer.example/status"
+
+    {:ok, credential} =
+      Mdoc.issue(
+        issue_opts(pem, ctx.holder_public, ctx.now, x5chain: issuer.chain, status: Attesto.StatusList.reference(uri, 0))
+      )
+
+    for {signer, accepted} <- [{list_signer, true}, {unrelated, false}] do
+      signing_pem = signer.key |> JOSE.JWK.to_pem() |> elem(1)
+      token = Attesto.StatusList.issue_cwt(signing_pem, uri, [0], now: ctx.now, x5chain: signer.chain)
+
+      result =
+        Mdoc.verify(credential, nil,
+          trusted_certificates: [other_root.cert, root.cert],
+          now: ctx.now,
+          resolve_status: fn ^uri, "application/statuslist+cwt" -> {:ok, token} end
+        )
+
+      if accepted, do: assert({:ok, _} = result), else: assert({:error, :untrusted_certificate} = result)
+    end
+  end
+
+  test "mdoc status references use the default fetcher unless offline inspection is explicit", ctx do
+    {:ok, credential} =
+      Mdoc.issue(Keyword.put(ctx.opts, :status, Attesto.StatusList.reference("https://127.0.0.1/list", 0)))
+
+    assert {:error, {:blocked_ip, _}} = Mdoc.verify(credential, ctx.issuer_public)
+    assert {:ok, _} = Mdoc.verify(credential, ctx.issuer_public, resolve_status: false)
   end
 end

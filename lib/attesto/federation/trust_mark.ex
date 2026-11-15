@@ -1,6 +1,6 @@
 defmodule Attesto.Federation.TrustMark do
   @moduledoc """
-  Verify an OpenID Federation 1.0 Trust Mark JWT.
+  Verify an OpenID Federation 1.0 Final (2026-02-17) Trust Mark JWT.
 
   `Attesto.Federation.EntityStatement`'s `trust_marks` handling only checks
   that each entry is *shaped* correctly (non-empty `trust_mark_type` and
@@ -19,7 +19,8 @@ defmodule Attesto.Federation.TrustMark do
   Conn-free and fail-closed, like the rest of attesto core.
   """
 
-  alias Attesto.{JWS, NumericDate, SigningAlg}
+  alias Attesto.Federation.EntityStatement
+  alias Attesto.{JWS, NumericDate}
 
   @typ "trust-mark+jwt"
   @max_trust_mark_bytes 64 * 1_024
@@ -90,29 +91,13 @@ defmodule Attesto.Federation.TrustMark do
   defp check_typ(%{"typ" => @typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
-  defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
-    accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
-
-    if alg != "none" and alg in SigningAlg.allowed() and is_list(accepted_algs) and alg in accepted_algs,
-      do: :ok,
-      else: {:error, :invalid_alg}
-  end
-
-  defp check_alg(_header, _opts), do: {:error, :invalid_alg}
+  defp check_alg(header, opts), do: EntityStatement.check_alg(header, opts)
 
   defp check_kid(%{"kid" => kid}) when is_binary(kid) and kid != "", do: :ok
   defp check_kid(_header), do: {:error, :invalid_trust_mark}
 
-  defp verify_signature(jwt, header, jwks, opts) do
-    JWS.verify_trusted(jwt, header, jwks,
-      accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
-      malformed_key: :reject_set,
-      terminal_error: :invalid_signature,
-      malformed_result: :halt,
-      malformed_error: :invalid_trust_mark,
-      claims_map?: true
-    )
-  end
+  defp verify_signature(jwt, header, jwks, opts),
+    do: EntityStatement.verify_signed_jwt(jwt, header, jwks, opts, :invalid_trust_mark)
 
   defp validate_claims(claims, opts) do
     with :ok <- validate_required_claims(claims),

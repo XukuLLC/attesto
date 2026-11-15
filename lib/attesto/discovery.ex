@@ -66,6 +66,7 @@ defmodule Attesto.Discovery do
     require_signed_request_object
     request_object_signing_alg_values_supported
     client_id_metadata_document_supported
+    identity_chaining_requested_token_types_supported
     service_documentation
     ui_locales_supported
   )a
@@ -89,9 +90,13 @@ defmodule Attesto.Discovery do
       `:require_pushed_authorization_requests` - the PAR endpoint URL and
       whether the server mandates PAR; included only if given.
     * `:client_id_metadata_document_supported`
-      (`draft-ietf-oauth-client-id-metadata-document-02` §6) - a boolean
+      (`draft-ietf-oauth-client-id-metadata-document-03` §8) - a boolean
       advertising whether the server dereferences an HTTPS `client_id` URL to a
       client metadata document; included only if given.
+    * `:identity_chaining_requested_token_types_supported`
+      (`draft-ietf-oauth-identity-chaining-17` §3, RFC 10092) - a list of
+      requested token type URIs supported at the token exchange endpoint;
+      included only if given.
     * `:backchannel_authentication_endpoint`,
       `:backchannel_token_delivery_modes_supported` (e.g. `["poll", "ping"]` -
       FAPI-CIBA forbids `"push"`),

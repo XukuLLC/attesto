@@ -1180,4 +1180,48 @@ defmodule Attesto.VpTokenTest do
       assert {:error, {"mdl", :invalid_key}} = VpToken.verify(%{"mdl" => [fixture.presentation]}, redirect_opts)
     end
   end
+
+  test "a failed holder binding never fetches the credential status list" do
+    ctx = valid_context()
+
+    vc =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: ctx.issuer_pem],
+        cnf: %{"jwk" => ctx.holder_jwk},
+        iat: ctx.now,
+        status: Attesto.StatusList.reference("https://issuer.example/status", 0)
+      )
+
+    presentation = vc <> kb_jwt(ctx.holder_pem, vc, "wrong-nonce", ctx.audience, ctx.now)
+    caller = self()
+
+    assert {:error, _} =
+             VpToken.verify(%{"id" => [presentation]},
+               nonce: ctx.nonce,
+               audience: ctx.audience,
+               issuer_jwks: ctx.issuer_jwk,
+               now: ctx.now,
+               resolve_status: fn _, _ ->
+                 send(caller, :status_fetched)
+                 {:error, :unreachable}
+               end
+             )
+
+    refute_received :status_fetched
+  end
+
+  test "presentation status enforcement defaults on after holder authentication" do
+    ctx = valid_context()
+
+    vc =
+      SdJwtVc.issue([iss: "https://issuer.example", vct: "identity", pem: ctx.issuer_pem],
+        cnf: %{"jwk" => ctx.holder_jwk},
+        iat: ctx.now,
+        status: Attesto.StatusList.reference("https://127.0.0.1/list", 0)
+      )
+
+    presentation = vc <> kb_jwt(ctx.holder_pem, vc, ctx.nonce, ctx.audience, ctx.now)
+    opts = [nonce: ctx.nonce, audience: ctx.audience, issuer_jwks: ctx.issuer_jwk, now: ctx.now]
+    assert {:error, _} = VpToken.verify(%{"id" => [presentation]}, opts)
+    assert {:ok, _} = VpToken.verify(%{"id" => [presentation]}, Keyword.put(opts, :resolve_status, false))
+  end
 end

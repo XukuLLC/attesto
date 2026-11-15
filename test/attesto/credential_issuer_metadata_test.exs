@@ -16,7 +16,7 @@ defmodule Attesto.CredentialIssuerMetadataTest do
     end
   end
 
-  defp required_opts(configurations \\ %{"sd_jwt_vc" => %{"format" => "vc+sd-jwt", "vct" => "IdentityCredential"}}) do
+  defp required_opts(configurations \\ %{"sd_jwt_vc" => %{"format" => "dc+sd-jwt", "vct" => "IdentityCredential"}}) do
     [
       credential_issuer: @issuer,
       credential_endpoint: @credential_endpoint,
@@ -40,7 +40,7 @@ defmodule Attesto.CredentialIssuerMetadataTest do
 
     assert metadata["credential_issuer"] == @issuer
     assert metadata["credential_endpoint"] == @credential_endpoint
-    assert metadata["credential_configurations_supported"]["sd_jwt_vc"]["format"] == "vc+sd-jwt"
+    assert metadata["credential_configurations_supported"]["sd_jwt_vc"]["format"] == "dc+sd-jwt"
     assert Enum.all?(Map.keys(metadata), &is_binary/1)
   end
 
@@ -67,7 +67,7 @@ defmodule Attesto.CredentialIssuerMetadataTest do
 
   test "normalizes an SD-JWT VC configuration including jwt proof support" do
     configuration = %{
-      format: "vc+sd-jwt",
+      format: "dc+sd-jwt",
       vct: "urn:example:identity",
       scope: "identity",
       cryptographic_binding_methods_supported: ["jwk"],
@@ -83,7 +83,7 @@ defmodule Attesto.CredentialIssuerMetadataTest do
       ]["identity"]
 
     assert actual == %{
-             "format" => "vc+sd-jwt",
+             "format" => "dc+sd-jwt",
              "vct" => "urn:example:identity",
              "scope" => "identity",
              "cryptographic_binding_methods_supported" => ["jwk"],
@@ -337,7 +337,7 @@ defmodule Attesto.CredentialIssuerMetadataTest do
   end
 
   test "JWT credential formats retain string-only signing algorithms" do
-    for format <- ["vc+sd-jwt", "dc+sd-jwt", "jwt_vc_json", "jwt_vc_json-ld"] do
+    for format <- ["dc+sd-jwt", "jwt_vc_json", "jwt_vc_json-ld"] do
       configuration = %{
         format: format,
         vct: "urn:example:identity",
@@ -364,14 +364,71 @@ defmodule Attesto.CredentialIssuerMetadataTest do
     end
   end
 
-  test "requires vct for vc+sd-jwt and dc+sd-jwt" do
-    for format <- ["vc+sd-jwt", "dc+sd-jwt"] do
+  test "requires vct for dc+sd-jwt" do
+    for format <- ["dc+sd-jwt"] do
       assert_raise ArgumentError, ~r/:vct/, fn ->
         CredentialIssuerMetadata.build(required_opts(%{"bad" => %{format: format}}))
       end
 
       assert_raise ArgumentError, ~r/:vct/, fn ->
         CredentialIssuerMetadata.build(required_opts(%{"bad" => %{format: format, vct: 123}}))
+      end
+    end
+  end
+
+  test "normalizes and validates credential_request_encryption metadata" do
+    metadata =
+      CredentialIssuerMetadata.build(
+        required_opts() ++
+          [
+            credential_request_encryption: %{
+              jwks: %{
+                keys: [
+                  %{kty: "EC", crv: "P-256", x: "x1", y: "y1", alg: "ECDH-ES", use: "enc", kid: "enc-1"}
+                ]
+              },
+              enc_values_supported: ["A256GCM", "A128GCM"],
+              encryption_required: false
+            }
+          ]
+      )
+
+    assert metadata["credential_request_encryption"] == %{
+             "jwks" => %{
+               "keys" => [
+                 %{
+                   "kty" => "EC",
+                   "crv" => "P-256",
+                   "x" => "x1",
+                   "y" => "y1",
+                   "alg" => "ECDH-ES",
+                   "use" => "enc",
+                   "kid" => "enc-1"
+                 }
+               ]
+             },
+             "enc_values_supported" => ["A256GCM", "A128GCM"],
+             "encryption_required" => false
+           }
+
+    for invalid <- [
+          "bad",
+          %{jwks: %{keys: []}, enc_values_supported: ["A256GCM"], encryption_required: false},
+          %{
+            jwks: %{keys: [%{kty: "EC", kid: "k1"}, %{kty: "EC", kid: "k1"}]},
+            enc_values_supported: ["A256GCM"],
+            encryption_required: false
+          },
+          %{
+            jwks: %{keys: [%{kty: "EC"}]},
+            enc_values_supported: ["A256GCM"],
+            encryption_required: false
+          },
+          %{jwks: %{keys: [%{kty: "EC", kid: "k1"}]}, enc_values_supported: [], encryption_required: false},
+          %{jwks: %{keys: [%{kty: "EC", kid: "k1"}]}, enc_values_supported: ["A256GCM"]}
+        ] do
+      assert_raise ArgumentError, fn ->
+        CredentialIssuerMetadata.build(required_opts() ++ [credential_request_encryption: invalid])
       end
     end
   end
@@ -420,6 +477,30 @@ defmodule Attesto.CredentialIssuerMetadataTest do
       assert claims["iat"] == 1_700_000_000
       assert claims["credential_issuer"] == @issuer
       assert claims["credential_endpoint"] == @credential_endpoint
+    end
+  end
+
+  test "never publishes private encryption key members, including in later JWKS entries" do
+    public = %{"kty" => "EC", "kid" => "public"}
+
+    for member <- ~w(d p q dp dq qi oth k), key_name <- [member, String.to_atom(member)] do
+      private = Map.put(%{"kty" => "EC", "kid" => "private"}, key_name, "secret-key-material")
+
+      error =
+        assert_raise ArgumentError, ~r/public/, fn ->
+          CredentialIssuerMetadata.build(
+            required_opts() ++
+              [
+                credential_request_encryption: %{
+                  jwks: %{keys: [public, private]},
+                  enc_values_supported: ["A256GCM"],
+                  encryption_required: false
+                }
+              ]
+          )
+        end
+
+      refute Exception.message(error) =~ "secret-key-material"
     end
   end
 end

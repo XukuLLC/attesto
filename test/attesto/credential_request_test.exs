@@ -118,18 +118,27 @@ defmodule Attesto.CredentialRequestTest do
 
   test "normalizes valid credential response encryption parameters" do
     encryption = %{
-      jwk: %{kty: "EC", crv: "P-256"},
-      alg: "ECDH-ES",
+      jwk: %{kty: "EC", crv: "P-256", alg: "ECDH-ES"},
       enc: "A256GCM"
     }
 
     assert {:ok, parsed} = CredentialRequest.parse(request(%{credential_response_encryption: encryption}))
 
     assert parsed.response_encryption == %{
-             "jwk" => %{"kty" => "EC", "crv" => "P-256"},
-             "alg" => "ECDH-ES",
+             "jwk" => %{"kty" => "EC", "crv" => "P-256", "alg" => "ECDH-ES"},
              "enc" => "A256GCM"
            }
+  end
+
+  test "preserves optional zip parameter when non-empty string so caller can reject unsupported compression" do
+    encryption = %{
+      "jwk" => %{"kty" => "EC", "crv" => "P-256", "alg" => "ECDH-ES"},
+      "enc" => "A256GCM",
+      "zip" => "DEF"
+    }
+
+    assert {:ok, parsed} = CredentialRequest.parse(request(%{"credential_response_encryption" => encryption}))
+    assert parsed.response_encryption["zip"] == "DEF"
   end
 
   test "rejects invalid credential response encryption parameters" do
@@ -137,11 +146,15 @@ defmodule Attesto.CredentialRequestTest do
       nil,
       %{},
       %{jwk: %{}, enc: "A256GCM"},
-      %{jwk: %{}, alg: "ECDH-ES"},
+      %{jwk: %{alg: ""}, enc: "A256GCM"},
+      %{jwk: %{alg: "ECDH-ES"}},
+      %{jwk: %{kty: "EC"}, alg: "ECDH-ES", enc: "A256GCM"},
+      %{jwk: %{kty: "EC", alg: "ECDH-ES"}, alg: "RSA-OAEP", enc: "A256GCM"},
       %{alg: "ECDH-ES", enc: "A256GCM"},
       %{jwk: [], alg: "ECDH-ES", enc: "A256GCM"},
-      %{jwk: %{}, alg: "", enc: "A256GCM"},
-      %{jwk: %{}, alg: "ECDH-ES", enc: ""}
+      %{jwk: %{alg: "ECDH-ES"}, enc: ""},
+      %{jwk: %{alg: "ECDH-ES"}, enc: "A256GCM", zip: ""},
+      %{jwk: %{alg: "ECDH-ES"}, enc: "A256GCM", zip: 123}
     ]
 
     for encryption <- invalid_values do
@@ -155,8 +168,7 @@ defmodule Attesto.CredentialRequestTest do
       credential_configuration_id: @configuration_id,
       proof: %{proof_type: "jwt", jwt: @jwt},
       credential_response_encryption: %{
-        jwk: %{kty: "EC", crv: "P-256"},
-        alg: "ECDH-ES",
+        jwk: %{kty: "EC", crv: "P-256", alg: "ECDH-ES"},
         enc: "A256GCM"
       }
     }
@@ -165,8 +177,7 @@ defmodule Attesto.CredentialRequestTest do
       "credential_configuration_id" => @configuration_id,
       "proof" => %{"proof_type" => "jwt", "jwt" => @jwt},
       "credential_response_encryption" => %{
-        "jwk" => %{"kty" => "EC", "crv" => "P-256"},
-        "alg" => "ECDH-ES",
+        "jwk" => %{"kty" => "EC", "crv" => "P-256", "alg" => "ECDH-ES"},
         "enc" => "A256GCM"
       }
     }

@@ -158,7 +158,18 @@ if Code.ensure_loaded?(Plug.Conn) do
     end
 
     @impl Plug
-    def init(opts) do
+    def init(opts), do: normalize_options(opts)
+
+    @doc """
+    Validate and normalize plug options.
+
+    Wrapper plugs that enforce their own boot-time DPoP origin policy and
+    inject `:htu` per request (such as `AttestoMCP.Plug.Authenticate`) pass
+    `require_dpop_pin?: false` so initialization still validates every option
+    without requiring a static `:origin` or literal `:htu` callback up front.
+    """
+    @spec normalize_options(keyword(), keyword()) :: keyword()
+    def normalize_options(opts, init_opts \\ []) when is_list(opts) and is_list(init_opts) do
       # RFC 9449 §8: a `use_dpop_nonce` challenge is only actionable if it
       # carries a `DPoP-Nonce` header for the client to echo. If the host
       # wires a `:nonce_check` (which can demand a nonce) it MUST also wire
@@ -170,17 +181,17 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "use_dpop_nonce challenge can carry a DPoP-Nonce header."
       end
 
-      validate_htu_options!(opts)
+      validate_htu_options!(opts, Keyword.get(init_opts, :require_dpop_pin?, true))
 
       opts
       |> Keyword.put(:bearer_methods, bearer_methods(opts))
       |> normalize_step_up()
     end
 
-    defp validate_htu_options!(opts) do
+    defp validate_htu_options!(opts, require_dpop_pin?) do
       validate_htu_fn!(opts)
       validate_origin_opt!(opts)
-      require_dpop_pin!(opts)
+      if require_dpop_pin?, do: require_dpop_pin!(opts)
     end
 
     defp validate_htu_fn!(opts) do
@@ -576,6 +587,7 @@ if Code.ensure_loaded?(Plug.Conn) do
         |> put_opt(:nonce_check, Keyword.get(opts, :nonce_check))
         |> put_opt(:now, Keyword.get(opts, :now))
         |> put_opt(:max_age_seconds, Keyword.get(opts, :dpop_max_age_seconds))
+        |> put_opt(:allow_http, Keyword.get(opts, :allow_http))
 
       case DPoP.verify_proof(proof, verify_opts) do
         # Record the namespaced, opaque `replay_key`, not the raw `jti` - see

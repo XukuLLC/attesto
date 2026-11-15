@@ -45,7 +45,9 @@ defmodule Attesto.CodeStore.ETS do
     extra_tables: [
       {__MODULE__.Consumed, [:set, :protected, :named_table, read_concurrency: true]},
       {__MODULE__.AccessTokens, [:set, :protected, :named_table, read_concurrency: true]},
-      {__MODULE__.RevokedAccessTokens, [:set, :protected, :named_table, read_concurrency: true]}
+      {__MODULE__.RevokedAccessTokens, [:set, :protected, :named_table, read_concurrency: true]},
+      {__MODULE__.Pending, [:set, :protected, :named_table, read_concurrency: true]},
+      {__MODULE__.PendingRevoked, [:set, :protected, :named_table, read_concurrency: true]}
     ],
     reset: :server
 
@@ -53,7 +55,10 @@ defmodule Attesto.CodeStore.ETS do
   @consumed :"#{__MODULE__}.Consumed"
   @access_tokens :"#{__MODULE__}.AccessTokens"
   @revoked_access_tokens :"#{__MODULE__}.RevokedAccessTokens"
+  @pending :"#{__MODULE__}.Pending"
+  @pending_revoked :"#{__MODULE__}.PendingRevoked"
   @no_refresh_retention_seconds 24 * 60 * 60
+  @pending_retention_seconds 300
 
   @impl Attesto.CodeStore
   def put(%{code_hash: code_hash, expires_at: expires_at} = record)
@@ -112,19 +117,42 @@ defmodule Attesto.CodeStore.ETS do
     GenServer.call(__MODULE__, {:delete_unconsumed, Attesto.RevocationCriteria.new!(criteria)})
   end
 
+  @doc false
+  @impl Attesto.CodeStore
+  @spec pending_revoked?(String.t()) :: boolean()
+  def pending_revoked?(code_hash) when is_binary(code_hash) and code_hash != "" do
+    pending_revoked_unlocked?(code_hash)
+  end
+
   @impl GenServer
   def handle_call({:put, record}, _from, state) do
     # expires_at is hoisted into its own tuple element so the sweep
     # match spec is a plain guard, never a map pattern.
     true = :ets.insert(@table, {record.code_hash, record.expires_at, record})
+    :ets.delete(@pending, record.code_hash)
+    :ets.delete(@pending_revoked, record.code_hash)
     {:reply, :ok, state}
   end
 
   def handle_call({:take, code_hash}, _from, state) do
     result =
       case :ets.take(@table, code_hash) do
-        [{^code_hash, _expires_at, record}] -> {:ok, record}
-        [] -> consumed_result(code_hash)
+        [{^code_hash, _expires_at, record}] ->
+          retain_until = System.system_time(:second) + @pending_retention_seconds
+          true = :ets.insert(@pending, {code_hash, retain_until, record.data, false})
+          {:ok, record}
+
+        [] ->
+          case :ets.lookup(@pending, code_hash) do
+            [{^code_hash, retain_until, data, false}] ->
+              true = :ets.insert(@pending, {code_hash, retain_until, data, true})
+              revoke_access_token_for_code_unlocked(code_hash)
+
+            _ ->
+              :ok
+          end
+
+          consumed_result(code_hash)
       end
 
     {:reply, result, state}
@@ -134,17 +162,35 @@ defmodule Attesto.CodeStore.ETS do
     retain_until = consumed_retain_until(meta)
     true = :ets.insert(@consumed, {code_hash, retain_until, meta})
     bind_access_token_to_family(code_hash, consumed_family_id(meta))
+
+    case :ets.take(@pending, code_hash) do
+      [{^code_hash, _pending_until, _data, true}] ->
+        pending_until = System.system_time(:second) + @pending_retention_seconds
+        true = :ets.insert(@pending_revoked, {code_hash, pending_until})
+        revoke_access_token_for_code_unlocked(code_hash)
+
+      _ ->
+        :ok
+    end
+
     {:reply, :ok, state}
   end
 
   def handle_call({:record_access_token_for_code, code_hash, jti, expires_at}, _from, state) do
     family_id = consumed_family_id_for_code(code_hash)
     true = :ets.insert(@access_tokens, {code_hash, expires_at, jti, family_id})
+
+    if pending_revoked_unlocked?(code_hash) do
+      revoke_jti(jti, expires_at)
+    end
+
     {:reply, :ok, state}
   end
 
   # The main table holds only unredeemed codes: `take/1` removes the row. The
-  # scan runs in the owner process, so it is serialized with put and take.
+  # scan runs in the owner process, so it is serialized with put, take, and
+  # mark_consumed; taken-but-unfinalized codes in `@pending` are marked so any
+  # in-flight access token or refresh family they mint is immediately revoked.
   def handle_call({:delete_unconsumed, criteria}, _from, state) do
     matching =
       :ets.foldl(
@@ -156,15 +202,28 @@ defmodule Attesto.CodeStore.ETS do
       )
 
     Enum.each(matching, &:ets.delete(@table, &1))
+
+    matching_pending =
+      :ets.foldl(
+        fn {code_hash, retain_until, data, _revoked?}, acc ->
+          if Attesto.RevocationCriteria.match?(criteria, data),
+            do: [{code_hash, retain_until, data} | acc],
+            else: acc
+        end,
+        [],
+        @pending
+      )
+
+    Enum.each(matching_pending, fn {code_hash, retain_until, data} ->
+      true = :ets.insert(@pending, {code_hash, retain_until, data, true})
+      revoke_access_token_for_code_unlocked(code_hash)
+    end)
+
     {:reply, {:ok, length(matching)}, state}
   end
 
   def handle_call({:revoke_access_token_for_code, code_hash}, _from, state) do
-    case :ets.lookup(@access_tokens, code_hash) do
-      [{^code_hash, expires_at, jti, _family_id}] -> revoke_jti(jti, expires_at)
-      [] -> :ok
-    end
-
+    revoke_access_token_for_code_unlocked(code_hash)
     {:reply, :ok, state}
   end
 
@@ -188,6 +247,36 @@ defmodule Attesto.CodeStore.ETS do
     :ets.select_delete(@revoked_access_tokens, [
       {{:"$1", :"$2"}, [{:<, :"$2", now}], [true]}
     ])
+
+    :ets.select_delete(@pending, [
+      {{:"$1", :"$2", :"$3", :"$4"}, [{:<, :"$2", now}], [true]}
+    ])
+
+    :ets.select_delete(@pending_revoked, [
+      {{:"$1", :"$2"}, [{:<, :"$2", now}], [true]}
+    ])
+  end
+
+  defp revoke_access_token_for_code_unlocked(code_hash) do
+    case :ets.lookup(@access_tokens, code_hash) do
+      [{^code_hash, expires_at, jti, _family_id}] -> revoke_jti(jti, expires_at)
+      [] -> :ok
+    end
+  end
+
+  defp pending_revoked_unlocked?(code_hash) do
+    now = System.system_time(:second)
+
+    case :ets.lookup(@pending, code_hash) do
+      [{^code_hash, _retain_until, _data, true}] ->
+        true
+
+      _ ->
+        case :ets.lookup(@pending_revoked, code_hash) do
+          [{^code_hash, retain_until}] -> retain_until > now
+          [] -> false
+        end
+    end
   end
 
   defp consumed_result(code_hash) do

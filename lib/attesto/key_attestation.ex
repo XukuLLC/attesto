@@ -48,7 +48,7 @@ defmodule Attesto.KeyAttestation do
   fails closed.
   """
 
-  alias Attesto.{JWS, NumericDate, Options, SecureCompare, SigningAlg, Thumbprint}
+  alias Attesto.{JWS, NumericDate, Options, SigningAlg, Thumbprint}
 
   @typ "key-attestation+jwt"
   @future_skew_seconds NumericDate.default_clock_skew_seconds()
@@ -253,17 +253,7 @@ defmodule Attesto.KeyAttestation do
   defp check_nbf(%{"nbf" => _}, _opts), do: {:error, :not_yet_valid}
   defp check_nbf(_claims, _opts), do: :ok
 
-  defp check_nonce(claims, opts) do
-    case Keyword.get(opts, :nonce) do
-      nil ->
-        :ok
-
-      expected ->
-        if SecureCompare.equal?(Map.get(claims, "nonce"), expected),
-          do: :ok,
-          else: {:error, :invalid_nonce}
-    end
-  end
+  defp check_nonce(claims, opts), do: Attesto.Claims.check_optional_nonce(claims, opts)
 
   defp extract_attested_keys(%{"attested_keys" => [_ | _] = keys}) do
     if Enum.all?(keys, &valid_attested_key?/1),

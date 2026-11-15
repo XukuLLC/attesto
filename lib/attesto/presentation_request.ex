@@ -1,6 +1,6 @@
 defmodule Attesto.PresentationRequest do
   @moduledoc """
-  OID4VP Authorization Request (`draft-ietf-oauth-openid4vp` §5).
+  OID4VP Authorization Request (`OpenID4VP 1.0`, 2025-07-09, §5).
 
   Build a string-keyed, JSON-ready request for a wallet and its DCQL query.
   This module is pure and conn-free; sending the request is the host's

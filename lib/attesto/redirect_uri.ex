@@ -188,6 +188,20 @@ defmodule Attesto.RedirectURI do
   # disagreement is precisely about where the components begin and end.
   @ambiguous_bytes ~r/[\x00-\x20\x7f\\]/
 
+  # OAuth 2.1 (draft -17 §2.3, §4.1.1, §4.1.2, §4.1.2.1, §7.12) and supported
+  # authorization endpoint extensions (OIDC Core §3.1.2.1, JAR, PAR, RAR,
+  # JARM, Session Management, RFC 8707, RFC 9207, RFC 9449): query parameters
+  # defined for the authorization request or response must not appear in a
+  # registered redirect URI's query string.
+  @reserved_query_params MapSet.new(~w(
+    response_type client_id redirect_uri scope state code_challenge code_challenge_method
+    response_mode nonce prompt max_age acr_values id_token_hint login_hint display
+    ui_locales claims_locales claims authorization_details resource request request_uri dpop_jkt
+    code iss error error_description error_uri response session_state
+    access_token token_type expires_in id_token
+  ))
+  @reserved_query_params_list MapSet.to_list(@reserved_query_params)
+
   @doc """
   The supported matching modes. Exposed so a caller can validate host
   configuration against the same list this module enforces.
@@ -248,6 +262,43 @@ defmodule Attesto.RedirectURI do
       {:ok, %URI{userinfo: nil}} -> true
       _ -> false
     end
+  end
+
+  @doc """
+  Query parameter names defined for OAuth authorization requests or responses.
+
+  OAuth 2.1 (draft -17 §2.3, §7.12) prohibits a redirect URI's query component
+  from pre-populating these parameters.
+  """
+  @spec reserved_query_params() :: [String.t()]
+  def reserved_query_params, do: @reserved_query_params_list
+
+  @doc """
+  Whether `uri` carries a query parameter defined for an authorization request
+  or response.
+  """
+  @spec reserved_query_param?(term()) :: boolean()
+  def reserved_query_param?(uri) when is_binary(uri) do
+    case URI.new(uri) do
+      {:ok, %URI{query: query}} when is_binary(query) and query != "" ->
+        query
+        |> String.split(["&", ";"], trim: true)
+        |> Enum.any?(fn segment ->
+          [raw_key | _] = String.split(segment, "=", parts: 2)
+          MapSet.member?(@reserved_query_params, raw_key) or decoded_reserved_key?(raw_key)
+        end)
+
+      _other ->
+        false
+    end
+  end
+
+  def reserved_query_param?(_uri), do: false
+
+  defp decoded_reserved_key?(raw_key) do
+    MapSet.member?(@reserved_query_params, URI.decode_www_form(raw_key))
+  rescue
+    ArgumentError -> false
   end
 
   @doc """

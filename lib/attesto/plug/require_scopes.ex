@@ -47,7 +47,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     @impl Plug
     def init(scopes) when is_list(scopes) do
-      {required, claims_key, resource_metadata, transport} = normalize(scopes)
+      {required, claims_key, resource_metadata, hierarchy, transport} = normalize(scopes)
 
       if required == [] do
         raise ArgumentError,
@@ -55,7 +55,7 @@ if Code.ensure_loaded?(Plug.Conn) do
                 "must declare what it requires."
       end
 
-      catalog = Scope.new_catalog(required)
+      catalog = Scope.new_catalog(required, hierarchy: hierarchy)
 
       if !Enum.all?(required, &Scope.known?(catalog, &1)) do
         raise ArgumentError,
@@ -134,9 +134,10 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp normalize(scopes) do
       if Keyword.keyword?(scopes) and scopes != [] do
         {Keyword.get(scopes, :scopes, []), Keyword.get(scopes, :claims_key, @default_claims_key),
-         Keyword.get(scopes, :resource_metadata), Keyword.take(scopes, @transport_keys)}
+         Keyword.get(scopes, :resource_metadata), Keyword.get(scopes, :scope_hierarchy, %{}),
+         Keyword.take(scopes, @transport_keys)}
       else
-        {scopes, @default_claims_key, nil, []}
+        {scopes, @default_claims_key, nil, %{}, []}
       end
     end
   end

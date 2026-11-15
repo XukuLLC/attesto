@@ -32,13 +32,35 @@ defmodule Attesto.JWE do
   @spec encrypt(key(), binary(), map(), keyword()) :: {:ok, binary()} | {:error, error()}
   def encrypt(recipient, plaintext, header, opts \\ [])
 
-  def encrypt(recipient, plaintext, header, opts) when is_binary(plaintext) and is_map(header) and is_list(opts) do
+  def encrypt(recipient, plaintext, header, opts) when is_binary(plaintext) and is_map(header) and is_list(opts),
+    do: encrypt_bytes(recipient, plaintext, header, opts, false)
+
+  def encrypt(_recipient, _plaintext, _header, _opts), do: {:error, :invalid_jwe}
+
+  @doc """
+  Encrypt locally produced plaintext with outbound-only RFC 7516 DEFLATE
+  compression. The caller's header must omit `zip`; this function supplies
+  `zip: "DEF"` and JOSE compresses the bounded plaintext before encryption.
+  Plaintext limits apply before compression. `decrypt/3` still refuses `zip`
+  before handing ciphertext to JOSE, and never inflates received input.
+  """
+  @spec encrypt_deflated(key(), binary(), map(), keyword()) :: {:ok, binary()} | {:error, error()}
+  def encrypt_deflated(recipient, plaintext, header, opts \\ [])
+
+  def encrypt_deflated(recipient, plaintext, header, opts)
+      when is_binary(plaintext) and is_map(header) and is_list(opts),
+      do: encrypt_bytes(recipient, plaintext, header, opts, true)
+
+  def encrypt_deflated(_recipient, _plaintext, _header, _opts), do: {:error, :invalid_jwe}
+
+  defp encrypt_bytes(recipient, plaintext, header, opts, deflate?) do
     with {:ok, limits} <- options(opts),
          :ok <- within_limit(plaintext, limits.plaintext),
          :ok <- validate_header(header, opts),
          false <- Map.has_key?(header, "epk"),
          {:ok, key} <- recipient_key(recipient, :encrypt),
          :ok <- within_limit(JWS.encode64(JSON.encode!(header)), @max_header_bytes),
+         header = if(deflate?, do: Map.put(header, "zip", "DEF"), else: header),
          ephemeral = JOSE.JWK.generate_key({:ec, "P-256"}),
          {_modules, compact} <- JOSE.JWE.block_encrypt({key, ephemeral}, plaintext, header) |> JOSE.JWE.compact(),
          :ok <- within_limit(compact, limits.compact),
@@ -53,8 +75,6 @@ defmodule Attesto.JWE do
   catch
     _kind, _reason -> {:error, :invalid_jwe}
   end
-
-  def encrypt(_recipient, _plaintext, _header, _opts), do: {:error, :invalid_jwe}
 
   @doc """
   Authenticate and decrypt a compact JWE, returning its protected header.

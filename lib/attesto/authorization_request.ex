@@ -530,8 +530,13 @@ defmodule Attesto.AuthorizationRequest do
         do: {:ok, Map.put(object_params, "request", request)},
         else: {:ok, preserve_unsupported_request_uri(object_params, params)}
     else
-      {:error, :request_not_supported} -> {:error, :request_not_supported}
-      _ -> {:error, :invalid_request_object}
+      {:error, :request_not_supported} ->
+        if Policy.require_request_object?(policy),
+          do: {:error, :invalid_request_object},
+          else: {:error, :request_not_supported}
+
+      _ ->
+        {:error, :invalid_request_object}
     end
   end
 

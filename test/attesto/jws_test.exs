@@ -779,6 +779,31 @@ defmodule Attesto.JWSTest do
     end
   end
 
+  describe "OKP EdDSA and curve-specific verification compatibility" do
+    test "legacy EdDSA and explicit Ed25519 keys cross-verify while respecting accepted_algs" do
+      key = JOSE.JWK.generate_key({:okp, :Ed25519})
+      claims = %{"sub" => "user-1"}
+      legacy_jwt = JWT.sign_compact(key, %{"alg" => "EdDSA", "kid" => "ed"}, claims)
+      explicit_jwt = JWT.sign_compact(key, %{"alg" => "Ed25519", "kid" => "ed"}, claims)
+
+      jwk_ed25519 = public_map(key, %{"kid" => "ed", "alg" => "Ed25519"})
+      jwk_eddsa = public_map(key, %{"kid" => "ed", "alg" => "EdDSA"})
+
+      assert {:ok, ^claims} = JWS.verify_trusted(legacy_jwt, protected_header(legacy_jwt), [jwk_ed25519], [])
+      assert {:ok, ^claims} = JWS.verify_trusted(explicit_jwt, protected_header(explicit_jwt), [jwk_eddsa], [])
+
+      # Explicit accepted_algs remains strict on the presented token alg.
+      assert {:error, :invalid_signature} =
+               JWS.verify_trusted(legacy_jwt, protected_header(legacy_jwt), [jwk_ed25519], accepted_algs: ["Ed25519"])
+
+      assert {:error, :invalid_signature} =
+               JWS.verify_trusted(explicit_jwt, protected_header(explicit_jwt), [jwk_eddsa], accepted_algs: ["EdDSA"])
+
+      assert {:ok, ^claims} =
+               JWS.verify_trusted(legacy_jwt, protected_header(legacy_jwt), [jwk_ed25519], accepted_algs: ["EdDSA"])
+    end
+  end
+
   defmodule CurrentKeystore do
     @moduledoc false
     @behaviour Attesto.Keystore

@@ -1,6 +1,6 @@
 defmodule Attesto.Federation.EntityStatement do
   @moduledoc """
-  Build and verify OpenID Federation 1.0 Entity Statements.
+  Build and verify OpenID Federation 1.0 Final (2026-02-17) Entity Statements.
 
   The module is transport-independent. An Entity Configuration produced by
   `entity_configuration/3` is suitable for serving from the
@@ -246,7 +246,8 @@ defmodule Attesto.Federation.EntityStatement do
   defp check_typ(%{"typ" => @typ}), do: :ok
   defp check_typ(_header), do: {:error, :invalid_typ}
 
-  defp check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
+  @doc false
+  def check_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted_algs = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
     if alg != "none" and alg in SigningAlg.allowed() and is_list(accepted_algs) and alg in accepted_algs,
@@ -254,18 +255,22 @@ defmodule Attesto.Federation.EntityStatement do
       else: {:error, :invalid_alg}
   end
 
-  defp check_alg(_header, _opts), do: {:error, :invalid_alg}
+  def check_alg(_header, _opts), do: {:error, :invalid_alg}
 
   defp check_kid(%{"kid" => kid}) when is_binary(kid) and kid != "", do: :ok
   defp check_kid(_header), do: {:error, :invalid_entity_statement}
 
-  defp verify_signature(jwt, header, jwks, opts) do
+  defp verify_signature(jwt, header, jwks, opts),
+    do: verify_signed_jwt(jwt, header, jwks, opts, :invalid_entity_statement)
+
+  @doc false
+  def verify_signed_jwt(jwt, header, jwks, opts, malformed_error) do
     JWS.verify_trusted(jwt, header, jwks,
       accepted_algs: Keyword.get(opts, :accepted_algs, SigningAlg.allowed()),
       malformed_key: :reject_set,
       terminal_error: :invalid_signature,
       malformed_result: :halt,
-      malformed_error: :invalid_entity_statement,
+      malformed_error: malformed_error,
       claims_map?: true
     )
   end
@@ -472,7 +477,7 @@ defmodule Attesto.Federation.EntityStatement do
   defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "P-384"}), do: {:ok, "ES384"}
   defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "P-521"}), do: {:ok, "ES512"}
   defp infer_trusted_key_alg(%{"kty" => "EC", "crv" => "secp256k1"}), do: {:ok, "ES256K"}
-  defp infer_trusted_key_alg(%{"kty" => "OKP", "crv" => curve}) when curve in ["Ed25519", "Ed448"], do: {:ok, "EdDSA"}
+  defp infer_trusted_key_alg(%{"kty" => "OKP", "crv" => curve}) when curve in ["Ed25519", "Ed448"], do: {:ok, curve}
 
   defp infer_trusted_key_alg(_key), do: :error
 

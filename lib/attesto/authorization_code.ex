@@ -393,6 +393,8 @@ defmodule Attesto.AuthorizationCode do
     # marker expire before the family it protects.
     opts = Keyword.put_new_lazy(opts, :now, fn -> NumericDate.now([]) end)
 
+    code_hash = Secret.hash(code)
+
     case Attesto.RefreshToken.issue(refresh_store, refresh_context, opts) do
       {:ok, issued} ->
         issued = validate_issued_refresh!(issued)
@@ -400,15 +402,28 @@ defmodule Attesto.AuthorizationCode do
         :ok =
           record_consumption(
             code_store,
-            Secret.hash(code),
+            code_hash,
             %{grant | family_id: issued.family_id},
             refresh_family_deadline(opts)
           )
+
+        :ok = maybe_revoke_pending_family(code_store, code_hash, issued.family_id, refresh_store)
 
         {:ok, issued}
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  defp maybe_revoke_pending_family(code_store, code_hash, family_id, refresh_store) do
+    if function_exported?(code_store, :pending_revoked?, 1) and code_store.pending_revoked?(code_hash) do
+      case refresh_store.revoke_family(family_id) do
+        :ok -> :ok
+        _unexpected -> Store.contract_violation!("refresh store", {:revoke_family, 1})
+      end
+    else
+      :ok
     end
   end
 

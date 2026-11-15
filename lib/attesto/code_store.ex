@@ -203,5 +203,19 @@ defmodule Attesto.CodeStore do
   """
   @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
 
-  @optional_callbacks mark_consumed: 2, get: 1, delete_unconsumed: 1
+  @doc """
+  OPTIONAL. Whether `delete_unconsumed/1` revoked a grant matching the
+  already-taken code `code_hash` while token issuance was in flight.
+
+  Concurrent revocation (`delete_unconsumed/1`) cannot remove a code that
+  `take/1` already popped, so a store that tracks in-flight revocations marks
+  the grant revoked until `mark_consumed/2` completes (and clears the marker
+  once consulted or superseded). Token issuance consults this before minting
+  a refresh token so a concurrent cut-off never grants a durable session. A
+  store that does not implement it is assumed not to have a pending
+  revocation.
+  """
+  @callback pending_revoked?(code_hash()) :: boolean()
+
+  @optional_callbacks mark_consumed: 2, get: 1, delete_unconsumed: 1, pending_revoked?: 1
 end

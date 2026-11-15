@@ -1,13 +1,13 @@
 defmodule Attesto.SdJwtVc do
   @moduledoc """
-  SD-JWT-based Verifiable Credentials (SD-JWT VC), draft-ietf-oauth-sd-jwt-vc.
+  SD-JWT-based Verifiable Digital Credentials (SD-JWT VC), `draft-ietf-oauth-sd-jwt-vc-26`.
 
   The IETF profile of `Attesto.SdJwt` used by the EUDI wallet stack (and its
   High-Assurance Interoperability Profile, HAIP): an SD-JWT whose Issuer-signed
   JWT carries a credential *type* (`vct`), an issuer (`iss`), an optional holder
   key binding (`cnf`), an optional Token Status List reference (`status`), and
-  the usual temporal claims, typed `vc+sd-jwt` or `dc+sd-jwt` in the JOSE `typ`
-  header.
+  the usual temporal claims, typed `dc+sd-jwt` in the JOSE `typ` header
+  (legacy `vc+sd-jwt` is neither emitted nor accepted).
 
   This module adds the VC-specific claim rules on top of the base SD-JWT
   mechanism; the selective-disclosure machinery, recursive verification, and Key
@@ -15,26 +15,32 @@ defmodule Attesto.SdJwtVc do
 
     * `issue/2` — assemble and sign an SD-JWT VC: sets `iss`/`vct`/`iat` (and
       optional `exp`/`nbf`/`cnf`/`status`/`sub`), makes the chosen credential
-      claims selectively disclosable, and stamps the JOSE `typ` from the optional
-      `:typ` (`vc+sd-jwt` or `dc+sd-jwt`; defaults to `vc+sd-jwt`).
-    * `verify/3` — verify the issuer signature (typed `vc+sd-jwt`), reconstruct
-      the disclosed claims, and enforce the VC claim rules: `iss` and `vct`
-      non-empty by default, `exp` (if present) not passed, `nbf` (if present)
-      reached. Holder binding is a separate step - pass the returned `cnf` key to
-      `Attesto.SdJwt.verify_key_binding/3` with the presentation's nonce/audience.
-      Explicit certificate identity mode permits an omitted `iss` after the
-      caller establishes certificate trust. Alternatively, `:trusted_certificates`
-      opts into core path validation and SAN binding to a required `iss`.
+      claims selectively disclosable, and stamps JOSE `typ` (`"dc+sd-jwt"`).
+    * `verify/3` — verify the issuer signature (typed `dc+sd-jwt` /
+      `application/dc+sd-jwt`), reconstruct the disclosed claims, and enforce
+      the VC claim rules: `iss` and `vct` non-empty by default, `exp` (if
+      present) not passed, `nbf` (if present) reached. Holder binding is a
+      separate step - pass the returned `cnf` key to
+      `Attesto.SdJwt.verify_key_binding/3` with the presentation's
+      nonce/audience. Explicit certificate identity mode permits an omitted
+      `iss` after the caller establishes certificate trust. Alternatively,
+      `:trusted_certificates` opts into core path validation and SAN binding
+      to a required `iss`.
 
   Conn-free and fail-closed, like the rest of attesto core.
+  Credential status references are fetched and enforced by default through
+  `Attesto.StatusList.fetch/3` and its bounded verified-token cache. Explicit
+  `resolve_status: false` is for offline inspection; it must not be used to
+  decide whether a credential is acceptable. A custom resolver can replace
+  the transport while retaining signature and status enforcement.
+
   """
 
-  alias Attesto.{JWS, MapParams, NumericDate, SdJwt, X509}
+  alias Attesto.{JWS, MapParams, NumericDate, SdJwt, StatusList, X509}
 
-  # RFC-registered media type for an SD-JWT VC; the newer draft additionally
-  # uses `dc+sd-jwt`. Accept both on verification, issue `vc+sd-jwt` by default.
-  @typ "vc+sd-jwt"
-  @accepted_typ ["vc+sd-jwt", "dc+sd-jwt"]
+  # draft-ietf-oauth-sd-jwt-vc-26: `dc+sd-jwt` only (stop emitting and accepting `vc+sd-jwt`).
+  @typ "dc+sd-jwt"
+  @accepted_typ ["dc+sd-jwt"]
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_issuer_segment_bytes 256 * 1_024
 
@@ -68,8 +74,18 @@ defmodule Attesto.SdJwtVc do
           | :expired
           | :not_yet_valid
           | :invalid_cnf
+          | {:credential_status, non_neg_integer()}
+          | :credential_suspended
+          | :credential_revoked
+          | :invalid_status_reference
+          | :invalid_status_list
+          | :invalid_status_list_signature
+          | :invalid_status_list_token
+          | :status_list_uri_mismatch
+          | :status_index_out_of_range
           | X509.verify_error()
           | :certificate_issuer_mismatch
+          | term()
 
   @doc """
   Issue an SD-JWT VC.
@@ -95,9 +111,9 @@ defmodule Attesto.SdJwtVc do
     * `:iat` / `:exp` / `:nbf` / `:sub` - standard claims (unix seconds / string).
     * `:now` - clock reference for a defaulted `:iat`.
     * `:kid` - JOSE `kid` header. `:sd_alg` - SD hashing algorithm.
-    * `:typ` - the SD-JWT VC media type stamped in the JOSE `typ` header,
-      `"vc+sd-jwt"` or `"dc+sd-jwt"` (the credential configuration's `format`).
-      Defaults to `"vc+sd-jwt"`.
+    * `:typ` - the SD-JWT VC media type stamped in the JOSE `typ` header;
+      must be `"dc+sd-jwt"` (`draft-ietf-oauth-sd-jwt-vc-26`). Defaults to
+      `"dc+sd-jwt"`.
     * `:x5c` - the issuer X.509 certificate chain (RFC 7515 §4.1.6): a non-empty
       list of base64 DER certificate strings, stamped in the JOSE `x5c` header so
       a verifier can bind the credential to a trusted issuer certificate (HAIP).
@@ -170,10 +186,7 @@ defmodule Attesto.SdJwtVc do
     end
   end
 
-  # The JOSE `typ` header names the SD-JWT VC media type. OID4VCI moved the
-  # identifier from `vc+sd-jwt` to `dc+sd-jwt`; the issuer stamps whichever the
-  # credential configuration's `format` declares. Absent an explicit `:typ`, the
-  # historical `vc+sd-jwt` default is kept.
+  # draft-ietf-oauth-sd-jwt-vc-26 mandates `typ: "dc+sd-jwt"`.
   defp issue_typ!(nil), do: @typ
   defp issue_typ!(typ) when typ in @accepted_typ, do: typ
 
@@ -238,7 +251,8 @@ defmodule Attesto.SdJwtVc do
          {:ok, vct} <- require_string(base.claims, "vct", :missing_vct),
          :ok <- check_exp(base.claims, opts),
          :ok <- check_nbf(base.claims, opts),
-         {:ok, cnf} <- check_cnf(base.claims) do
+         {:ok, cnf} <- check_cnf(base.claims),
+         :ok <- check_status(base.claims, issuer_keys, opts) do
       {:ok,
        %{
          claims: base.claims,
@@ -335,6 +349,38 @@ defmodule Attesto.SdJwtVc do
       :error -> {:ok, nil}
       {:ok, cnf} when is_map(cnf) and map_size(cnf) > 0 -> {:ok, cnf}
       {:ok, _other} -> {:error, :invalid_cnf}
+    end
+  end
+
+  defp check_status(claims, issuer_keys, opts) do
+    case Map.fetch(claims, "status") do
+      :error ->
+        :ok
+
+      {:ok, status} when is_map(status) and map_size(status) > 0 ->
+        case StatusList.resolver(opts) do
+          false ->
+            :ok
+
+          resolver when is_function(resolver, 1) or is_function(resolver, 2) ->
+            status_opts =
+              opts
+              |> Keyword.take([
+                :now,
+                :accepted_algs,
+                :trusted_certificates,
+                :status_trusted_certificates,
+                :haip,
+                :certificate_trust,
+                :cache_status
+              ])
+              |> Keyword.put(:format, :jwt)
+
+            StatusList.check_status(status, resolver, issuer_keys, status_opts)
+        end
+
+      {:ok, _other} ->
+        {:error, :invalid_status_reference}
     end
   end
 

@@ -292,13 +292,22 @@ defmodule Attesto.ClientAssertionTest do
              |> ClientAssertion.verify(@client_id, @audience, trusted)
   end
 
-  test "rejects an array aud even when it contains the expected audience - FAPI 2 requires a single-valued aud" do
+  test "rejects array aud values (one-member issuer, one-member endpoint, and two-member arrays)" do
     key = ec_key()
+    trusted = %{"keys" => [public_jwk(key)]}
+    endpoint = "https://issuer.example/oauth/par"
 
-    assert {:error, :invalid_audience} =
-             key
-             |> assertion(%{"aud" => [@audience, "https://other.example/token"]})
-             |> ClientAssertion.verify(@client_id, @audience, %{"keys" => [public_jwk(key)]})
+    for aud <- [
+          [@audience],
+          [endpoint],
+          [@audience, endpoint],
+          [@audience, "https://other.example/token"]
+        ] do
+      assert {:error, :invalid_audience} =
+               key
+               |> assertion(%{"aud" => aud})
+               |> ClientAssertion.verify(@client_id, @audience, trusted)
+    end
   end
 
   test "peek_client_id reads iss without trusting the assertion" do

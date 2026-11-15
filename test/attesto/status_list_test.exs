@@ -210,6 +210,45 @@ defmodule Attesto.StatusListTest do
       assert {:error, :status_service_unavailable} =
                StatusList.resolve(StatusList.reference(@uri, 0), resolver, jwks)
     end
+
+    test "rejects an out-of-bounds index in StatusList.resolve/4 (draft-ietf-oauth-status-list-21 §8.3)",
+         %{jwks: jwks} do
+      token = StatusList.issue(TestKeystore, @uri, [0, 2, 1, 3], bits: 2, now: 1_700_000_000)
+      resolver = fn @uri -> {:ok, token} end
+
+      assert {:error, :status_index_out_of_range} =
+               StatusList.resolve(StatusList.reference(@uri, 4), resolver, jwks)
+    end
+
+    test "does not invoke status resolution once referenced-token validation fails (draft-ietf-oauth-status-list-21 §8.3)",
+         %{jwks: jwks} do
+      test_pid = self()
+      now = 1_700_000_000
+
+      expired_vc =
+        Attesto.SdJwtVc.issue(
+          iss: "https://issuer.example",
+          vct: "urn:example:id",
+          pem: TestKeystore.signing_pem(),
+          now: now - 3600,
+          exp: now - 120,
+          status: StatusList.reference(@uri, 0)
+        )
+
+      resolver = fn uri ->
+        send(test_pid, {:status_fetched, uri})
+        {:ok, StatusList.issue(TestKeystore, @uri, [0], now: now)}
+      end
+
+      result =
+        with {:ok, vc} <- Attesto.SdJwtVc.verify(expired_vc, jwks, now: now) do
+          StatusList.resolve(vc.claims["status"], resolver, jwks)
+        end
+
+      assert {:error, :expired} = result
+
+      refute_receive {:status_fetched, _}
+    end
   end
 
   test "handles a compressed 10,000-entry one-bit list", %{jwks: jwks} do

@@ -31,6 +31,7 @@ defmodule Attesto.DPoP.Proof do
           | {:kid, String.t()}
           | {:now, DateTime.t() | non_neg_integer()}
           | {:jti, String.t()}
+          | {:allow_http, boolean()}
 
   @type error ::
           :invalid_key
@@ -65,7 +66,7 @@ defmodule Attesto.DPoP.Proof do
   def build(jwk, htm, htu, opts) when is_list(opts) do
     with {:ok, jose_jwk} <- normalize_key(jwk),
          {:ok, method} <- normalize_htm(htm),
-         {:ok, uri} <- normalize_htu(htu),
+         {:ok, uri} <- normalize_htu(htu, opts),
          {:ok, now} <- validate_now(opts),
          {:ok, jti} <- validate_jti(opts),
          {:ok, alg} <- resolve_alg(jose_jwk, opts),
@@ -125,7 +126,9 @@ defmodule Attesto.DPoP.Proof do
   # RFC 9449 section 4.2 excludes query and fragment from `htu`. Validate the
   # complete source first so malformed percent escapes cannot hide in a
   # component that is subsequently removed.
-  defp normalize_htu(htu) when is_binary(htu) do
+  defp normalize_htu(htu, opts) when is_binary(htu) do
+    allow_loopback_http? = Keyword.get(opts, :allow_http, false) == true
+
     with false <- Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, htu),
          {:ok, %Elixir.URI{} = parsed} <- Elixir.URI.new(htu),
          normalized =
@@ -135,7 +138,7 @@ defmodule Attesto.DPoP.Proof do
                query: nil,
                fragment: nil
            }),
-         true <- Attesto.URI.https_identifier?(normalized) do
+         true <- Attesto.URI.https_identifier?(normalized, allow_loopback_http: allow_loopback_http?) do
       {:ok, normalized}
     else
       _other -> {:error, :invalid_htu}
@@ -144,7 +147,7 @@ defmodule Attesto.DPoP.Proof do
     _error -> {:error, :invalid_htu}
   end
 
-  defp normalize_htu(_other), do: {:error, :invalid_htu}
+  defp normalize_htu(_other, _opts), do: {:error, :invalid_htu}
 
   defp validate_now(opts) do
     case Keyword.fetch(opts, :now) do

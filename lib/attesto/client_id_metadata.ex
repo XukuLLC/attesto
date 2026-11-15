@@ -1,7 +1,7 @@
 defmodule Attesto.ClientIdMetadata do
   @moduledoc """
   Client ID Metadata Documents - CIMD
-  (`draft-ietf-oauth-client-id-metadata-document-02`, IETF OAuth WG).
+  (`draft-ietf-oauth-client-id-metadata-document-03`, IETF OAuth WG).
 
   CIMD lets a client identify itself with no prior registration by using an
   HTTPS URL as its `client_id`. The authorization server dereferences that URL
@@ -10,20 +10,20 @@ defmodule Attesto.ClientIdMetadata do
 
   This module is the *pure*, conn-free, HTTP-free half of that feature: it
   decides whether a `client_id` is a CIMD URL (`client_id_url?/1`), validates
-  the URL against the draft §2 grammar (`validate_client_id/1`), and validates a
-  fetched document against the draft §2 content rules, normalizing it into the
-  client shape attesto's resolution expects (`validate_document/2`). The
+  the URL against the draft §3 grammar (`validate_client_id/1`), and validates a
+  fetched document against the draft §4 / §5 content rules, normalizing it into
+  the client shape attesto's resolution expects (`validate_document/2`). The
   load-bearing network half - the SSRF-guarded GET, redirect refusal, size cap,
   and caching - lives in the Phoenix layer; this module never touches a socket
   and pulls in no dependencies, the same discipline as
   `Attesto.AuthorizationRequest`.
 
-  ## URL grammar (draft §2)
+  ## URL grammar (draft §3)
 
   A CIMD `client_id` MUST:
 
     * use the `https` scheme;
-    * have a path component;
+    * have a path component other than `/`;
     * NOT contain a fragment;
     * NOT contain userinfo (a `user:password@` component);
     * NOT contain single-dot (`.`) or double-dot (`..`) path segments.
@@ -32,20 +32,29 @@ defmodule Attesto.ClientIdMetadata do
   not a binary, or does not parse as a URL, is not a CIMD client_id - it is an
   opaque identifier the host resolves through its own registry.
 
-  ## Document content (draft §2)
+  ## Document content (draft §4 / §5)
 
   The fetched document's fields are the OAuth Dynamic Client Registration
-  Metadata registry values (RFC 7591 §2). On top of that field set the draft
-  requires:
+  Metadata registry values (RFC 7591 §2), plus
+  `token_endpoint_auth_methods_supported` (OpenID RP Metadata Choices). On top
+  of that field set the draft requires:
 
     * a `client_id` member equal to the URL by simple string comparison
       (mismatch -> `{:error, :client_id_mismatch}`);
     * NO shared symmetric secret: `client_secret` / `client_secret_expires_at`
-      MUST NOT be present (`{:error, :symmetric_secret}`), and
-      `token_endpoint_auth_method` MUST NOT be one of `client_secret_basic`,
-      `client_secret_post`, or `client_secret_jwt`
-      (`{:error, :symmetric_auth_method}`) - a CIMD client authenticates as a
-      public client (`none` + PKCE) or with `private_key_jwt`.
+      MUST NOT be present (`{:error, :symmetric_secret}`), and neither
+      `token_endpoint_auth_method` nor `token_endpoint_auth_methods_supported`
+      may contain `client_secret_basic`, `client_secret_post`, or
+      `client_secret_jwt` (`{:error, :symmetric_auth_method}`) - a CIMD client
+      authenticates as a public client (`none` + PKCE) or with
+      `private_key_jwt`;
+    * when both `token_endpoint_auth_methods_supported` and
+      `token_endpoint_auth_method` are present, the singular value MUST appear
+      in `token_endpoint_auth_methods_supported`; when neither is present, the
+      client's method defaults to `none` (never RFC 7591's `client_secret_basic`);
+    * `jwks` and `jwks_uri` MUST NOT both be present (RFC 7591 / draft §4.1),
+      and at least one of them MUST be present when `private_key_jwt` is
+      declared (draft §5).
 
   Authorization-code and implicit grants require a non-empty `redirect_uris`
   array of strings. A document explicitly declaring only grants that do not
@@ -61,30 +70,30 @@ defmodule Attesto.ClientIdMetadata do
   `validate_document/2` returns a string-keyed map carrying the RFC 7591 §2
   client-metadata members the document supplied (`client_id`, `redirect_uris`,
   and any of `grant_types`, `response_types`, `scope`, `jwks`, `jwks_uri`,
-  `client_name`, `client_uri`, `logo_uri`, `token_endpoint_auth_method`,
-  `contacts`). The shape matches the validated metadata the RFC 7591
-  registration path persists, so a CIMD client is consumed downstream (scope
-  resolution, redirect match, JARM, DPoP) exactly like a registered one. Absent
-  members are omitted rather than rendered as `nil`; an out-of-shape member
-  (e.g. a `redirect_uris` that is not a list of strings) is a validation error,
-  never silently dropped.
+  `client_name`, `client_uri`, `logo_uri`, `token_endpoint_auth_methods_supported`,
+  `token_endpoint_auth_method`, `contacts`). The shape matches the validated
+  metadata the RFC 7591 registration path persists, so a CIMD client is consumed
+  downstream (scope resolution, redirect match, JARM, DPoP) exactly like a
+  registered one. Absent members are omitted rather than rendered as `nil`; an
+  out-of-shape member (e.g. a `redirect_uris` that is not a list of strings) is
+  a validation error, never silently dropped.
   """
 
   @https_scheme "https"
 
-  # draft §2: a shared symmetric secret is incompatible with a public
+  # draft §4.1: a shared symmetric secret is incompatible with a public
   # `client_id` URL anyone may dereference, so these RFC 7591 §3.2.1 members
   # MUST NOT appear in the document.
   @symmetric_secret_members ~w(client_secret client_secret_expires_at)
 
-  # draft §2 / RFC 7591 §2: the token-endpoint auth methods that rely on a
+  # draft §4.1 / §5: the token-endpoint auth methods that rely on a
   # shared symmetric secret. A CIMD client MUST NOT use any of them; it
   # authenticates as a public client (`none`) or with `private_key_jwt`.
   @symmetric_auth_methods ~w(client_secret_basic client_secret_post client_secret_jwt)
 
-  # RFC 7591 §2 client-metadata members carried through, with the shape each
-  # must satisfy when present. `redirect_uris` is validated and required
-  # separately (RFC 9700), so it is not in this passthrough table.
+  # RFC 7591 §2 + CIMD draft -03 §5 client-metadata members carried through, with
+  # the shape each must satisfy when present. `redirect_uris` is validated and
+  # required separately (RFC 9700), so it is not in this passthrough table.
   @passthrough_members [
     {"grant_types", :non_empty_string_array},
     {"response_types", :string_array},
@@ -97,7 +106,8 @@ defmodule Attesto.ClientIdMetadata do
     {"client_uri", :string},
     {"logo_uri", :string},
     {"jwks_uri", :string},
-    {"token_endpoint_auth_method", :string},
+    {"token_endpoint_auth_methods_supported", :non_empty_string_array},
+    {"token_endpoint_auth_method", :non_empty_string},
     {"jwks", :map}
   ]
 
@@ -142,14 +152,14 @@ defmodule Attesto.ClientIdMetadata do
 
   @doc """
   Validate a `client_id` against the CIMD URL grammar
-  (`draft-ietf-oauth-client-id-metadata-document-02` §2).
+  (`draft-ietf-oauth-client-id-metadata-document-03` §3).
 
   Returns `{:ok, %URI{}}` for a well-formed CIMD `client_id`, or
   `{:error, reason}` for the first rule it violates:
 
     * `:not_a_url` - not parseable as a URL with a host;
     * `:not_https` - the scheme is not `https`;
-    * `:no_path` - no path component (or a bare `/` with nothing after it);
+    * `:no_path` - no path component or bare `/` (draft §3 forbids `/`);
     * `:has_fragment` - a fragment is present;
     * `:has_userinfo` - a `user:password@` userinfo component is present;
     * `:dot_segments` - the path contains a single-dot (`.`) or double-dot
@@ -205,32 +215,36 @@ defmodule Attesto.ClientIdMetadata do
   end
 
   @doc """
-  Validate a fetched client metadata document against the draft §2 content
+  Validate a fetched client metadata document against the draft §4 / §5 content
   rules and normalize it into attesto's client shape.
 
   `client_id` is the URL the document was fetched from (already validated by
   `validate_client_id/1`); `doc` is the decoded JSON object. Returns
   `{:ok, metadata}` - a string-keyed map carrying the validated, normalized
-  RFC 7591 §2 metadata members - or `{:error, reason}`:
+  RFC 7591 §2 / CIMD metadata members - or `{:error, reason}`:
 
     * `:client_id_mismatch` - `doc["client_id"]` is not equal to `client_id` by
-      simple string comparison (draft §2);
+      simple string comparison (draft §4);
     * `:symmetric_secret` - `client_secret` or `client_secret_expires_at` is
-      present (draft §2: no shared symmetric secret);
-    * `:symmetric_auth_method` - `token_endpoint_auth_method` is one of
-      `client_secret_basic`, `client_secret_post`, or `client_secret_jwt`
-      (draft §2);
+      present (draft §4.1: no shared symmetric secret);
+    * `:symmetric_auth_method` - `token_endpoint_auth_method` or
+      `token_endpoint_auth_methods_supported` names `client_secret_basic`,
+      `client_secret_post`, or `client_secret_jwt` (draft §4.1 / §5);
     * `:invalid_redirect_uris` - `redirect_uris` is absent, empty, or not a list
-      of strings (RFC 9700 requires registered redirect URIs);
+      of strings (RFC 9700 / draft §4.2 require registered redirect URIs for
+      redirect-based grants);
     * `:invalid_metadata` - a carried-through member is present with the wrong
-      shape (e.g. a non-string `scope`, or a `grant_types` that is not a list of
-      strings).
+      shape, `jwks` and `jwks_uri` are both present (draft §4.1),
+      `token_endpoint_auth_method` is not included in
+      `token_endpoint_auth_methods_supported` (draft §5), or `private_key_jwt`
+      is declared with neither `jwks` nor `jwks_uri` (draft §5).
 
   The returned map always carries `client_id` and `redirect_uris`; any of the
-  other RFC 7591 §2 members the document supplied
+  other metadata members the document supplied
   (`grant_types`, `response_types`, `scope`, `jwks`, `jwks_uri`, `client_name`,
-  `client_uri`, `logo_uri`, `token_endpoint_auth_method`, `contacts`) are
-  carried through, and absent members are omitted.
+  `client_uri`, `logo_uri`, `token_endpoint_auth_methods_supported`,
+  `token_endpoint_auth_method`, `contacts`) are carried through, and absent
+  members are omitted.
   """
   @spec validate_document(String.t(), map()) ::
           {:ok, map()} | {:error, document_error()}
@@ -238,9 +252,11 @@ defmodule Attesto.ClientIdMetadata do
     with :ok <- validate_document_client_id(client_id, doc),
          :ok <- reject_symmetric_secret(doc),
          :ok <- reject_symmetric_auth_method(doc),
+         :ok <- reject_conflicting_jwks(doc),
          :ok <- validate_document_keys(doc),
          {:ok, redirect_uris} <- validate_redirect_uris(doc),
-         {:ok, passthrough} <- normalize_passthrough(doc) do
+         {:ok, passthrough} <- normalize_passthrough(doc),
+         :ok <- validate_auth_methods(passthrough) do
       metadata =
         passthrough
         |> Map.put("client_id", client_id)
@@ -250,7 +266,22 @@ defmodule Attesto.ClientIdMetadata do
     end
   end
 
-  # draft §2: the document MUST contain a `client_id` equal to the URL it was
+  @doc """
+  Return the token endpoint authentication methods declared by a CIMD metadata
+  document (`draft-ietf-oauth-client-id-metadata-document-03` §5).
+
+  Prefers `token_endpoint_auth_methods_supported` over singular
+  `token_endpoint_auth_method`. When neither property is present, assumes
+  `["none"]` (RFC 7591's `client_secret_basic` default MUST NOT be applied).
+  """
+  @spec auth_methods(map()) :: [String.t()]
+  def auth_methods(%{"token_endpoint_auth_methods_supported" => [_ | _] = methods}), do: methods
+
+  def auth_methods(%{"token_endpoint_auth_method" => method}) when is_binary(method) and method != "", do: [method]
+
+  def auth_methods(_metadata), do: ["none"]
+
+  # draft §4: the document MUST contain a `client_id` equal to the URL it was
   # fetched from, by simple string comparison.
   defp validate_document_client_id(client_id, doc) do
     if Map.get(doc, "client_id") == client_id do
@@ -260,7 +291,7 @@ defmodule Attesto.ClientIdMetadata do
     end
   end
 
-  # draft §2: a CIMD client holds no shared symmetric secret, so neither
+  # draft §4.1: a CIMD client holds no shared symmetric secret, so neither
   # `client_secret` nor `client_secret_expires_at` may appear in the document.
   defp reject_symmetric_secret(doc) do
     if Enum.any?(@symmetric_secret_members, &Map.has_key?(doc, &1)) do
@@ -270,15 +301,58 @@ defmodule Attesto.ClientIdMetadata do
     end
   end
 
-  # draft §2: `token_endpoint_auth_method` MUST NOT designate a shared-secret
+  # draft §4.1 / §5: `token_endpoint_auth_method` and
+  # `token_endpoint_auth_methods_supported` MUST NOT designate a shared-secret
   # method; a CIMD client is public (`none`) or uses `private_key_jwt`.
   defp reject_symmetric_auth_method(doc) do
-    if Map.get(doc, "token_endpoint_auth_method") in @symmetric_auth_methods do
+    singular_symmetric? = Map.get(doc, "token_endpoint_auth_method") in @symmetric_auth_methods
+
+    supported_symmetric? =
+      case Map.get(doc, "token_endpoint_auth_methods_supported") do
+        methods when is_list(methods) -> Enum.any?(methods, &(&1 in @symmetric_auth_methods))
+        _ -> false
+      end
+
+    if singular_symmetric? or supported_symmetric? do
       {:error, :symmetric_auth_method}
     else
       :ok
     end
   end
+
+  # draft §4.1 / RFC 7591 §2: `jwks` and `jwks_uri` MUST NOT both be present.
+  defp reject_conflicting_jwks(doc) do
+    if Map.has_key?(doc, "jwks") and Map.has_key?(doc, "jwks_uri"),
+      do: {:error, :invalid_metadata},
+      else: :ok
+  end
+
+  # draft §5: if both `token_endpoint_auth_methods_supported` and singular
+  # `token_endpoint_auth_method` are present, the singular value MUST appear in
+  # the array. Any document declaring `private_key_jwt` MUST carry `jwks` or
+  # `jwks_uri`.
+  defp validate_auth_methods(passthrough) do
+    with :ok <- check_auth_method_consistency(passthrough) do
+      if "private_key_jwt" in auth_methods(passthrough) and not has_jwks_source?(passthrough) do
+        {:error, :invalid_metadata}
+      else
+        :ok
+      end
+    end
+  end
+
+  defp check_auth_method_consistency(%{
+         "token_endpoint_auth_methods_supported" => methods,
+         "token_endpoint_auth_method" => method
+       }) do
+    if method in methods, do: :ok, else: {:error, :invalid_metadata}
+  end
+
+  defp check_auth_method_consistency(_passthrough), do: :ok
+
+  defp has_jwks_source?(%{"jwks" => jwks}) when is_map(jwks), do: true
+  defp has_jwks_source?(%{"jwks_uri" => uri}) when is_binary(uri) and uri != "", do: true
+  defp has_jwks_source?(_passthrough), do: false
 
   @private_jwk_members ~w(d p q dp dq qi oth k)
 
@@ -347,6 +421,7 @@ defmodule Attesto.ClientIdMetadata do
   # present, and unambiguous across RFC 3986 and WHATWG URL parsers.
   defp valid_redirect_uri?(uri) when is_binary(uri) do
     with true <- Attesto.RedirectURI.unambiguous?(uri),
+         false <- Attesto.RedirectURI.reserved_query_param?(uri),
          {:ok, %URI{scheme: scheme, host: host, fragment: nil} = parsed}
          when is_binary(scheme) and scheme != "" <- URI.new(uri) do
       Attesto.URI.valid_port?(uri, parsed.port) or
@@ -396,6 +471,8 @@ defmodule Attesto.ClientIdMetadata do
   end
 
   defp normalize_value(:string, value) when is_binary(value), do: {:ok, value}
+
+  defp normalize_value(:non_empty_string, value) when is_binary(value) and value != "", do: {:ok, value}
 
   defp normalize_value(:map, value) when is_map(value), do: {:ok, value}
 

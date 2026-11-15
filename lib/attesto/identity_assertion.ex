@@ -45,11 +45,12 @@ defmodule Attesto.IdentityAssertion do
       lifetime `exp - iat` does not exceed `:max_lifetime_seconds` when set.
   """
 
-  alias Attesto.{Claims, JWS, ResourceIndicator, Scope, Thumbprint}
+  alias Attesto.{Claims, Config, JWS, ResourceIndicator, Scope, Secret, Thumbprint}
   alias Attesto.NumericDate
   alias Attesto.SigningAlg
 
   @typ "oauth-id-jag+jwt"
+  @default_lifetime_seconds 60
   @clock_skew_seconds NumericDate.default_clock_skew_seconds()
   @max_jti_bytes 256
   # Read at the token endpoint before client authentication; an identity
@@ -375,6 +376,137 @@ defmodule Attesto.IdentityAssertion do
   end
 
   defp check_lifetime(_claims, _opts), do: :ok
+
+  @doc """
+  Sign an Identity Assertion JWT Authorization Grant as a trust domain A
+  authorization server (`draft-ietf-oauth-identity-chaining-17` / RFC 10092;
+  `draft-ietf-oauth-identity-assertion-authz-grant-05`).
+
+  Options:
+
+    * `:typ` - JOSE header `typ` value. Defaults to `"oauth-id-jag+jwt"` for
+      ID-JAG (`urn:ietf:params:oauth:token-type:id-jag`); pass `"JWT"` for a
+      plain RFC 7523 authorization grant (`urn:ietf:params:oauth:token-type:jwt`).
+    * `:now` / `:lifetime` - clock override and assertion lifetime in seconds.
+
+  The issuer is always `config.issuer`. A supplied `iss` attribute must match;
+  a conflicting value returns `{:error, :invalid_claims}`.
+  """
+  @spec sign(Config.t(), map() | keyword(), keyword()) ::
+          {:ok, String.t()} | {:error, :missing_claim | :invalid_claims}
+  def sign(%Config{} = config, attrs, opts \\ []) when (is_map(attrs) or is_list(attrs)) and is_list(opts) do
+    typ = validate_sign_typ!(Keyword.get(opts, :typ, @typ))
+    attrs = normalize_attrs(attrs)
+    iat = NumericDate.now(opts)
+    lifetime = NumericDate.bounded_lifetime(opts, :lifetime, @default_lifetime_seconds)
+
+    with {:ok, sub} <- require_non_empty_attr(attrs, "sub"),
+         {:ok, aud} <- require_non_empty_attr(attrs, "aud"),
+         {:ok, client_id} <- require_non_empty_attr(attrs, "client_id"),
+         {:ok, iss} <- configured_issuer(config.issuer),
+         :ok <- validate_issuer_attr(attrs, iss),
+         {:ok, jti} <- resolve_jti_attr(attrs),
+         claims = %{
+           "iss" => iss,
+           "sub" => sub,
+           "aud" => aud,
+           "client_id" => client_id,
+           "jti" => jti,
+           "iat" => iat,
+           "exp" => iat + lifetime
+         },
+         {:ok, claims} <- put_optional_scope(claims, Map.get(attrs, "scope")),
+         {:ok, claims} <- put_optional_resource(claims, Map.get(attrs, "resource")),
+         {:ok, claims} <- put_optional_cnf(claims, Map.get(attrs, "cnf")),
+         {:ok, claims} <- put_optional_nbf(claims, Map.get(attrs, "nbf")) do
+      {:ok, JWS.sign_current(config.keystore, claims, typ: typ)}
+    end
+  end
+
+  defp validate_sign_typ!(typ) when typ in [@typ, "JWT"], do: typ
+
+  defp validate_sign_typ!(typ) do
+    raise ArgumentError, "IdentityAssertion.sign/3 :typ must be #{inspect(@typ)} or \"JWT\"; got #{inspect(typ)}"
+  end
+
+  defp normalize_attrs(attrs) when is_list(attrs), do: Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+  defp normalize_attrs(attrs) when is_map(attrs), do: Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+
+  defp require_non_empty_attr(attrs, key) do
+    case Map.get(attrs, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      nil -> {:error, :missing_claim}
+      "" -> {:error, :missing_claim}
+      _other -> {:error, :invalid_claims}
+    end
+  end
+
+  defp configured_issuer(iss) when is_binary(iss) and iss != "", do: {:ok, iss}
+  defp configured_issuer(_iss), do: {:error, :invalid_claims}
+
+  defp validate_issuer_attr(attrs, issuer) do
+    case Map.fetch(attrs, "iss") do
+      :error -> :ok
+      {:ok, ^issuer} -> :ok
+      _ -> {:error, :invalid_claims}
+    end
+  end
+
+  defp resolve_jti_attr(attrs) do
+    case Map.get(attrs, "jti") do
+      nil -> {:ok, Secret.generate(16)}
+      jti when is_binary(jti) and jti != "" and byte_size(jti) <= @max_jti_bytes -> {:ok, jti}
+      _other -> {:error, :invalid_claims}
+    end
+  end
+
+  defp put_optional_scope(claims, nil), do: {:ok, claims}
+  defp put_optional_scope(claims, []), do: {:ok, claims}
+
+  defp put_optional_scope(claims, scopes) when is_list(scopes) do
+    if Scope.valid_list?(scopes, allow_empty?: false) do
+      {:ok, Map.put(claims, "scope", Enum.join(scopes, " "))}
+    else
+      {:error, :invalid_claims}
+    end
+  end
+
+  defp put_optional_scope(claims, scope) when is_binary(scope) do
+    scope
+    |> Scope.parse()
+    |> then(&put_optional_scope(claims, &1))
+  end
+
+  defp put_optional_scope(_claims, _other), do: {:error, :invalid_claims}
+
+  defp put_optional_resource(claims, nil), do: {:ok, claims}
+  defp put_optional_resource(claims, []), do: {:ok, claims}
+
+  defp put_optional_resource(claims, [single]) when is_binary(single), do: put_optional_resource(claims, single)
+
+  defp put_optional_resource(claims, resource) do
+    case ResourceIndicator.validate(resource) do
+      {:ok, [single]} -> {:ok, Map.put(claims, "resource", single)}
+      {:ok, [_ | _] = list} -> {:ok, Map.put(claims, "resource", list)}
+      _ -> {:error, :invalid_claims}
+    end
+  end
+
+  defp put_optional_cnf(claims, nil), do: {:ok, claims}
+
+  defp put_optional_cnf(claims, %{"jkt" => jkt} = cnf) when map_size(cnf) == 1 do
+    if Thumbprint.valid?(jkt), do: {:ok, Map.put(claims, "cnf", cnf)}, else: {:error, :invalid_claims}
+  end
+
+  defp put_optional_cnf(_claims, _cnf), do: {:error, :invalid_claims}
+
+  defp put_optional_nbf(claims, nil), do: {:ok, claims}
+
+  defp put_optional_nbf(claims, nbf) when is_integer(nbf) and nbf >= 0 do
+    {:ok, Map.put(claims, "nbf", nbf)}
+  end
+
+  defp put_optional_nbf(_claims, _nbf), do: {:error, :invalid_claims}
 
   defp numericdate?(value), do: NumericDate.valid?(value, non_negative: true)
 end

@@ -407,4 +407,141 @@ defmodule Attesto.IdentityAssertionTest do
       assert :error = IdentityAssertion.peek_issuer("garbage")
     end
   end
+
+  describe "sign/3 - Domain A ID-JAG issuance" do
+    test "signs an ID-JAG that verifies cleanly with IdentityAssertion.verify/3" do
+      key = ec_key()
+      pem = JOSE.JWK.to_pem(key) |> elem(1)
+
+      defmodule DomainAKeystore do
+        @moduledoc false
+        @behaviour Attesto.Keystore
+
+        def signing_pem, do: Process.get({__MODULE__, :pem})
+        def verification_pems, do: [Process.get({__MODULE__, :pem})]
+      end
+
+      Process.put({DomainAKeystore, :pem}, pem)
+
+      config =
+        Attesto.Config.new(
+          issuer: @iss,
+          audience: @iss,
+          keystore: DomainAKeystore,
+          principal_kinds: [Attesto.PrincipalKind.new("user", "u_")]
+        )
+
+      now = 1_750_000_000
+
+      assert {:ok, jwt} =
+               IdentityAssertion.sign(
+                 config,
+                 %{
+                   sub: "user-123",
+                   aud: @aud,
+                   client_id: @cid,
+                   scope: ["read", "write"],
+                   resource: "https://api.example/mcp"
+                 },
+                 now: now,
+                 lifetime: 45
+               )
+
+      assert {:ok, verified} = IdentityAssertion.verify(jwt, public_jwks(key, "ES256"), opts(now: now))
+      assert verified["iss"] == @iss
+
+      assert {:error, :invalid_claims} =
+               IdentityAssertion.sign(
+                 config,
+                 %{sub: "user-123", aud: @aud, client_id: @cid, iss: "https://another-issuer.example"},
+                 now: now
+               )
+
+      assert {:ok, same_issuer} =
+               IdentityAssertion.sign(
+                 config,
+                 %{sub: "user-123", aud: @aud, client_id: @cid, iss: @iss},
+                 now: now
+               )
+
+      assert {:ok, same_claims} = IdentityAssertion.verify(same_issuer, public_jwks(key, "ES256"), opts(now: now))
+      assert same_claims["iss"] == @iss
+      assert verified["sub"] == "user-123"
+      assert verified["aud"] == @aud
+      assert verified["client_id"] == @cid
+      assert verified["scope"] == "read write"
+      assert verified["resource"] == "https://api.example/mcp"
+      assert verified["exp"] == now + 45
+      assert is_binary(verified["jti"])
+    end
+
+    test "rejects missing required claims and invalid optional claims" do
+      key = ec_key()
+      pem = JOSE.JWK.to_pem(key) |> elem(1)
+
+      defmodule InvalidSignKeystore do
+        @moduledoc false
+        @behaviour Attesto.Keystore
+
+        def signing_pem, do: Process.get({__MODULE__, :pem})
+        def verification_pems, do: [Process.get({__MODULE__, :pem})]
+      end
+
+      Process.put({InvalidSignKeystore, :pem}, pem)
+
+      config =
+        Attesto.Config.new(
+          issuer: @iss,
+          audience: @iss,
+          keystore: InvalidSignKeystore,
+          principal_kinds: [Attesto.PrincipalKind.new("user", "u_")]
+        )
+
+      assert {:error, :missing_claim} = IdentityAssertion.sign(config, %{aud: @aud, client_id: @cid})
+
+      assert {:error, :invalid_claims} =
+               IdentityAssertion.sign(config, %{sub: "u", aud: @aud, client_id: @cid, resource: "not-a-uri"})
+
+      assert {:error, :invalid_claims} =
+               IdentityAssertion.sign(config, %{sub: "u", aud: @aud, client_id: @cid, cnf: %{"jkt" => "bad"}})
+    end
+
+    test "supports typ: \"JWT\" for plain RFC 7523 grants while verify/3 continues requiring ID-JAG typ" do
+      key = ec_key()
+      pem = JOSE.JWK.to_pem(key) |> elem(1)
+
+      defmodule PlainJwtSignKeystore do
+        @moduledoc false
+        @behaviour Attesto.Keystore
+
+        def signing_pem, do: Process.get({__MODULE__, :pem})
+        def verification_pems, do: [Process.get({__MODULE__, :pem})]
+      end
+
+      Process.put({PlainJwtSignKeystore, :pem}, pem)
+
+      config =
+        Attesto.Config.new(
+          issuer: @iss,
+          audience: @iss,
+          keystore: PlainJwtSignKeystore,
+          principal_kinds: [Attesto.PrincipalKind.new("user", "u_")]
+        )
+
+      now = 1_750_000_000
+
+      assert {:ok, jwt} =
+               IdentityAssertion.sign(config, %{sub: "user-123", aud: @aud, client_id: @cid},
+                 now: now,
+                 typ: "JWT"
+               )
+
+      assert {:ok, %{"typ" => "JWT"}} = Attesto.JWS.peek_json(jwt, :protected)
+      assert {:error, :invalid_typ} = IdentityAssertion.verify(jwt, public_jwks(key, "ES256"), opts(now: now))
+
+      assert_raise ArgumentError, fn ->
+        IdentityAssertion.sign(config, %{sub: "user-123", aud: @aud, client_id: @cid}, typ: "at+jwt")
+      end
+    end
+  end
 end

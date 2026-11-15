@@ -319,13 +319,7 @@ defmodule Attesto.Siop do
 
   defp check_issuer(_claims, _subject, _type), do: {:error, :invalid_issuer}
 
-  defp check_audience(%{"aud" => audience}, expected) do
-    if Claims.audience_matches?(audience, expected, :array),
-      do: :ok,
-      else: {:error, :invalid_audience}
-  end
-
-  defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
+  defp check_audience(claims, expected), do: Claims.check_audience(claims, expected, :array)
 
   defp check_nonce(%{"nonce" => nonce}, expected) when is_binary(nonce) do
     if SecureCompare.equal?(nonce, expected),

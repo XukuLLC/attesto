@@ -1,6 +1,6 @@
 defmodule Attesto.Federation.MetadataPolicy do
   @moduledoc """
-  OpenID Federation 1.0 metadata-policy resolution and application.
+  OpenID Federation 1.0 Final (2026-02-17) metadata-policy resolution and application.
 
   Policies use string-keyed maps. `apply/2` accepts either a complete
   `metadata_policy` Claim together with complete Entity metadata, or one

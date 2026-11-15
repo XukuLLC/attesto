@@ -405,6 +405,29 @@ defmodule Attesto.X509Test do
                X509.verify([expired_ee.leaf], trusted_certificates: [expired_ee.leaf], haip: false)
     end
 
+    test "accepts CA-issued mdoc issuer leaf pinned alone and truncates chain above pinned intermediate", ctx do
+      mdoc_ee = Fixture.chain(ctx.root, peer: [extensions: [Fixture.signer_usage()]])
+
+      assert {:ok, _} =
+               X509.verify([mdoc_ee.leaf],
+                 trusted_certificates: [mdoc_ee.leaf],
+                 haip: false,
+                 purpose: :mdoc_issuer
+               )
+
+      inter_chain = Fixture.chain(ctx.root, intermediates: [[key: Fixture.curve()]])
+      [leaf, inter] = inter_chain.chain
+
+      assert {:ok, _} =
+               X509.verify([leaf, inter, ctx.root.cert], trusted_certificates: [inter], haip: false)
+
+      assert {:error, :untrusted_certificate} =
+               X509.verify([leaf, inter, ctx.root.cert],
+                 trusted_certificates: [Fixture.root().cert],
+                 haip: false
+               )
+    end
+
     test "rejects SHA-1 and MD5 signatures on leaves and trust anchors", ctx do
       sha1_root = :public_key.pkix_test_root_cert(~c"sha1-root", key: Fixture.curve(), digest: :sha)
 

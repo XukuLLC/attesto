@@ -47,7 +47,7 @@ if Code.ensure_loaded?(CBOR) do
     """
     @spec sign1(String.t(), binary(), keyword()) :: binary()
     def sign1(pem, payload_bstr, opts) when is_binary(pem) and is_binary(payload_bstr) and is_list(opts) do
-      protected = CBOR.encode(%{1 => @alg_es256})
+      protected = CBOR.encode(protected_header(opts))
       signing_input = signature_structure(protected, payload_bstr)
       jwk = Key.signing_jwk(pem)
 
@@ -58,8 +58,34 @@ if Code.ensure_loaded?(CBOR) do
         |> :public_key.sign(:sha256, private_key(jwk))
         |> der_to_raw()
 
-      [bytes(protected), unprotected_header(opts), bytes(payload_bstr), bytes(signature)]
-      |> CBOR.encode()
+      message = [bytes(protected), unprotected_header(opts), bytes(payload_bstr), bytes(signature)]
+
+      if Keyword.get(opts, :tagged, false) do
+        CBOR.encode(%CBOR.Tag{tag: 18, value: message})
+      else
+        CBOR.encode(message)
+      end
+    end
+
+    @doc """
+    Decode and validate the protected and unprotected header maps of a `COSE_Sign1`
+    without verifying its signature.
+
+    Pass `allow_tagged: true` to accept CBOR tag 18 (`COSE_Sign1`) in addition to
+    an untagged four-element array.
+    """
+    @spec peek_headers(binary(), keyword()) :: {:ok, map(), map()} | {:error, verify_error()}
+    def peek_headers(cose_sign1_bytes, opts \\ []) when is_binary(cose_sign1_bytes) and is_list(opts) do
+      allow_tagged? = Keyword.get(opts, :allow_tagged, false)
+
+      with {:ok, protected, unprotected, _payload, _signature} <- decode_sign1(cose_sign1_bytes, allow_tagged?),
+           {:ok, header, _algorithm} <- decode_and_validate_protected(protected, unprotected) do
+        {:ok, header, unprotected}
+      end
+    rescue
+      _error -> {:error, :invalid_cose}
+    catch
+      _kind, _reason -> {:error, :invalid_cose}
     end
 
     @doc """
@@ -74,7 +100,9 @@ if Code.ensure_loaded?(CBOR) do
     @spec verify1(binary(), JOSE.JWK.t() | map() | String.t(), keyword()) ::
             {:ok, binary()} | {:error, verify_error()}
     def verify1(cose_sign1_bytes, jwk_or_pem, opts) when is_binary(cose_sign1_bytes) and is_list(opts) do
-      with {:ok, protected, unprotected, payload, signature} <- decode_sign1(cose_sign1_bytes),
+      allow_tagged? = Keyword.get(opts, :allow_tagged, false)
+
+      with {:ok, protected, unprotected, payload, signature} <- decode_sign1(cose_sign1_bytes, allow_tagged?),
            {:ok, algorithm} <- validate_protected(protected, unprotected),
            {:ok, jwk} <- verification_jwk(jwk_or_pem),
            :ok <- validate_pairing(jwk, algorithm),
@@ -193,6 +221,25 @@ if Code.ensure_loaded?(CBOR) do
       CBOR.encode(["Signature1", bytes(protected), bytes(""), bytes(payload)])
     end
 
+    defp protected_header(opts) do
+      %{1 => @alg_es256}
+      |> maybe_put_protected_typ(Keyword.get(opts, :typ))
+      |> maybe_put_protected_x5chain(Keyword.get(opts, :protected_x5chain))
+    end
+
+    defp maybe_put_protected_typ(header, nil), do: header
+    defp maybe_put_protected_typ(header, typ) when is_binary(typ) and typ != "", do: Map.put(header, 16, typ)
+    defp maybe_put_protected_typ(_header, _typ), do: raise(ArgumentError, ":typ must be a non-empty string")
+
+    defp maybe_put_protected_x5chain(header, nil), do: header
+    defp maybe_put_protected_x5chain(header, []), do: header
+
+    defp maybe_put_protected_x5chain(header, chain) when is_list(chain),
+      do: Map.put(header, 33, Enum.map(chain, &certificate_bytes!/1))
+
+    defp maybe_put_protected_x5chain(_header, _other),
+      do: raise(ArgumentError, ":protected_x5chain must be a list of DER binaries")
+
     defp unprotected_header(opts) do
       case Keyword.get(opts, :x5chain) do
         nil -> %{}
@@ -216,8 +263,10 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
-    defp decode_sign1(encoded) do
-      with {:ok, [protected_value, unprotected, payload_value, signature_value]} <- decode_complete(encoded),
+    defp decode_sign1(encoded, allow_tagged?) do
+      with {:ok, decoded} <- decode_complete(encoded),
+           {:ok, [protected_value, unprotected, payload_value, signature_value]} <-
+             unwrap_sign1_array(decoded, allow_tagged?),
            true <- plain_map?(unprotected),
            {:ok, protected} <- byte_string(protected_value),
            {:ok, payload} <- byte_string(payload_value),
@@ -228,13 +277,23 @@ if Code.ensure_loaded?(CBOR) do
       end
     end
 
+    defp unwrap_sign1_array([_, _, _, _] = array, _allow_tagged?), do: {:ok, array}
+    defp unwrap_sign1_array(%CBOR.Tag{tag: 18, value: [_, _, _, _] = array}, true), do: {:ok, array}
+    defp unwrap_sign1_array(_other, _allow_tagged?), do: {:error, :invalid_cose}
+
     defp validate_protected(protected, unprotected) do
+      with {:ok, _header, algorithm} <- decode_and_validate_protected(protected, unprotected) do
+        {:ok, algorithm}
+      end
+    end
+
+    defp decode_and_validate_protected(protected, unprotected) do
       with {:ok, header} <- decode_complete(protected),
            true <- plain_map?(header),
            :ok <- validate_header_locations(header, unprotected),
            {:ok, algorithm} <- validate_algorithm(header),
            :ok <- validate_critical_headers(header) do
-        {:ok, algorithm}
+        {:ok, header, algorithm}
       else
         {:error, _reason} = error -> error
         _other -> {:error, :invalid_cose}
@@ -442,6 +501,7 @@ else
                  "Add {:cbor, \"~> 1.0\"} to your deps."
 
     def sign1(_pem, _payload_bstr, _opts), do: raise(@dep_error)
+    def peek_headers(_cose_sign1_bytes, _opts \\ []), do: raise(@dep_error)
     def verify1(_cose_sign1_bytes, _jwk_or_pem, _opts), do: raise(@dep_error)
     def sign1_detached(_pem, _external_payload, _opts), do: raise(@dep_error)
     def verify1_detached(_cose_sign1_bytes, _external_payload, _jwk_or_pem, _opts), do: raise(@dep_error)

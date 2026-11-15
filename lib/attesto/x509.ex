@@ -7,7 +7,8 @@ defmodule Attesto.X509 do
   PKIX implementation, then applies an optional `:certificate_trust` callback
   for additional host policy. The callback cannot replace path validation.
   Returns the verified leaf public JWK and authority key identifiers from the
-  validated chain. Hosts still own ecosystem policy and revocation checking.
+  validated chain, and the selected DER `:trust_anchor`. Hosts still own
+  ecosystem policy and revocation checking.
 
   `:purpose` defaults to `:generic`. The `:mdoc_issuer` purpose recognizes a
   critical mdoc document-signer extended key usage on the leaf certificate.
@@ -101,7 +102,7 @@ defmodule Attesto.X509 do
   @ed448_oid {1, 3, 101, 113}
   @mdoc_document_signer_oid {1, 0, 18_013, 5, 1, 2}
 
-  @type verified :: %{public_key: map(), authority_key_identifiers: [String.t()]}
+  @type verified :: %{public_key: map(), authority_key_identifiers: [String.t()], trust_anchor: binary()}
   @type verify_error :: :untrusted_certificate | :invalid_certificate
   @type option ::
           {:trusted_certificates, [binary()]}
@@ -157,10 +158,10 @@ defmodule Attesto.X509 do
          anchors = Keyword.get(opts, :trusted_certificates),
          true <- valid_trust_anchors?(anchors),
          :ok <- profile_chain(chain, anchors, opts),
-         true <- Enum.any?(anchors, &valid_path?(&1, chain, opts)),
+         anchor when is_binary(anchor) <- Enum.find(anchors, &valid_path?(&1, chain, opts)),
          {:ok, key} <- leaf_public_key(hd(chain)),
          :ok <- host_policy(chain, Keyword.get(opts, :certificate_trust)) do
-      {:ok, %{public_key: key, authority_key_identifiers: authority_key_identifiers(chain)}}
+      {:ok, %{public_key: key, authority_key_identifiers: authority_key_identifiers(chain), trust_anchor: anchor}}
     else
       {:error, :invalid_certificate} = error -> error
       _ -> {:error, :untrusted_certificate}

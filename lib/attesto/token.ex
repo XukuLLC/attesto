@@ -35,9 +35,9 @@ defmodule Attesto.Token do
   algorithm resolved by `Attesto.SigningAlg`. Minting resolves that algorithm
   from per-key `key_algs/0` metadata, then `signing_alg/0` for the current
   signing key, then the trusted key type and curve. The supported set is
-  RS256, PS256, ES256, ES384, ES512, legacy EdDSA, and RFC 9864 Ed25519 / Ed448;
-  RSA defaults to RS256, while Edwards-curve inference retains EdDSA for wire
-  compatibility unless trusted metadata selects an explicit identifier.
+  RS256, PS256, ES256, ES384, ES512, RFC 9864 Ed25519 / Ed448, and legacy EdDSA;
+  RSA defaults to RS256, while Edwards-curve inference selects RFC 9864
+  `Ed25519` or `Ed448` unless trusted metadata selects legacy `EdDSA`.
 
   Verification never learns algorithm policy from the presented JWS header.
   The header `kid` only narrows the configured verification-key set; each
@@ -676,7 +676,8 @@ defmodule Attesto.Token do
   # (-> `:invalid_signature`) before any signature math. A token with no
   # `kid` header (a hand-forged token) is tried against every trusted key,
   # which is safe - they are all ours.
-  defp verify_against_trusted(config, jwt, header) do
+  @doc false
+  def verify_against_trusted(config, jwt, header) do
     JWS.verify_trusted(jwt, header, config.keystore.verification_pems(),
       malformed_key: :raise,
       candidate_builder: fn pem ->
@@ -838,13 +839,14 @@ defmodule Attesto.Token do
 
   defp trusted_audience?(aud, trusted), do: Claims.audience_matches?(aud, trusted, :all_array_members)
 
-  defp check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
+  @doc false
+  def check_expiry(%{"exp" => exp}, opts) when is_integer(exp) do
     if NumericDate.not_expired?(exp, NumericDate.now(opts), leeway: 0),
       do: :ok,
       else: {:error, :expired}
   end
 
-  defp check_expiry(_claims, _opts), do: {:error, :expired}
+  def check_expiry(_claims, _opts), do: {:error, :expired}
 
   # RFC 7519 §4.1.5: a token MUST NOT be accepted before its `nbf`. `nbf`
   # is optional - absent is fine - but if present it must be an integer no
@@ -861,13 +863,14 @@ defmodule Attesto.Token do
   # A token whose `iat` is meaningfully in the future was either issued by
   # a clock far ahead of ours or forged; reject it (with the same modest
   # skew). `iat` integer-ness is established by `check_required_claims/2`.
-  defp check_iat_not_future(%{"iat" => iat}, opts) when is_integer(iat) do
+  @doc false
+  def check_iat_not_future(%{"iat" => iat}, opts) when is_integer(iat) do
     if NumericDate.not_before_reached?(iat, NumericDate.now(opts), skew: @clock_skew_seconds),
       do: :ok,
       else: {:error, :not_yet_valid}
   end
 
-  defp check_iat_not_future(_claims, _opts), do: :ok
+  def check_iat_not_future(_claims, _opts), do: :ok
 
   defp check_required_claims(config, claims) do
     cond do

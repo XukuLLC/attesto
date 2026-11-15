@@ -350,7 +350,8 @@ defmodule Attesto.RefreshToken do
     end
   end
 
-  defp call_store_callback(callback) do
+  @doc false
+  def call_store_callback(callback) do
     {:returned, callback.()}
   catch
     kind, value -> {:failed, kind, value, __STACKTRACE__}

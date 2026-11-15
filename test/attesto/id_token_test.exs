@@ -182,7 +182,7 @@ defmodule Attesto.IDTokenTest do
         digest = unquote(digest)
         half_bytes = unquote(half_bytes)
         pem = signing_pem(unquote(Macro.escape(key)))
-        config_opts = if alg in ["PS256", "Ed25519"], do: [signing_alg: alg], else: []
+        config_opts = if alg in ["PS256", "EdDSA"], do: [signing_alg: alg], else: []
         config = Factory.config(pem, config_opts)
         access_token = "access-token-#{alg}"
         code = "authorization-code-#{alg}"
@@ -221,7 +221,7 @@ defmodule Attesto.IDTokenTest do
                )
 
       assert header!(jwt) == %{
-               "alg" => "EdDSA",
+               "alg" => "Ed448",
                "kid" => Key.kid(pem),
                "typ" => "JWT"
              }
@@ -233,16 +233,16 @@ defmodule Attesto.IDTokenTest do
       assert claims["sub"] == @subject
     end
 
-    test "RFC 9864 Ed448 mint and verify uses the explicit identifier with the same hash profile" do
+    test "legacy EdDSA over Ed448 mint and verify uses explicit signing_alg with the same hash profile" do
       enable_ed448_support()
       pem = Factory.ed448_pem()
-      config = Factory.config(pem, signing_alg: "Ed448")
-      access_token = "access-token-explicit-Ed448"
+      config = Factory.config(pem, signing_alg: "EdDSA")
+      access_token = "access-token-legacy-Ed448"
 
       assert {:ok, jwt} =
                IDToken.mint(config, @subject, @client_id, access_token: access_token)
 
-      assert header!(jwt)["alg"] == "Ed448"
+      assert header!(jwt)["alg"] == "EdDSA"
       assert payload!(jwt)["at_hash"] == oidc_shake256_hash(access_token)
       assert {:ok, _claims} = IDToken.verify(config, jwt, client_id: @client_id)
     end
