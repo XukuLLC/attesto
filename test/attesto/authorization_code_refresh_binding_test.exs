@@ -7,6 +7,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
 
   alias Attesto.AuthorizationCode
   alias Attesto.AuthorizationCode.Grant
+  alias Attesto.CodeStore.ETS
   alias Attesto.CodeStore.ETS, as: CodeETS
   alias Attesto.PKCE
   alias Attesto.RefreshStore.ETS, as: RefreshETS
@@ -17,46 +18,14 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
   @client_id "oc_app"
 
   defmodule TrackingStore do
-    @moduledoc false
-    @behaviour Attesto.CodeStore
+    use Attesto.CodeStoreTestDelegates
 
-    def start_link, do: Agent.start_link(fn -> %{codes: %{}, consumed: %{}} end)
-    def put_agent(pid), do: Process.put(__MODULE__, pid)
-    defp agent, do: Process.get(__MODULE__)
-
-    @impl Attesto.CodeStore
-    def put(%{code_hash: code_hash} = record) do
-      Agent.update(agent(), fn state -> %{state | codes: Map.put(state.codes, code_hash, record)} end)
-    end
-
-    @impl Attesto.CodeStore
-    def take(code_hash) do
-      Agent.get_and_update(agent(), fn state ->
-        cond do
-          Map.has_key?(state.consumed, code_hash) ->
-            {{:error, :consumed, Map.fetch!(state.consumed, code_hash)}, state}
-
-          Map.has_key?(state.codes, code_hash) ->
-            {record, codes} = Map.pop(state.codes, code_hash)
-            {{:ok, record}, %{state | codes: codes}}
-
-          true ->
-            {:error, state}
-        end
-      end)
-    end
-
-    @impl Attesto.CodeStore
-    def mark_consumed(code_hash, meta) do
+    @impl true
+    def finish(hash, redemption) do
       case Process.get({__MODULE__, :mark_failure}) do
-        {:return, value} ->
-          value
-
-        {:raise, reason} ->
-          raise reason
-
-        nil ->
-          Agent.update(agent(), fn state -> %{state | consumed: Map.put(state.consumed, code_hash, meta)} end)
+        {:return, value} -> value
+        {:raise, reason} -> raise reason
+        nil -> ETS.finish(hash, redemption)
       end
     end
   end
@@ -76,8 +45,6 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
   setup do
     start_supervised!(CodeETS)
     start_supervised!(RefreshETS)
-    {:ok, tracking_pid} = TrackingStore.start_link()
-    TrackingStore.put_agent(tracking_pid)
 
     {:ok, challenge} = PKCE.challenge(@verifier)
     %{challenge: challenge}
@@ -479,7 +446,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
     Process.put({TrackingStore, :mark_failure}, {:return, {:unexpected, "mark-sentinel"}})
 
     error =
-      assert_raise RuntimeError, "authorization code store mark_consumed/2 violated its contract", fn ->
+      assert_raise RuntimeError, "authorization code store finish/2 violated its contract", fn ->
         AuthorizationCode.issue_refresh_and_finalize(
           TrackingStore,
           code,
@@ -490,7 +457,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
         )
       end
 
-    assert Exception.message(error) == "authorization code store mark_consumed/2 violated its contract"
+    assert Exception.message(error) == "authorization code store finish/2 violated its contract"
     refute Exception.message(error) =~ "mark-sentinel"
 
     assert {:error, :invalid_grant} =
@@ -566,7 +533,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
     :ok = CodeETS.record_access_token_for_code(code_hash, "jti-before-revoke", now + 300)
 
     # Revocation runs after take/1 and before refresh issuance creates the family.
-    assert {:ok, 0} = CodeETS.delete_unconsumed(subject: "usr_42")
+    assert {:ok, 0} = CodeETS.delete_unclaimed(subject: "usr_42")
     assert {:ok, 0} = RefreshETS.revoke_families(subject: "usr_42")
 
     assert {:ok, %{token: refresh_token}} =
@@ -579,10 +546,12 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
                now: now
              )
 
-    :ok = CodeETS.record_access_token_for_code(code_hash, "jti-after-finalize", now + 300)
+    assert_raise ArgumentError, ~r/access-token linkage requires/, fn ->
+      CodeETS.record_access_token_for_code(code_hash, "jti-after-finalize", now + 300)
+    end
 
     assert CodeETS.access_token_revoked?("jti-before-revoke")
-    assert CodeETS.access_token_revoked?("jti-after-finalize")
+    refute CodeETS.access_token_revoked?("jti-after-finalize")
     assert :error = RefreshETS.get(Secret.hash(refresh_token))
   end
 end

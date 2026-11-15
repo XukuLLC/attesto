@@ -6,6 +6,27 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.23.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.CodeStore` is now one required behaviour with explicit live, claimed
+  and redeemed states. Reads never write; atomic claim, replay flagging and
+  finish callbacks retain immutable bindings and redemption records, with one
+  revocation flag for replay or grant cut-off. Access-token
+  linkage and revocation callbacks are required. Custom stores must migrate to
+  this contract; the upgrade guide maps every previous callback.
+- `Attesto.AuthorizationCode.redeem/4` compares client, redirect URI,
+  PKCE when challenged and DPoP when bound before any state change. A failed
+  comparison no longer spends the code. Reuse revocation applies only to a
+  matching presentation, including after code expiry and during token issuance.
+  Expiry prevents claiming live codes only. This
+  departs from the literal wording of RFC 6749 §4.1.2 so possession of a code
+  alone cannot revoke another client's tokens.
+- Authorization-code redemption always requires the bound client identifier;
+  the client-id opt-out is removed. A verifier presented for a code issued
+  without a PKCE challenge is refused.
+
 ## [2.22.0] - 2026-11-15
 
 ### Added

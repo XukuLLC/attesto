@@ -66,14 +66,14 @@ defmodule Attesto.GrantsSmokeTest do
       assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
-    test "a wrong redirect_uri is rejected (and the code is still consumed)", %{challenge: challenge} do
+    test "a wrong redirect_uri is rejected without consuming the code", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
 
       assert {:error, :redirect_uri_mismatch} =
                AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params(%{redirect_uri: "https://evil/cb"}))
 
-      # consumed even on failure: a retry with the right URI now fails
-      assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
+      # The correct presentation can still redeem the code.
+      assert {:ok, _grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
     test "a wrong PKCE verifier is rejected", %{challenge: challenge} do

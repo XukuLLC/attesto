@@ -22,38 +22,59 @@ defmodule Attesto.AuthorizationCodeTest do
 
   defmodule ContractGetStore do
     @moduledoc false
-    @behaviour Attesto.CodeStore
+    use Attesto.CodeStoreTestDelegates, to: ETS
 
     @impl true
     def put(_entry), do: :ok
     @impl true
-    def take(_hash), do: :error
+    def claim(_hash), do: :error
     @impl true
-    def get(hash) do
+    def read(hash) do
       case Process.get({__MODULE__, :return}) do
         :error -> :error
-        {:bound, jkt} -> {:ok, %{code_hash: hash, data: %{dpop_jkt: jkt}, expires_at: 2_000_000_000}}
-        {:unbound} -> {:ok, %{code_hash: hash, data: %{}, expires_at: 2_000_000_000}}
+        {:bound, jkt} -> {:ok, snapshot(hash, jkt)}
+        {:unbound} -> {:ok, snapshot(hash, nil)}
         value -> value
       end
+    end
+
+    defp snapshot(hash, jkt) do
+      %{
+        code_hash: hash,
+        expires_at: 2_000_000_000,
+        state: :live,
+        redemption: nil,
+        revoked: false,
+        data: %{
+          client_id: "client",
+          subject: "subject",
+          redirect_uri: "https://client.example/cb",
+          scope: [],
+          resource: [],
+          claims: %{},
+          code_challenge: nil,
+          dpop_jkt: jkt,
+          family_id: nil
+        }
+      }
     end
   end
 
   defmodule ContractStore do
     @moduledoc false
-    @behaviour Attesto.CodeStore
+    use Attesto.CodeStoreTestDelegates, to: ETS
 
     @impl true
     def put(entry), do: fault(:put, ETS.put(entry))
 
     @impl true
-    def take(code_hash), do: fault(:take, ETS.take(code_hash))
+    def claim(code_hash), do: fault(:claim, ETS.claim(code_hash))
 
     @impl true
-    def get(code_hash), do: ETS.get(code_hash)
+    def read(code_hash), do: fault(:read, ETS.read(code_hash))
 
     @impl true
-    def mark_consumed(_code_hash, _meta), do: fault(:mark_consumed, :ok)
+    def finish(code_hash, meta), do: fault(:finish, ETS.finish(code_hash, meta))
 
     defp fault(callback, result) do
       case Process.get({__MODULE__, callback}) do
@@ -182,7 +203,7 @@ defmodule Attesto.AuthorizationCodeTest do
       )
 
       error =
-        assert_raise RuntimeError, "authorization code store get/1 violated its contract", fn ->
+        assert_raise RuntimeError, "authorization code store read/1 violated its contract", fn ->
           AuthorizationCode.dpop_bound?(ContractGetStore, "code")
         end
 
@@ -201,7 +222,7 @@ defmodule Attesto.AuthorizationCodeTest do
       )
 
       error =
-        assert_raise RuntimeError, "authorization code store get/1 violated its contract", fn ->
+        assert_raise RuntimeError, "authorization code store read/1 violated its contract", fn ->
           AuthorizationCode.dpop_bound?(ContractGetStore, "code")
         end
 
@@ -346,14 +367,14 @@ defmodule Attesto.AuthorizationCodeTest do
       {:ok, code} = AuthorizationCode.issue(ETS, attrs, now: 1_000)
 
       for bad_now <- [-1, DateTime.from_unix!(-1, :second)] do
-        fault(:take, {:return, {:private_take_sentinel, code}})
+        fault(:read, {:return, {:private_take_sentinel, code}})
 
         assert_raise ArgumentError, ":now must be a non-negative NumericDate", fn ->
           AuthorizationCode.redeem(ContractStore, code, redeem_params(), now: bad_now)
         end
 
-        clear_fault(:take)
-        assert {:ok, _record} = ETS.get(Secret.hash(code))
+        clear_fault(:read)
+        assert {:ok, _record} = ETS.read(Secret.hash(code))
       end
     end
   end
@@ -383,7 +404,7 @@ defmodule Attesto.AuthorizationCodeTest do
     end
   end
 
-  describe "redeem/4 single-use and consume-on-failure" do
+  describe "redeem/4 single use after comparison" do
     test "a second redeem of a consumed code is invalid_grant", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
       assert {:ok, %Grant{}} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
@@ -410,18 +431,16 @@ defmodule Attesto.AuthorizationCodeTest do
                AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params(), now: 1_001)
     end
 
-    test "a failed redeem still spends the code (consume-before-validate)", %{challenge: challenge} do
+    test "a failed verifier leaves the code redeemable", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
 
-      # First attempt fails on PKCE, but the code is taken before validation.
       assert {:error, :pkce_failed} =
                AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params(%{code_verifier: String.duplicate("z", 50)}))
 
-      # A subsequent fully-correct redeem now finds nothing -> invalid_grant.
-      assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
+      assert {:ok, %Grant{}} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
-    test "a redirect-uri-mismatch failure also spends the code", %{challenge: challenge} do
+    test "a redirect mismatch leaves the code redeemable", %{challenge: challenge} do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
 
       assert {:error, :redirect_uri_mismatch} =
@@ -431,7 +450,7 @@ defmodule Attesto.AuthorizationCodeTest do
                  redeem_params(%{redirect_uri: "https://evil.example.com/cb"})
                )
 
-      assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
+      assert {:ok, %Grant{}} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
     end
 
     test "an unknown code is invalid_grant", %{challenge: _challenge} do
@@ -439,7 +458,7 @@ defmodule Attesto.AuthorizationCodeTest do
                AuthorizationCode.redeem(CodeStore.ETS, Secret.generate(), redeem_params())
     end
 
-    test "take rejects partial and malformed records after atomically burning the code", %{challenge: challenge} do
+    test "read rejects malformed records without claiming the code", %{challenge: challenge} do
       mutations = [
         fn record -> Map.delete(record, :code_hash) end,
         fn record -> Map.put(record, :code_hash, "private-hash-sentinel") end,
@@ -457,17 +476,17 @@ defmodule Attesto.AuthorizationCodeTest do
 
       for mutate <- mutations do
         {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
-        fault(:take, {:mutate_ok, mutate})
+        fault(:read, {:mutate_ok, mutate})
 
         error =
-          assert_raise RuntimeError, "authorization code store take/1 violated its contract", fn ->
+          assert_raise RuntimeError, "authorization code store read/1 violated its contract", fn ->
             AuthorizationCode.redeem(ContractStore, code, redeem_params())
           end
 
         refute Exception.message(error) =~ "private-"
-        clear_fault(:take)
+        clear_fault(:read)
 
-        assert {:error, :invalid_grant} =
+        assert {:ok, %Grant{}} =
                  AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
       end
     end
@@ -476,20 +495,21 @@ defmodule Attesto.AuthorizationCodeTest do
       challenge: challenge
     } do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
-      fault(:take, {:return, {:error, {:private_take_sentinel, code}}})
+      fault(:read, {:return, {:error, {:private_take_sentinel, code}}})
 
       error =
-        assert_raise RuntimeError, "authorization code store take/1 violated its contract", fn ->
+        assert_raise RuntimeError, "authorization code store read/1 violated its contract", fn ->
           AuthorizationCode.redeem(ContractStore, code, redeem_params())
         end
 
       refute Exception.message(error) =~ code
-      clear_fault(:take)
+      clear_fault(:read)
 
-      fault(:take, {:return, {:error, :consumed, {:private_meta_sentinel, code}}})
+      {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
+      fault(:read, {:return, {:error, :consumed, {:private_meta_sentinel, code}}})
 
       error =
-        assert_raise RuntimeError, "authorization code store take/1 violated its contract", fn ->
+        assert_raise RuntimeError, "authorization code store read/1 violated its contract", fn ->
           AuthorizationCode.redeem(ContractStore, code, redeem_params())
         end
 
@@ -502,10 +522,10 @@ defmodule Attesto.AuthorizationCodeTest do
       {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, code_attrs(challenge))
       {:ok, grant} = AuthorizationCode.redeem(CodeStore.ETS, code, redeem_params())
       sentinel = "authorization-code-finalize-private-sentinel"
-      fault(:mark_consumed, {:return, {:error, {sentinel, code}}})
+      fault(:finish, {:return, {:error, {sentinel, code}}})
 
       error =
-        assert_raise RuntimeError, "authorization code store mark_consumed/2 violated its contract", fn ->
+        assert_raise RuntimeError, "authorization code store finish/2 violated its contract", fn ->
           AuthorizationCode.finalize(ContractStore, code, grant)
         end
 

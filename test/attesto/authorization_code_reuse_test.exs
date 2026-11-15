@@ -7,10 +7,11 @@ defmodule Attesto.AuthorizationCodeReuseTest do
   #
   # async: true - each test uses its own in-process Agent-backed store
   # (started per test), so there is no shared singleton to serialize on.
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Attesto.AuthorizationCode
   alias Attesto.AuthorizationCode.Grant
+  alias Attesto.CodeStore.ETS
   alias Attesto.PKCE
   alias Attesto.Secret
 
@@ -24,51 +25,24 @@ defmodule Attesto.AuthorizationCodeReuseTest do
   # --- A reuse-tracking CodeStore backed by a per-test Agent. ---
   #
   # Implements the OPTIONAL reuse-tracking pair: take/1 returns
-  # {:error, :consumed, meta} for a hash already marked, and mark_consumed/2
+  # {:error, :consumed, meta} for a hash already marked, and finish/2
   # records the meta. This is the store-side half code-reuse detection needs;
   # the separate ETS integration test exercises the bundled implementation.
   defmodule TrackingStore do
-    @moduledoc false
-    @behaviour Attesto.CodeStore
+    use Attesto.CodeStoreTestDelegates
 
-    def start_link, do: Agent.start_link(fn -> %{codes: %{}, consumed: %{}} end)
-
-    @impl Attesto.CodeStore
-    def put(%{code_hash: code_hash} = record) do
-      Agent.update(agent(), fn s -> %{s | codes: Map.put(s.codes, code_hash, record)} end)
+    @impl true
+    def finish(hash, redemption) do
+      case Process.get({__MODULE__, :mark_failure}) do
+        {:return, value} -> value
+        {:raise, reason} -> raise reason
+        nil -> ETS.finish(hash, redemption)
+      end
     end
-
-    @impl Attesto.CodeStore
-    def take(code_hash) do
-      Agent.get_and_update(agent(), fn s ->
-        cond do
-          Map.has_key?(s.consumed, code_hash) ->
-            {{:error, :consumed, Map.fetch!(s.consumed, code_hash)}, s}
-
-          Map.has_key?(s.codes, code_hash) ->
-            {record, codes} = Map.pop(s.codes, code_hash)
-            {{:ok, record}, %{s | codes: codes}}
-
-          true ->
-            {:error, s}
-        end
-      end)
-    end
-
-    @impl Attesto.CodeStore
-    def mark_consumed(code_hash, meta) do
-      Agent.update(agent(), fn s -> %{s | consumed: Map.put(s.consumed, code_hash, meta)} end)
-    end
-
-    # The agent pid is stashed in the process dictionary by the test setup so
-    # the behaviour's arity-fixed callbacks (no store-state arg) can reach it.
-    def put_agent(pid), do: Process.put(__MODULE__, pid)
-    defp agent, do: Process.get(__MODULE__)
   end
 
   setup do
-    {:ok, pid} = TrackingStore.start_link()
-    TrackingStore.put_agent(pid)
+    start_supervised!(ETS)
     {:ok, challenge} = PKCE.challenge(@verifier)
     %{challenge: challenge}
   end
@@ -162,17 +136,13 @@ defmodule Attesto.AuthorizationCodeReuseTest do
                AuthorizationCode.redeem(TrackingStore, Secret.generate(), redeem_params())
     end
 
-    test "a failed redeem does not mark consumed: the re-presentation is invalid_grant", %{challenge: challenge} do
-      {:ok, code} = AuthorizationCode.issue(TrackingStore, code_attrs(challenge, %{family_id: @family_id}))
+    test "a failed comparison leaves the code available", %{challenge: challenge} do
+      {:ok, code} = AuthorizationCode.issue(TrackingStore, code_attrs(challenge))
 
-      # First attempt fails PKCE. take/1 still spent the code (single use),
-      # but no successful redemption means no consumed marker was written.
       assert {:error, :pkce_failed} =
                AuthorizationCode.redeem(TrackingStore, code, redeem_params(%{code_verifier: String.duplicate("z", 50)}))
 
-      # So the second presentation finds the code absent and unmarked:
-      # invalid_grant, NOT reuse. (We never validated a family to revoke.)
-      assert {:error, :invalid_grant} = AuthorizationCode.redeem(TrackingStore, code, redeem_params())
+      assert {:ok, _grant} = AuthorizationCode.redeem(TrackingStore, code, redeem_params())
     end
   end
 end

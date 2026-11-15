@@ -1,327 +1,229 @@
 defmodule Attesto.CodeStore.ETS do
   @moduledoc """
-  Single-node ETS implementation of `Attesto.CodeStore`.
+  Single-node implementation of `Attesto.CodeStore`.
 
-  Codes live in an ETS table owned by a `GenServer` that sweeps expired rows
-  on a fixed interval. `take/1` uses `:ets.take/2`, which
-  fetches and deletes a row in one atomic step, so the single-use
-  guarantee holds against concurrent redemptions on a node. This is a
-  per-node store: a multi-node deployment MUST back `Attesto.CodeStore`
-  with a shared store (e.g. Postgres `DELETE ... RETURNING`) so a code
-  issued on one node can be redeemed (once) on another.
+  A GenServer serializes every transition over a protected ETS table. Reads
+  also use that process so a bulk cut-off is observed atomically. All states
+  retain immutable grant bindings. Claims have a fixed 300-second reservation;
+  cleanup then requires code and linked access-token expiry. Redeemed records
+  live through their recorded refresh-family and access-token lifetimes.
+  An unbounded refresh-family record stays for the store's lifetime.
 
-  Successful redemptions support the optional `mark_consumed/2` reuse
-  contract. Markers for bounded refresh families live through their family
-  deadline; unbounded refresh-family markers remain sticky for the store's
-  lifetime. A no-refresh marker is retained for 24 hours, bounding memory
-  while covering the normal access-token replay-response window.
-
-  The store also indexes the JTI of an access token minted from a redeemed
-  code. On a later code replay, callers can revoke that token by code hash or
-  by the finalized refresh-family ID and query the revocation by JTI. Both the
-  linkage and revocation marker expire with the access token.
-
-  ## Start options
-
-    * `:sweep_interval_ms` (default `30_000`) - how often expired rows are
-      bulk-deleted. Correctness does not depend on sweeping (`take/1`
-      returns the row and `Attesto.AuthorizationCode` re-checks expiry);
-      the sweeper only bounds table size.
-
-  ## Wiring
-
-      children = [Attesto.CodeStore.ETS]
-
-  then pass the module as the store:
-
-      Attesto.AuthorizationCode.issue(Attesto.CodeStore.ETS, attrs)
+  Supervise this module and pass it to `Attesto.AuthorizationCode`. Multiple
+  nodes require a shared store. `:sweep_interval_ms` defaults to 30,000; cleanup
+  is only for retention, and core always checks authorization-code expiry.
   """
-
   @behaviour Attesto.CodeStore
 
   use Attesto.Store.ETS,
     default_sweep_interval_ms: 30_000,
     table_options: [:set, :protected, :named_table, read_concurrency: true],
-    extra_tables: [
-      {__MODULE__.Consumed, [:set, :protected, :named_table, read_concurrency: true]},
-      {__MODULE__.AccessTokens, [:set, :protected, :named_table, read_concurrency: true]},
-      {__MODULE__.RevokedAccessTokens, [:set, :protected, :named_table, read_concurrency: true]},
-      {__MODULE__.Pending, [:set, :protected, :named_table, read_concurrency: true]},
-      {__MODULE__.PendingRevoked, [:set, :protected, :named_table, read_concurrency: true]}
-    ],
+    extra_tables: [{__MODULE__.Tokens, [:set, :protected, :named_table, read_concurrency: true]}],
     reset: :server
 
-  @table __MODULE__
-  @consumed :"#{__MODULE__}.Consumed"
-  @access_tokens :"#{__MODULE__}.AccessTokens"
-  @revoked_access_tokens :"#{__MODULE__}.RevokedAccessTokens"
-  @pending :"#{__MODULE__}.Pending"
-  @pending_revoked :"#{__MODULE__}.PendingRevoked"
-  @no_refresh_retention_seconds 24 * 60 * 60
-  @pending_retention_seconds 300
-
   @impl Attesto.CodeStore
-  def put(%{code_hash: code_hash, expires_at: expires_at} = record)
-      when is_binary(code_hash) and is_integer(expires_at) do
-    GenServer.call(__MODULE__, {:put, record})
-  end
-
-  @impl Attesto.CodeStore
-  def take(code_hash) when is_binary(code_hash) do
-    GenServer.call(__MODULE__, {:take, code_hash})
-  end
-
-  @impl Attesto.CodeStore
-  def mark_consumed(code_hash, meta) when is_binary(code_hash) and is_map(meta) do
-    GenServer.call(__MODULE__, {:mark_consumed, code_hash, meta})
-  end
-
-  @doc "Link a minted access-token JTI to its redeemed code until token expiry."
-  @spec record_access_token_for_code(String.t(), String.t(), integer()) :: :ok
-  def record_access_token_for_code(code_hash, jti, expires_at)
-      when is_binary(code_hash) and code_hash != "" and is_binary(jti) and jti != "" and is_integer(expires_at) do
-    GenServer.call(__MODULE__, {:record_access_token_for_code, code_hash, jti, expires_at})
-  end
-
-  @doc "Revoke the unexpired access token linked to a code hash."
-  @spec revoke_access_token_for_code(String.t()) :: :ok
-  def revoke_access_token_for_code(code_hash) when is_binary(code_hash) and code_hash != "" do
-    GenServer.call(__MODULE__, {:revoke_access_token_for_code, code_hash})
-  end
-
-  @doc "Revoke unexpired access tokens linked to a finalized refresh family."
-  @spec revoke_family_access_tokens(String.t()) :: :ok
-  def revoke_family_access_tokens(family_id) when is_binary(family_id) and family_id != "" do
-    GenServer.call(__MODULE__, {:revoke_family_access_tokens, family_id})
-  end
-
-  @doc "Return whether a linked, unexpired access-token JTI has been revoked."
-  @spec access_token_revoked?(String.t()) :: boolean()
-  def access_token_revoked?(jti) when is_binary(jti) and jti != "" do
-    case :ets.lookup(@revoked_access_tokens, jti) do
-      [{^jti, expires_at}] -> expires_at > System.system_time(:second)
-      [] -> false
+  def put(entry) do
+    case GenServer.call(__MODULE__, {:put, entry}) do
+      :ok -> :ok
+      :error -> raise ArgumentError, "authorization code hash already exists"
     end
   end
 
   @impl Attesto.CodeStore
-  def get(code_hash) when is_binary(code_hash) do
-    case :ets.lookup(@table, code_hash) do
-      [{^code_hash, _expires_at, record}] -> {:ok, record}
-      [] -> :error
+  def read(hash), do: GenServer.call(__MODULE__, {:read, hash})
+  @impl Attesto.CodeStore
+  def claim(hash), do: GenServer.call(__MODULE__, {:claim, hash})
+  @impl Attesto.CodeStore
+  def finish(hash, redemption) do
+    Attesto.CodeStore.validate_redemption!(redemption)
+    GenServer.call(__MODULE__, {:finish, hash, redemption})
+  end
+
+  @impl Attesto.CodeStore
+  def flag_replay(hash), do: GenServer.call(__MODULE__, {:flag_replay, hash})
+  @impl Attesto.CodeStore
+  def delete_unclaimed(criteria),
+    do: GenServer.call(__MODULE__, {:delete_unclaimed, Attesto.RevocationCriteria.new!(criteria)})
+
+  @impl Attesto.CodeStore
+  def record_access_token_for_code(hash, jti, expiry) do
+    case GenServer.call(__MODULE__, {:link, hash, jti, expiry}) do
+      :ok -> :ok
+      :error -> raise ArgumentError, "access-token linkage requires a claimed or redeemed code without a token"
     end
   end
 
   @impl Attesto.CodeStore
-  def delete_unconsumed(criteria) do
-    GenServer.call(__MODULE__, {:delete_unconsumed, Attesto.RevocationCriteria.new!(criteria)})
-  end
-
-  @doc false
+  def revoke_access_token_for_code(hash), do: GenServer.call(__MODULE__, {:revoke, hash})
   @impl Attesto.CodeStore
-  @spec pending_revoked?(String.t()) :: boolean()
-  def pending_revoked?(code_hash) when is_binary(code_hash) and code_hash != "" do
-    pending_revoked_unlocked?(code_hash)
+  def revoke_family_access_tokens(family), do: GenServer.call(__MODULE__, {:revoke_family, family})
+  @impl Attesto.CodeStore
+  def access_token_revoked?(jti) do
+    case :ets.lookup(__MODULE__.Tokens, jti) do
+      [{^jti, expiry, true}] -> expiry > System.system_time(:second)
+      _ -> false
+    end
   end
 
   @impl GenServer
-  def handle_call({:put, record}, _from, state) do
-    # expires_at is hoisted into its own tuple element so the sweep
-    # match spec is a plain guard, never a map pattern.
-    true = :ets.insert(@table, {record.code_hash, record.expires_at, record})
-    :ets.delete(@pending, record.code_hash)
-    :ets.delete(@pending_revoked, record.code_hash)
-    {:reply, :ok, state}
+  def handle_call({:put, entry}, _from, state) do
+    record = Map.merge(entry, %{state: :live, redemption: nil, revoked: false})
+    result = :ets.insert_new(__MODULE__, {entry.code_hash, record, nil, false})
+    {:reply, if(result, do: :ok, else: :error), state}
   end
 
-  def handle_call({:take, code_hash}, _from, state) do
+  def handle_call({:read, hash}, _from, state) do
     result =
-      case :ets.take(@table, code_hash) do
-        [{^code_hash, _expires_at, record}] ->
-          retain_until = System.system_time(:second) + @pending_retention_seconds
-          true = :ets.insert(@pending, {code_hash, retain_until, record.data, false})
-          {:ok, record}
-
-        [] ->
-          case :ets.lookup(@pending, code_hash) do
-            [{^code_hash, retain_until, data, false}] ->
-              true = :ets.insert(@pending, {code_hash, retain_until, data, true})
-              revoke_access_token_for_code_unlocked(code_hash)
-
-            _ ->
-              :ok
-          end
-
-          consumed_result(code_hash)
+      case lookup(hash) do
+        {record, _token, _revoked} -> {:ok, Map.delete(record, :claim_retain_until)}
+        nil -> :error
       end
 
     {:reply, result, state}
   end
 
-  def handle_call({:mark_consumed, code_hash, meta}, _from, state) do
-    retain_until = consumed_retain_until(meta)
-    true = :ets.insert(@consumed, {code_hash, retain_until, meta})
-    bind_access_token_to_family(code_hash, consumed_family_id(meta))
+  def handle_call({:claim, hash}, _from, state) do
+    result =
+      transition(hash, :live, &Map.merge(&1, %{state: :claimed, claim_retain_until: System.system_time(:second) + 300}))
 
-    case :ets.take(@pending, code_hash) do
-      [{^code_hash, _pending_until, _data, true}] ->
-        pending_until = System.system_time(:second) + @pending_retention_seconds
-        true = :ets.insert(@pending_revoked, {code_hash, pending_until})
-        revoke_access_token_for_code_unlocked(code_hash)
-
-      _ ->
-        :ok
-    end
-
-    {:reply, :ok, state}
+    {:reply, result, state}
   end
 
-  def handle_call({:record_access_token_for_code, code_hash, jti, expires_at}, _from, state) do
-    family_id = consumed_family_id_for_code(code_hash)
-    true = :ets.insert(@access_tokens, {code_hash, expires_at, jti, family_id})
-
-    if pending_revoked_unlocked?(code_hash) do
-      revoke_jti(jti, expires_at)
-    end
-
-    {:reply, :ok, state}
+  def handle_call({:flag_replay, hash}, _from, state) do
+    result = transition(hash, :claimed, &%{&1 | revoked: true})
+    {:reply, result, state}
   end
 
-  # The main table holds only unredeemed codes: `take/1` removes the row. The
-  # scan runs in the owner process, so it is serialized with put, take, and
-  # mark_consumed; taken-but-unfinalized codes in `@pending` are marked so any
-  # in-flight access token or refresh family they mint is immediately revoked.
-  def handle_call({:delete_unconsumed, criteria}, _from, state) do
-    matching =
+  def handle_call({:finish, hash, redemption}, _from, state) do
+    result =
+      case lookup(hash) do
+        {%{state: :claimed} = record, token, revoked} ->
+          save(%{record | state: :redeemed, redemption: redemption}, token, revoked)
+          {:ok, record.revoked}
+
+        _ ->
+          :error
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:delete_unclaimed, criteria}, _from, state) do
+    count =
       :ets.foldl(
-        fn {code_hash, _expires_at, record}, acc ->
-          if Attesto.RevocationCriteria.match?(criteria, record.data), do: [code_hash | acc], else: acc
+        fn {_hash, record, token, revoked}, count ->
+          if Attesto.RevocationCriteria.match?(criteria, record.data),
+            do: cut_off(record, token, revoked, count),
+            else: count
         end,
-        [],
-        @table
+        0,
+        __MODULE__
       )
 
-    Enum.each(matching, &:ets.delete(@table, &1))
-
-    matching_pending =
-      :ets.foldl(
-        fn {code_hash, retain_until, data, _revoked?}, acc ->
-          if Attesto.RevocationCriteria.match?(criteria, data),
-            do: [{code_hash, retain_until, data} | acc],
-            else: acc
-        end,
-        [],
-        @pending
-      )
-
-    Enum.each(matching_pending, fn {code_hash, retain_until, data} ->
-      true = :ets.insert(@pending, {code_hash, retain_until, data, true})
-      revoke_access_token_for_code_unlocked(code_hash)
-    end)
-
-    {:reply, {:ok, length(matching)}, state}
+    {:reply, {:ok, count}, state}
   end
 
-  def handle_call({:revoke_access_token_for_code, code_hash}, _from, state) do
-    revoke_access_token_for_code_unlocked(code_hash)
-    {:reply, :ok, state}
+  def handle_call({:link, hash, jti, expiry}, _from, state) do
+    result =
+      case lookup(hash) do
+        {%{state: phase} = record, nil, revoked} when phase in [:claimed, :redeemed] ->
+          save(record, %{jti: jti, expires_at: expiry}, revoked)
+
+        _ ->
+          :error
+      end
+
+    {:reply, result, state}
   end
 
-  def handle_call({:revoke_family_access_tokens, family_id}, _from, state) do
-    @access_tokens
-    |> :ets.match_object({:_, :_, :_, family_id})
-    |> Enum.each(fn {_code_hash, expires_at, jti, ^family_id} -> revoke_jti(jti, expires_at) end)
+  def handle_call({:revoke, hash}, _from, state) do
+    case lookup(hash) do
+      {record, token, _revoked} -> save(record, token, true)
+      nil -> :ok
+    end
 
     {:reply, :ok, state}
   end
 
-  defp delete_expired(now) do
-    # Delete every row whose expiry is strictly in the past.
-    :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:<, :"$2", now}], [true]}])
-    :ets.select_delete(@consumed, [{{:"$1", :"$2", :"$3"}, [{:is_integer, :"$2"}, {:<, :"$2", now}], [true]}])
+  def handle_call({:revoke_family, family}, _from, state) do
+    :ets.foldl(
+      fn
+        {_hash, %{state: :redeemed, redemption: %{family_id: ^family}} = record, token, _}, acc ->
+          save(record, token, true)
+          acc
 
-    :ets.select_delete(@access_tokens, [
-      {{:"$1", :"$2", :"$3", :"$4"}, [{:<, :"$2", now}], [true]}
-    ])
+        _, acc ->
+          acc
+      end,
+      :ok,
+      __MODULE__
+    )
 
-    :ets.select_delete(@revoked_access_tokens, [
-      {{:"$1", :"$2"}, [{:<, :"$2", now}], [true]}
-    ])
-
-    :ets.select_delete(@pending, [
-      {{:"$1", :"$2", :"$3", :"$4"}, [{:<, :"$2", now}], [true]}
-    ])
-
-    :ets.select_delete(@pending_revoked, [
-      {{:"$1", :"$2"}, [{:<, :"$2", now}], [true]}
-    ])
+    {:reply, :ok, state}
   end
 
-  defp revoke_access_token_for_code_unlocked(code_hash) do
-    case :ets.lookup(@access_tokens, code_hash) do
-      [{^code_hash, expires_at, jti, _family_id}] -> revoke_jti(jti, expires_at)
-      [] -> :ok
+  defp cut_off(%{state: :live, code_hash: hash}, _token, _revoked, count) do
+    :ets.delete(__MODULE__, hash)
+    count + 1
+  end
+
+  defp cut_off(%{state: :claimed} = record, token, revoked, count) do
+    save(%{record | revoked: true}, token, revoked)
+    count
+  end
+
+  defp cut_off(%{state: :redeemed}, _token, _revoked, count), do: count
+
+  defp transition(hash, expected, change) do
+    case lookup(hash) do
+      {%{state: ^expected} = record, token, revoked} -> save(change.(record), token, revoked)
+      _ -> :error
     end
   end
 
-  defp pending_revoked_unlocked?(code_hash) do
-    now = System.system_time(:second)
-
-    case :ets.lookup(@pending, code_hash) do
-      [{^code_hash, _retain_until, _data, true}] ->
-        true
-
-      _ ->
-        case :ets.lookup(@pending_revoked, code_hash) do
-          [{^code_hash, retain_until}] -> retain_until > now
-          [] -> false
-        end
-    end
-  end
-
-  defp consumed_result(code_hash) do
-    case :ets.lookup(@consumed, code_hash) do
-      [{^code_hash, _retain_until, meta}] -> {:error, :consumed, meta}
-      [] -> :error
-    end
-  end
-
-  defp consumed_retain_until(%{family_id: family_id, replay_retain_until: nil})
-       when is_binary(family_id) and family_id != "", do: :infinity
-
-  defp consumed_retain_until(%{replay_retain_until: deadline}) when is_integer(deadline) and deadline >= 0, do: deadline
-
-  defp consumed_retain_until(_meta), do: System.system_time(:second) + @no_refresh_retention_seconds
-
-  defp consumed_family_id(%{family_id: family_id}) when is_binary(family_id) and family_id != "", do: family_id
-  defp consumed_family_id(_meta), do: nil
-
-  defp consumed_family_id_for_code(code_hash) do
-    case :ets.lookup(@consumed, code_hash) do
-      [{^code_hash, _retain_until, meta}] -> consumed_family_id(meta)
+  defp lookup(hash) do
+    case :ets.lookup(__MODULE__, hash) do
+      [{^hash, record, token, revoked}] -> {record, token, revoked}
       [] -> nil
     end
   end
 
-  defp bind_access_token_to_family(code_hash, family_id) do
-    case :ets.lookup(@access_tokens, code_hash) do
-      [{^code_hash, expires_at, jti, _old_family_id}] ->
-        true = :ets.insert(@access_tokens, {code_hash, expires_at, jti, family_id})
-        :ok
-
-      [] ->
-        :ok
-    end
+  defp save(record, token, revoked) do
+    if token, do: :ets.insert(__MODULE__.Tokens, {token.jti, token.expires_at, revoked})
+    true = :ets.insert(__MODULE__, {record.code_hash, record, token, revoked})
+    :ok
   end
 
-  defp revoke_jti(jti, expires_at) do
-    retained_until =
-      case :ets.lookup(@revoked_access_tokens, jti) do
-        [{^jti, existing_expires_at}] -> max(existing_expires_at, expires_at)
-        [] -> expires_at
-      end
+  defp delete_expired(now) do
+    :ets.foldl(
+      fn {hash, record, token, _}, acc ->
+        if expired?(record, token, now), do: delete_record(hash, token)
 
-    true = :ets.insert(@revoked_access_tokens, {jti, retained_until})
-    :ok
+        acc
+      end,
+      :ok,
+      __MODULE__
+    )
+  end
+
+  defp delete_record(hash, token) do
+    :ets.delete(__MODULE__, hash)
+    if token, do: :ets.delete(__MODULE__.Tokens, token.jti)
+  end
+
+  defp expired?(%{state: :claimed} = record, token, now) do
+    record.claim_retain_until <= now and record.expires_at < now and
+      (is_nil(token) or token.expires_at <= now)
+  end
+
+  defp expired?(%{state: :live, expires_at: expiry}, _token, now), do: expiry < now
+
+  defp expired?(%{redemption: %{family_id: family, replay_retain_until: nil}}, _token, _now) when is_binary(family),
+    do: false
+
+  defp expired?(record, token, now) do
+    deadline = max(record.expires_at, record.redemption.replay_retain_until || 0)
+    deadline = max(deadline, if(token, do: token.expires_at, else: 0))
+    deadline < now
   end
 end

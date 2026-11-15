@@ -64,7 +64,7 @@ defmodule Attesto.AuthorizationCodePropertyTest do
       end
     end
 
-    property "any failed redemption still consumes the code" do
+    property "any failed comparison leaves the code redeemable" do
       check all(
               verifier <- verifier_generator(),
               wrong_verifier <- verifier_generator(),
@@ -103,7 +103,7 @@ defmodule Attesto.AuthorizationCodePropertyTest do
 
         assert {:ok, code} = AuthorizationCode.issue(CodeStore.ETS, attrs, now: 1_000, ttl: 60)
         assert {:error, ^expected_error} = AuthorizationCode.redeem(CodeStore.ETS, code, bad_params, now: 1_001)
-        assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, code, good_params, now: 1_001)
+        assert {:ok, %Grant{}} = AuthorizationCode.redeem(CodeStore.ETS, code, good_params, now: 1_001)
       end
     end
 
@@ -131,7 +131,8 @@ defmodule Attesto.AuthorizationCodePropertyTest do
 
         assert {:ok, expired_code} = AuthorizationCode.issue(CodeStore.ETS, attrs, now: now, ttl: ttl)
         assert {:error, :expired} = AuthorizationCode.redeem(CodeStore.ETS, expired_code, params, now: now + ttl)
-        assert {:error, :invalid_grant} = AuthorizationCode.redeem(CodeStore.ETS, expired_code, params, now: now)
+        assert {:ok, _record} = CodeStore.ETS.read(Secret.hash(expired_code))
+        assert {:error, :expired} = AuthorizationCode.redeem(CodeStore.ETS, expired_code, params, now: now + ttl)
       end
     end
   end

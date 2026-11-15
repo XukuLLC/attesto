@@ -1,221 +1,114 @@
 defmodule Attesto.CodeStore do
   @moduledoc """
-  SQL transactions touching both stores must lock authorization-code rows
-  before refresh families. Lock refresh families in ascending family-id order,
-  taking each family's advisory lock before its rows, and lock refresh rows
-  in ascending id order within a family. See `Attesto.RefreshStore`.
+  Required storage contract for authorization codes and their token linkage.
 
-  Storage seam for authorization codes.
+  `Attesto.AuthorizationCode` reads, compares the immutable grant
+  bindings, then claims a live code atomically. Refused comparisons write
+  nothing. Expiry is checked only for live codes. Stores retain the grant in every state: `:live` (unclaimed),
+  `:claimed` (issuing tokens), and `:redeemed` (issuance finished).
+  `read/1` returns these as named fields, never as an error or metadata flag.
 
-  `Attesto.AuthorizationCode` is pure: it generates a code, hashes it, and
-  validates a redemption, but it never decides *where* the code lives.
-  That is this behaviour. A host implements it over whatever store fits
-  (Postgres, Redis, ETS); `Attesto.CodeStore.ETS` is a ready single-node
-  implementation.
+  All callbacks are required. `validate!/1` refuses an incomplete store with
+  the missing callback's name. There are no capability-dependent tiers.
+  Stores implement transitions; core decides whether a presentation is a
+  replay and whether to revoke a refresh family. `finish/2` reports concurrent
+  revocation in its atomic transition. A persistent store may conservatively deny
+  linked access tokens as soon as a flag is written, including through a shared
+  marker understood by previous-release nodes.
 
-  ## The single-use contract (load-bearing)
+  ## Immutable grant and retention
 
-  `take/1` MUST be atomic: it returns the record for `code_hash` **and
-  removes it** in one indivisible step, so two concurrent redemptions of
-  the same code cannot both succeed. Authorization codes are single-use
-  (RFC 6749 §4.1.2); a store that let `take/1` race would let a captured
-  code be replayed. A SQL implementation uses
-  `DELETE ... WHERE code_hash = $1 RETURNING ...`; an ETS implementation
-  uses `:ets.take/2`.
+  `put/1` accepts `:code_hash`, `:expires_at` (unix seconds), and `:data`.
+  Data contains exactly `:client_id`, `:redirect_uri`, `:code_challenge`,
+  `:subject`, `:scope`, `:resource`, `:dpop_jkt`, `:family_id`, and `:claims`.
+  PKCE uses S256 when a challenge is present. Host context belongs in the
+  portable string-keyed claims object. These fields never change after insert;
+  the authorization's family provenance is separate from the redemption family.
 
-  The code is consumed by `take/1` even if `Attesto.AuthorizationCode`
-  then rejects the redemption (wrong redirect URI, failed PKCE): a code
-  that has been presented once is spent, which denies an attacker repeated
-  validation attempts against a stolen code.
+  A read adds `:state`, `:redemption`, and `:revoked`.
+  Redemption is nil until finish, then contains `:family_id`, `:subject`, and
+  `:replay_retain_until`. Claimed records remain for at least 300 seconds after
+  claim, then may be deleted once the code and linked access token expire.
+  A missing claim makes `finish/2` return `:error`; core revokes newly issued
+  credentials and returns no tokens. Cleanup must never reopen a claimed code.
 
-  ## Optional reuse tracking (additive, fail-safe)
+  Redeemed records remain through code and linked token expiry. Housekeeping
+  with an authoritative bundled refresh table may retire a family record once
+  its last unexpired member disappears. Otherwise retain through the recorded
+  family deadline, indefinitely when no deadline is known.
 
-  The single-use contract above stops a code being redeemed twice, but on
-  its own it cannot tell a *replay of an already-redeemed code* apart from
-  a *never-issued code*: once `take/1` has removed the row, a second
-  presentation looks identical to garbage. The OAuth 2.0 Security BCP
-  §4.13 (and RFC 6749 §4.1.2) say more: when a code is presented a second
-  time the AS SHOULD revoke the tokens already issued from the first
-  redemption, because a second presentation is an attack signal (the code
-  leaked). Acting on that signal requires remembering which family, if any,
-  the first redemption spawned.
+  Every write is atomic against competing operations on the same code. SQL
+  batches lock code rows before refresh families; lock refresh families in
+  ascending family-id order and take each family's advisory lock before its
+  rows. See `Attesto.RefreshStore`. Store transitions never call a refresh store.
 
-  A store MAY opt into this by implementing the OPTIONAL `mark_consumed/2`
-  callback and extending `take/1` to return `{:error, :consumed, meta}`
-  for a code that was already redeemed. This is purely additive:
-
-    * A store that does NOT implement reuse tracking keeps `take/1`'s
-      original `{:ok, entry} | :error` contract. `Attesto.AuthorizationCode`
-      treats a re-presented (now absent) code as `:invalid_grant`, exactly
-      as before. Single use is unaffected.
-    * A store that DOES implement reuse tracking calls `mark_consumed/2`
-      when a redemption succeeds, recording the `code_hash` together with
-      `meta` (the `family_id`/`subject` for that redemption, plus its optional
-      `replay_retain_until` deadline). The family is
-      `nil` for `finalize/3` no-refresh flows and is the exact issued family
-      only for `issue_refresh_and_finalize/6`. A later
-      `take/1` of the same hash then returns `{:error, :consumed, meta}`,
-      and `Attesto.AuthorizationCode.redeem/4` surfaces
-      `{:error, {:reuse, meta}}` so the caller can revoke the family.
-
-  Fail-safe means: the absence of reuse tracking never makes the system
-  *less* safe than single use already guarantees; it only forgoes the
-  extra descendant-revocation signal. A store therefore implements the
-  callback only when it can persist the consumed marker durably enough to
-  be useful (a single-redemption window is already closed by `take/1`
-  whether or not the marker survives).
-
-  ## Optional access-token replay containment
-
-  Integrations can extend reuse tracking to the access token minted from a
-  code by capability-detecting these functions on the store module:
-
-    * `record_access_token_for_code(code_hash, jti, expires_at)` links the
-      minted token to the code until the token expires.
-    * `revoke_access_token_for_code(code_hash)` revokes the linked token and
-      is idempotent for unknown or legacy codes.
-    * `revoke_family_access_tokens(family_id)` revokes tokens whose code was
-      finalized with that refresh family in `mark_consumed/2`.
-    * `access_token_revoked?(jti)` reports whether an unexpired linked token
-      has been revoked.
-
-  These remain capability-detected extension functions rather than behaviour
-  callbacks. That lets stores compiled against an earlier Attesto 2.x release
-  keep their existing `@impl` annotations without new compiler warnings while
-  allowing bundled and custom stores to adopt the extension independently.
-
-  ## Record shape
-
-  A stored record is a map with:
-
-    * `:code_hash` - the `Attesto.Secret.hash/1` of the code (the key).
-    * `:data` - the canonical grant context the host round-trips. It contains
-      all and only `:client_id`, `:redirect_uri`, `:code_challenge`, `:subject`,
-      `:scope`, `:resource`, `:dpop_jkt`, `:family_id`, and `:claims`. Adapter
-      metadata must not be added beside those keys; host-specific values belong
-      inside the portable, string-keyed `:claims` object (valid UTF-8 without
-      U+0000 and exact-range integers). The PKCE method is fixed to `S256`
-      whenever a challenge is present and is therefore not a stored context
-      key.
-    * `:expires_at` - absolute expiry, unix seconds. The store MAY evict
-      expired records, but `Attesto.AuthorizationCode` re-checks expiry
-      after `take/1`, so eviction timing is not security-critical.
+  See the custom-store upgrade guide for the previous callback mapping.
   """
 
   @type code_hash :: String.t()
-
-  @typedoc """
-  Reuse metadata recorded at the first redemption and replayed to a later
-  `take/1` of the same `code_hash`. Opaque to `Attesto.CodeStore`; carried
-  through `Attesto.AuthorizationCode.redeem/4` to the caller. Conventionally
-  holds `:family_id`, `:subject`, and `:replay_retain_until`; the family is
-  `nil` for a no-refresh `finalize/3` marker and non-nil only when the refresh
-  composition captured an actually issued family. `:replay_retain_until` is
-  the immutable refresh-family deadline as unix seconds. It is `nil` for a
-  family with no configured maximum lifetime, which tells persistent stores
-  to retain the marker indefinitely while that family may remain active.
-  """
-  @type consumed_meta :: map()
-
-  @type entry :: %{
-          required(:code_hash) => code_hash(),
-          required(:data) => map(),
-          required(:expires_at) => integer()
+  @type redemption :: %{
+          family_id: String.t() | nil,
+          subject: String.t(),
+          replay_retain_until: non_neg_integer() | nil
+        }
+  @type entry :: %{code_hash: code_hash(), data: map(), expires_at: integer()}
+  @type snapshot :: %{
+          code_hash: code_hash(),
+          data: map(),
+          expires_at: integer(),
+          state: :live | :claimed | :redeemed,
+          redemption: redemption() | nil,
+          revoked: boolean()
         }
 
-  @doc "Persist a code record."
+  @doc "Atomically insert a live code. Duplicate hashes raise; never replace a record."
   @callback put(entry()) :: :ok
-
+  @doc "Read any state without writing. Absent records return `:error`."
+  @callback read(code_hash()) :: {:ok, snapshot()} | :error
+  @doc "Atomically change live to claimed. Any other state returns `:error` without writes."
+  @callback claim(code_hash()) :: :ok | :error
+  @doc "Atomically finish a claimed code, recording redemption and returning concurrent revocation."
+  @callback finish(code_hash(), redemption()) :: {:ok, boolean()} | :error
+  @doc "Atomically flag a claimed code's replay. Other states return `:error` without writes."
+  @callback flag_replay(code_hash()) :: :ok | :error
   @doc """
-  Atomically fetch and delete the record for `code_hash`.
-
-  MUST be a single indivisible operation to preserve single use. Returns:
-
-    * `{:ok, record}` - the code existed and was unredeemed; it is now
-      removed. This is the primary path every store implements.
-    * `:error` - no such code (never issued, expired-and-evicted, or - for
-      a store WITHOUT reuse tracking - already redeemed). Treated as
-      `:invalid_grant` by `Attesto.AuthorizationCode.redeem/4`.
-    * `{:error, :consumed, meta}` - OPTIONAL, only for a store that
-      implements `mark_consumed/2`: the code was already successfully
-      redeemed once. `meta` is the value passed to `mark_consumed/2` at
-      that first redemption (carrying the `family_id`/`subject`, with a nil
-      family for no-refresh finalization). This is the code-reuse attack
-      signal (OAuth 2.0 Security BCP §4.13); the
-      redeemer surfaces it so the caller can revoke descendants.
-
-  A store that does not track reuse never returns the third form, so the
-  contract stays `{:ok, entry} | :error` for it and reuse tracking is
-  purely additive.
+  Atomically delete matching live codes and flag matching claimed grants revoked.
+  Return the number deleted. Redeemed records are unchanged. Criteria are ANDed;
+  invalid or empty criteria raise `ArgumentError`. See `Attesto.RevocationCriteria`.
   """
-  @callback take(code_hash()) :: {:ok, entry()} | :error | {:error, :consumed, consumed_meta()}
+  @callback delete_unclaimed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
+  @doc "Atomically link one token to a claimed/redeemed code, preserving revocation. Invalid state raises."
+  @callback record_access_token_for_code(code_hash(), String.t(), integer()) :: :ok
+  @doc "Atomically revoke a code's token linkage, including later linkage; absent codes are a no-op."
+  @callback revoke_access_token_for_code(code_hash()) :: :ok
+  @doc "Atomically revoke token linkages for redeemed codes belonging to a refresh family."
+  @callback revoke_family_access_tokens(String.t()) :: :ok
+  @doc "Read whether an unexpired linked token is revoked. Never writes."
+  @callback access_token_revoked?(String.t()) :: boolean()
 
-  @doc """
-  OPTIONAL. Record that `code_hash` was successfully redeemed and spawned
-  the family described by `meta`, so a later `take/1` of the same hash can
-  report `{:error, :consumed, meta}`.
+  @doc "Validate a redemption record's required fields; malformed records raise without writes."
+  @spec validate_redemption!(redemption()) :: :ok
+  def validate_redemption!(%{family_id: family, subject: subject, replay_retain_until: deadline}) do
+    valid =
+      Attesto.Record.optional_non_empty_binary?(family) and Attesto.Record.non_empty_binary?(subject) and
+        (is_nil(deadline) or (is_binary(family) and is_integer(deadline) and deadline >= 0))
 
-  Implemented only by stores that support code-reuse detection (OAuth 2.0
-  Security BCP §4.13 / RFC 6749 §4.1.2). `Attesto.AuthorizationCode` calls
-  it exactly once, after a redemption fully validates, with `meta` carrying
-  that redemption's `:family_id`, `:subject`, and optional
-  `:replay_retain_until` family deadline (or a nil family and deadline when
-  `finalize/3` is used for a no-refresh flow). A store that does not
-  implement this callback simply omits it from the behaviour; the redeemer
-  detects its absence (`function_exported?/3`) and skips the call, leaving
-  single-use behaviour unchanged.
+    if valid, do: :ok, else: raise(ArgumentError, "invalid authorization-code redemption record")
+  end
 
-  Returns `:ok`. A marker for a refresh family SHOULD persist through
-  `:replay_retain_until`; a nil deadline on a non-nil family means the family
-  has no fixed maximum lifetime and the marker must not be expired on a local
-  timer. A store MAY key it by `code_hash` alongside the consumed-token
-  bookkeeping it already keeps.
-  """
-  @callback mark_consumed(code_hash(), consumed_meta()) :: :ok
+  def validate_redemption!(_record), do: raise(ArgumentError, "invalid authorization-code redemption record")
 
-  @doc """
-  OPTIONAL. Read the entry for `code_hash` WITHOUT consuming it (unlike
-  `take/1`). Returns `{:ok, entry}` when a code with that hash is stored, else
-  `:error`.
+  @doc "Validate that a module implements every required callback; raise naming a missing callback."
+  @spec validate!(module()) :: :ok
+  def validate!(store) do
+    Code.ensure_loaded!(store)
 
-  Used for ordinary read-only inspection without burning the single-use code.
-  A store that does not implement it is detected via `function_exported?/3`
-  and the optional read is skipped.
-  """
-  @callback get(code_hash()) :: {:ok, entry()} | :error
+    for {name, arity} <- __MODULE__.behaviour_info(:callbacks) do
+      if !function_exported?(store, name, arity) do
+        raise ArgumentError, "#{inspect(store)} must implement Attesto.CodeStore.#{name}/#{arity}"
+      end
+    end
 
-  @doc """
-  OPTIONAL. Delete every code that has not been redeemed and whose grant
-  matches `criteria` (see `Attesto.RevocationCriteria`): `:subject`,
-  `:client_id` and/or `:sid`, ANDed. Returns `{:ok, count}` with the number of
-  codes deleted.
-
-  Used when a subject, a client, or a session is cut off, so a code issued
-  before that point cannot be redeemed after it. A deleted code is simply
-  absent: a later `take/1` of it returns `:error`.
-
-  Redeemed codes are not touched; their reuse markers and access-token links
-  stay in place. This does nothing to access tokens already issued. A
-  self-contained JWT access token stays valid until it expires unless the
-  protected resource consults introspection or a denylist.
-
-  Raises `ArgumentError` for invalid or empty criteria.
-  """
-  @callback delete_unconsumed(Attesto.RevocationCriteria.criteria()) :: {:ok, non_neg_integer()}
-
-  @doc """
-  OPTIONAL. Whether `delete_unconsumed/1` revoked a grant matching the
-  already-taken code `code_hash` while token issuance was in flight.
-
-  Concurrent revocation (`delete_unconsumed/1`) cannot remove a code that
-  `take/1` already popped, so a store that tracks in-flight revocations marks
-  the grant revoked until `mark_consumed/2` completes (and clears the marker
-  once consulted or superseded). Token issuance consults this before minting
-  a refresh token so a concurrent cut-off never grants a durable session. A
-  store that does not implement it is assumed not to have a pending
-  revocation.
-  """
-  @callback pending_revoked?(code_hash()) :: boolean()
-
-  @optional_callbacks mark_consumed: 2, get: 1, delete_unconsumed: 1, pending_revoked?: 1
+    :ok
+  end
 end

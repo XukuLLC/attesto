@@ -20,48 +20,32 @@ defmodule Attesto.AuthorizationCode do
   governed by `Attesto.AuthorizationRequest`'s `:require_pkce` option (default
   `true`); a host MAY relax it for a *confidential* client (public clients MUST
   use PKCE, RFC 9700 §2.1.1), in which case a code is issued with no challenge
-  and redeemed with no verifier. A `code_challenge` that is present is always
+  and redeemed without requiring a verifier. A `code_challenge` that is present is always
   fully enforced. `issue/3` therefore treats `:code_challenge` as optional: when
   given it must be a valid S256 challenge, when absent the code is unbound and a
-  later redemption MUST present no `code_verifier`.
+  later redemption must omit the verifier to prevent PKCE downgrade.
 
-  ## Single use even on failure
+  ## Compare before single use
 
-  `redeem/4` consumes the code via `c:Attesto.CodeStore.take/1` **before**
-  validating it, so a presented code is spent whether or not the
-  redemption succeeds. An attacker who captures a code cannot make
-  repeated validation attempts against it.
+  `redeem/4` reads via `c:Attesto.CodeStore.read/1`, checks client,
+  redirect URI, PKCE and DPoP, then acts on the explicit state. A failed
+  comparison returns its reason without writes in every state. A matching live
+  code is checked for expiry and atomically claimed; a lost transition rereads
+  and compares again, at most three times before a store contract violation.
 
-  ## Code-reuse detection (when the store supports it)
+  A matching claimed code flags replay for finalization. A matching redeemed
+  code returns `{:error, {:reuse, meta}}` with the first redemption's family,
+  subject and retention deadline. Expiry is checked only for live codes. An
+  unchallenged code compares client and redirect URI and refuses a presented verifier.
+  Every store retains bindings and redemption records; all callbacks are required.
 
-  Single use alone cannot distinguish a *replay of an already-redeemed
-  code* from a *never-issued code*: once `take/1` removes the row, both
-  look absent. OAuth 2.0 Security BCP §4.13 (and RFC 6749 §4.1.2) say the
-  AS SHOULD, on a second presentation of a code, revoke the tokens already
-  issued from its first redemption, because a re-presented code is an
-  attack signal.
+  `finalize/3` and `issue_refresh_and_finalize/6` finish issuance atomically,
+  observe concurrent replay or grant cut-off revocation, and revoke issued tokens
+  when necessary. Stores themselves make no replay or revocation decisions.
 
-  `redeem/4` enables that when - and only when - the `Attesto.CodeStore`
-  implements the optional reuse-tracking pair (`c:Attesto.CodeStore.take/1`
-  returning `{:error, :consumed, meta}` plus
-  `c:Attesto.CodeStore.mark_consumed/2`). The reuse marker is recorded by
-  `finalize/3`, which the caller invokes AFTER all access-token, ID-token, and
-  other response fields have been successfully built - NOT by `redeem/4`
-  itself. So a code whose redemption
-  validated but whose downstream issuance then failed (a mint or refresh-token
-  fault, a host callback returning a bad principal) is left single-use-spent
-  but NOT reuse-flagged: a replay is `{:error, :invalid_grant}`, and a
-  legitimate retry of a transient failure is never mistaken for a reuse attack
-  (which would wrongly revoke the family). Once `finalize/3` has run, a later
-  redemption of the same code yields `{:error, {:reuse, meta}}`, where `meta`
-  carries that first redemption's context so the caller can revoke the
-  descendant family (e.g. via `Attesto.Revocation`). The no-refresh
-  `finalize/3` path records a nil family ID; only
-  `issue_refresh_and_finalize/6` records the exact family returned by refresh
-  issuance. A store that does not
-  implement the pair behaves exactly as before: a re-presented code is
-  `{:error, :invalid_grant}`.
-  This is additive and fail-safe (see `Attesto.CodeStore`).
+  This deliberately departs from the literal wording of RFC 6749 §4.1.2:
+  revocation requires a matching presentation so possession of a code alone
+  cannot revoke another client's tokens.
 
   `:family_id` on an authorization request is provenance metadata carried by
   the returned `Grant`; public `Attesto.RefreshToken.issue/3` deliberately
@@ -148,8 +132,8 @@ defmodule Attesto.AuthorizationCode do
 
   @type redeem_params :: %{
           required(:redirect_uri) => String.t(),
-          required(:code_verifier) => String.t(),
-          optional(:client_id) => String.t(),
+          optional(:code_verifier) => String.t(),
+          required(:client_id) => String.t(),
           optional(:dpop_jkt) => String.t() | nil
         }
 
@@ -162,7 +146,7 @@ defmodule Attesto.AuthorizationCode do
           | :pkce_failed
           | :dpop_proof_required
           | :dpop_binding_mismatch
-          | {:reuse, Attesto.CodeStore.consumed_meta()}
+          | {:reuse, Attesto.CodeStore.redemption()}
 
   @doc """
   Mint a single-use authorization code and persist it via `store`.
@@ -187,6 +171,8 @@ defmodule Attesto.AuthorizationCode do
   """
   @spec issue(module(), issue_attrs(), keyword()) :: {:ok, String.t()} | {:error, issue_error()}
   def issue(store, attrs, opts \\ []) when is_atom(store) and is_map(attrs) and is_list(opts) do
+    Attesto.CodeStore.validate!(store)
+
     with :ok <- validate_method(attrs),
          {:ok, data} <- normalize_issue_attrs(attrs) do
       ttl = ttl_seconds!(opts)
@@ -215,20 +201,17 @@ defmodule Attesto.AuthorizationCode do
   default client binding is fail-closed: since every stored code carries a
   `client_id`, redemption MUST present one (`:client_required` if absent,
   `:client_mismatch` if wrong) - this stops a code issued to one client
-  being redeemed by another (RFC 6749 §4.1.3). A caller that cannot
-  authenticate the client and relies on PKCE alone passes
-  `allow_missing_client_id?: true` in `opts`. `:dpop_jkt` is required iff
+  being redeemed by another (RFC 6749 §4.1.3). `:dpop_jkt` is required iff
   the code was DPoP-bound at `issue/3`; if the code was not bound, a presented
   `:dpop_jkt` is allowed and can be used by the caller to mint a DPoP-bound
   access token.
 
-  The code is consumed (single use) before validation. Returns
+  The code is read and validated before its atomic claim. Returns
   `{:ok, %Attesto.AuthorizationCode.Grant{}}` with the validated grant
   context, or `{:error, reason}`.
 
-  When the `store` implements optional reuse tracking (see
-  `Attesto.CodeStore`), a second redemption of a code that was already
-  successfully redeemed returns `{:error, {:reuse, meta}}` rather than
+  A second redemption of a code that was already
+  successfully redeemed and whose bindings match returns `{:error, {:reuse, meta}}` rather than
   `{:error, :invalid_grant}`. `meta` carries the first redemption's
   `:family_id` and `:subject`. For a redemption that issued a refresh token,
   `:family_id` identifies the descendant family to revoke (OAuth 2.0 Security
@@ -240,79 +223,109 @@ defmodule Attesto.AuthorizationCode do
   def redeem(store, code, params, opts \\ [])
       when is_atom(store) and is_binary(code) and is_map(params) and is_list(opts) do
     now = NumericDate.non_negative_now!(opts)
-    _allow_missing_client = allow_missing_client?(opts)
+
+    if Keyword.has_key?(opts, :allow_missing_client_id?) do
+      raise ArgumentError, ":allow_missing_client_id? is no longer supported for authorization codes"
+    end
+
     opts = Keyword.put(opts, :now, now)
     code_hash = Secret.hash(code)
 
-    case store.take(code_hash) do
-      {:ok, record} ->
-        if valid_record?(record, code_hash),
-          do: redeem_taken(record, params, opts),
-          else: code_store_contract_error(:take)
+    Attesto.CodeStore.validate!(store)
+    redeem_read(store, code_hash, params, opts, 3)
+  end
 
-      # OAuth 2.0 Security BCP §4.13 / RFC 6749 §4.1.2: a re-presented,
-      # already-FINALIZED code is the reuse attack signal. Only stores with
-      # reuse tracking return this, and only once finalization has recorded the
-      # marker; surface the first redemption's context so the caller can revoke
-      # the descendant family.
-      {:error, :consumed, meta} when is_map(meta) ->
-        {:error, {:reuse, meta}}
+  defp redeem_read(_store, _hash, _params, _opts, -1), do: code_store_contract_error(:read)
+
+  defp redeem_read(store, code_hash, params, opts, rereads) do
+    case store.read(code_hash) do
+      {:ok, record} ->
+        if !valid_state_record?(record, code_hash), do: code_store_contract_error(:read)
+
+        with {:ok, grant} <- compare_record(record, params, opts) do
+          act_on_state(store, record, grant, params, opts, rereads)
+        end
 
       :error ->
         {:error, :invalid_grant}
 
       _unexpected ->
-        code_store_contract_error(:take)
+        code_store_contract_error(:read)
     end
   end
+
+  defp act_on_state(store, %{state: :live, code_hash: hash, expires_at: expiry}, grant, params, opts, rereads) do
+    with :ok <- check_expiry(expiry, opts) do
+      case store.claim(hash) do
+        :ok -> {:ok, grant}
+        :error -> redeem_read(store, hash, params, opts, rereads - 1)
+        _unexpected -> code_store_contract_error(:claim)
+      end
+    end
+  end
+
+  defp act_on_state(store, %{state: :claimed, code_hash: hash}, _grant, params, opts, rereads) do
+    case store.flag_replay(hash) do
+      :ok -> {:error, :invalid_grant}
+      :error -> redeem_read(store, hash, params, opts, rereads - 1)
+      _unexpected -> code_store_contract_error(:flag_replay)
+    end
+  end
+
+  defp act_on_state(_store, %{state: :redeemed, redemption: redemption}, _grant, _params, _opts, _rereads),
+    do: {:error, {:reuse, redemption}}
+
+  defp valid_state_record?(%{state: state, redemption: redemption, revoked: revoked} = record, hash) do
+    valid_record?(record, hash) and is_boolean(revoked) and
+      valid_state_fields?(state, redemption, revoked)
+  end
+
+  defp valid_state_record?(_record, _hash), do: false
+
+  defp valid_state_fields?(:live, nil, false), do: true
+  defp valid_state_fields?(:claimed, nil, _revoked), do: true
+  defp valid_state_fields?(:redeemed, redemption, _revoked), do: valid_redemption?(redemption)
+  defp valid_state_fields?(_state, _redemption, _revoked), do: false
+
+  defp valid_redemption?(%{family_id: family, subject: subject, replay_retain_until: deadline}) do
+    valid_optional_family_id?(family) and Record.non_empty_binary?(subject) and
+      (is_nil(deadline) or (is_integer(deadline) and deadline >= 0))
+  end
+
+  defp valid_redemption?(_redemption), do: false
 
   @doc """
   Returns `true` iff a stored code for `code` is bound to a DPoP key (RFC 9449
   §10) - i.e. its redemption requires a matching DPoP proof (holder-of-key).
 
-  Reads the code via the store's OPTIONAL `c:Attesto.CodeStore.get/1` WITHOUT
+  Reads the code via the store's required `c:Attesto.CodeStore.read/1` WITHOUT
   consuming it, so a legitimate redemption is unaffected. Returns `false` when
-  the store has no `get/1`, the code is unknown, or it carries no `:dpop_jkt`.
+  the code is unknown, already consumed, or carries no `:dpop_jkt`. Missing `read/1` is a
+  store contract violation.
   This lets the token endpoint surface a holder-of-key (`invalid_dpop_proof`)
   rejection ahead of the client-authentication error (FAPI2) without burning the
   single-use code.
   """
   @spec dpop_bound?(module(), String.t()) :: boolean()
   def dpop_bound?(store, code) when is_atom(store) and is_binary(code) do
-    if function_exported?(store, :get, 1) do
-      read_dpop_binding(store, Secret.hash(code))
-    else
-      false
+    Attesto.CodeStore.validate!(store)
+    hash = Secret.hash(code)
+
+    case store.read(hash) do
+      {:ok, record} ->
+        if !valid_state_record?(record, hash), do: code_store_contract_error(:read)
+        record.state == :live and not is_nil(record.data.dpop_jkt)
+
+      :error ->
+        false
+
+      _unexpected ->
+        code_store_contract_error(:read)
     end
   end
 
-  defp read_dpop_binding(store, code_hash) do
-    case store.get(code_hash) do
-      {:ok, record} -> dpop_binding_from_record(record, code_hash)
-      :error -> false
-      _unexpected -> code_store_contract_error(:get)
-    end
-  end
-
-  defp dpop_binding_from_record(%{code_hash: code_hash, data: data, expires_at: expires_at}, code_hash)
-       when is_map(data) and is_integer(expires_at) do
-    case Map.get(data, :dpop_jkt) do
-      jkt when is_binary(jkt) and jkt != "" -> true
-      nil -> false
-      _malformed -> code_store_contract_error(:get)
-    end
-  end
-
-  defp dpop_binding_from_record(_record, _code_hash), do: code_store_contract_error(:get)
-
-  # `take/1` has already claimed the code (single use). Validate it and return
-  # the grant. The reuse marker is NOT recorded here - the caller records it via
-  # `finalize/3` only after the full token response is built, so a downstream
-  # issuance failure leaves the code spent-but-unfinalized (a replay is
-  # `:invalid_grant`, never a false reuse).
-  defp redeem_taken(%{data: data, expires_at: expires_at}, params, opts) do
-    with :ok <- check_expiry(expires_at, opts),
-         :ok <- check_client(data, params, opts),
+  defp compare_record(%{data: data}, params, opts) do
+    with :ok <- check_client(data, params, opts),
          :ok <- check_redirect_uri(data, params),
          :ok <- check_pkce(data, params),
          :ok <- check_dpop(data, params) do
@@ -322,27 +335,30 @@ defmodule Attesto.AuthorizationCode do
 
   @doc """
   Finalize a fully completed redemption: record the reuse marker
-  (`consumed_success`) for `code`'s grant.
+  for `code`'s grant.
 
   Call this only AFTER the full token response has been successfully built. It
   is split from `redeem/4` so redemption is atomic - `redeem/4` claims the code
-  (single use, via `take/1`) and validates it, but defers this marker so a
+  (single use, via `c:Attesto.CodeStore.claim/1`) after validating it, but defers this marker so a
   failure in the caller's downstream issuance (mint, refresh-token persistence,
   a host callback fault) does NOT leave a spent-but-tokenless code recorded as a
   completed redemption (which would make a legitimate retry look like a reuse
-  attack and revoke the family). A no-op for stores that do not implement
-  `c:Attesto.CodeStore.mark_consumed/2`. This form is only for flows that issue
+  attack and revoke the family). This form is only for flows that issue
   no refresh token and always records a nil `family_id` in the marker. The
   `Grant`'s `family_id` is authorization provenance, not a refresh-family
   identifier. For a refresh grant, use `issue_refresh_and_finalize/6` so the
   marker carries the family ID returned by `RefreshToken.issue/3` without
-  accepting a caller-supplied ID.
+  accepting a caller-supplied ID. A missing claim returns `{:error, :invalid_grant}`
+  after revoking its access-token link.
   """
-  @spec finalize(module(), String.t(), Grant.t()) :: :ok
+  @spec finalize(module(), String.t(), Grant.t()) :: :ok | {:error, :invalid_grant}
   def finalize(store, code, %Grant{} = grant) when is_atom(store) and is_binary(code) do
     # An authorization-request family is provenance only. A no-refresh marker
     # must never be mistaken for the family of a refresh credential.
-    record_consumption(store, Secret.hash(code), %{grant | family_id: nil})
+    case finish_redemption(store, Secret.hash(code), %{grant | family_id: nil}) do
+      :error -> {:error, :invalid_grant}
+      {:ok, _revoked} -> :ok
+    end
   end
 
   @doc """
@@ -355,9 +371,11 @@ defmodule Attesto.AuthorizationCode do
   returned plaintext refresh token to the response only after it returns
   `{:ok, issued}`. It calls `Attesto.RefreshToken.issue/3` itself, so callers
   never provide a family ID or generation. Only a validated success result can
-  reach `mark_consumed/2`, and the exact family ID captured from that result is
+  reach `c:Attesto.CodeStore.finish/2`, and the exact family ID captured from that result is
   written to the code-reuse marker. A refresh issuance error is returned
-  unchanged and leaves the code spent-but-unfinalized. A finalization exception
+  unchanged and leaves the code spent-but-unfinalized. If the claim disappears,
+  the newly issued refresh family and access-token link are revoked and
+  `{:error, :invalid_grant}` is returned. A finalization exception
   or contract violation is propagated and never becomes an `:ok` result.
 
   `refresh_context` must carry the redeemed grant's `:subject` and
@@ -381,7 +399,7 @@ defmodule Attesto.AuthorizationCode do
           module(),
           Attesto.RefreshToken.context(),
           keyword()
-        ) :: {:ok, Attesto.RefreshToken.issued()} | {:error, Attesto.RefreshToken.issue_error()}
+        ) :: {:ok, Attesto.RefreshToken.issued()} | {:error, Attesto.RefreshToken.issue_error() | :invalid_grant}
   def issue_refresh_and_finalize(code_store, code, %Grant{} = grant, refresh_store, refresh_context, opts \\ [])
       when is_atom(code_store) and is_binary(code) and is_atom(refresh_store) and is_map(refresh_context) and
              is_list(opts) do
@@ -399,31 +417,35 @@ defmodule Attesto.AuthorizationCode do
       {:ok, issued} ->
         issued = validate_issued_refresh!(issued)
 
-        :ok =
-          record_consumption(
+        revoked =
+          finish_redemption(
             code_store,
             code_hash,
             %{grant | family_id: issued.family_id},
             refresh_family_deadline(opts)
           )
 
-        :ok = maybe_revoke_pending_family(code_store, code_hash, issued.family_id, refresh_store)
-
-        {:ok, issued}
+        finish_refresh_result(revoked, refresh_store, issued)
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp maybe_revoke_pending_family(code_store, code_hash, family_id, refresh_store) do
-    if function_exported?(code_store, :pending_revoked?, 1) and code_store.pending_revoked?(code_hash) do
-      case refresh_store.revoke_family(family_id) do
-        :ok -> :ok
-        _unexpected -> Store.contract_violation!("refresh store", {:revoke_family, 1})
-      end
-    else
-      :ok
+  defp finish_refresh_result(:error, refresh_store, issued) do
+    revoke_issued_family!(refresh_store, issued.family_id)
+    {:error, :invalid_grant}
+  end
+
+  defp finish_refresh_result({:ok, revoked?}, refresh_store, issued) do
+    if revoked?, do: revoke_issued_family!(refresh_store, issued.family_id)
+    {:ok, issued}
+  end
+
+  defp revoke_issued_family!(refresh_store, family_id) do
+    case refresh_store.revoke_family(family_id) do
+      :ok -> :ok
+      _unexpected -> Store.contract_violation!("refresh store", {:revoke_family, 1})
     end
   end
 
@@ -488,27 +510,29 @@ defmodule Attesto.AuthorizationCode do
     Store.contract_violation!("refresh token", {:issue, 3})
   end
 
-  # Record the successful redemption so a re-presentation of the same code
-  # is detectable as reuse (OAuth 2.0 Security BCP §4.13). Only stores that
-  # implement the optional `mark_consumed/2` callback get the marker; the
-  # absence of the callback leaves single-use behaviour unchanged and is
-  # fail-safe (see `Attesto.CodeStore`). `meta` links the spent code to the
-  # family it spawned so the caller can revoke descendants on a later replay.
-  defp record_consumption(store, code_hash, %Grant{} = grant, replay_retain_until \\ nil) do
-    if function_exported?(store, :mark_consumed, 2) do
-      meta = %{
-        family_id: grant.family_id,
-        subject: grant.subject,
-        replay_retain_until: replay_retain_until
-      }
+  defp finish_redemption(store, code_hash, %Grant{} = grant, replay_retain_until \\ nil) do
+    Attesto.CodeStore.validate!(store)
+    redemption = %{family_id: grant.family_id, subject: grant.subject, replay_retain_until: replay_retain_until}
 
-      case store.mark_consumed(code_hash, meta) do
-        :ok -> :ok
-        _unexpected -> code_store_contract_error(:mark_consumed)
-      end
+    case store.finish(code_hash, redemption) do
+      {:ok, revoked} when is_boolean(revoked) ->
+        if revoked, do: revoke_code_access_token!(store, code_hash)
+        {:ok, revoked}
+
+      :error ->
+        revoke_code_access_token!(store, code_hash)
+        :error
+
+      _unexpected ->
+        code_store_contract_error(:finish)
     end
+  end
 
-    :ok
+  defp revoke_code_access_token!(store, code_hash) do
+    case store.revoke_access_token_for_code(code_hash) do
+      :ok -> :ok
+      _unexpected -> code_store_contract_error(:revoke_access_token_for_code)
+    end
   end
 
   defp refresh_family_deadline(opts) do
@@ -521,22 +545,12 @@ defmodule Attesto.AuthorizationCode do
     end
   end
 
-  # RFC 6749 §4.1.3: the code must be redeemed by the client it was issued
-  # to. Fail closed by default - a stored code always carries a
-  # `client_id`, so redemption MUST present a matching one
-  # (`:client_required` when absent, `:client_mismatch` when wrong). A
-  # caller that genuinely cannot authenticate the client (and relies on
-  # PKCE alone) opts out explicitly with `allow_missing_client_id?: true`.
-  defp check_client(%{client_id: stored}, params, opts) do
+  defp check_client(%{client_id: stored}, params, _opts) do
     case Map.get(params, :client_id) do
-      nil -> if allow_missing_client?(opts), do: :ok, else: {:error, :client_required}
+      nil -> {:error, :client_required}
       ^stored -> :ok
       _ -> {:error, :client_mismatch}
     end
-  end
-
-  defp allow_missing_client?(opts) do
-    Options.boolean!(opts, :allow_missing_client_id?, false)
   end
 
   # ----- issue validation -----
@@ -698,24 +712,11 @@ defmodule Attesto.AuthorizationCode do
   # belong inside `:claims`, so extra sibling keys make a persisted record
   # malformed rather than being silently ignored.
   @spec code_store_contract_error(atom()) :: no_return()
-  defp code_store_contract_error(:put), do: Store.contract_violation!("authorization code store", {:put, 1})
-  defp code_store_contract_error(:take), do: Store.contract_violation!("authorization code store", {:take, 1})
-  defp code_store_contract_error(:get), do: Store.contract_violation!("authorization code store", {:get, 1})
-
-  defp code_store_contract_error(:mark_consumed),
-    do: Store.contract_violation!("authorization code store", {:mark_consumed, 2})
-
-  # PKCE is optional at issuance: a host that relaxed `:require_pkce` for a
-  # confidential client issues a code with no challenge (nil). A challenge that
-  # IS present must be a valid S256 challenge (RFC 7636); nil is accepted, any
-  # other value is rejected as `:invalid_code_challenge`.
+  defp code_store_contract_error(:finish), do: Store.contract_violation!("authorization code store", {:finish, 2})
+  defp code_store_contract_error(callback), do: Store.contract_violation!("authorization code store", {callback, 1})
   defp valid_optional_challenge?(nil), do: true
   defp valid_optional_challenge?(challenge), do: PKCE.valid_challenge?(challenge)
   defp valid_scope?(scope), do: Scope.valid_list?(scope)
-  # The bound resource indicators are validated as RFC 8707 §2.1 absolute-URI
-  # indicators at the authorization-server framing layer; here they are
-  # shape-checked as a list of non-empty strings before being stored.
   defp valid_resource?(resource), do: is_list(resource) and Enum.all?(resource, &Record.non_empty_binary?/1)
-  defp valid_optional_family_id?(nil), do: true
-  defp valid_optional_family_id?(family_id), do: Record.non_empty_binary?(family_id)
+  defp valid_optional_family_id?(family_id), do: Record.optional_non_empty_binary?(family_id)
 end

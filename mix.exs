@@ -14,7 +14,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
 
-  @version "2.22.0"
+  @version "2.23.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -121,6 +121,7 @@ defmodule Attesto.MixProject do
       # Hidden functions and modules that released changelog entries name;
       # render them as code without links.
       skip_code_autolink_to: [
+        "c:Attesto.CodeStore.get/1",
         "Attesto.JWS",
         "Attesto.JWS.decode64/2",
         "Attesto.JWS.sign_compact/3",
@@ -130,7 +131,7 @@ defmodule Attesto.MixProject do
         "Attesto.RefreshStore.ETS.rotate/4",
         "Attesto.URI.valid_port?/2"
       ],
-      extras: ["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
+      extras: ["README.md", "CHANGELOG.md", "guides/code_store_upgrade.md", "CONTRIBUTING.md", "LICENSE"],
       groups_for_extras: [
         Changelog: ~r/CHANGELOG\.md/,
         Contributing: ~r/CONTRIBUTING\.md/,
@@ -183,7 +184,7 @@ defmodule Attesto.MixProject do
         "Changelog" => "https://hexdocs.pm/attesto/changelog.html",
         "GitHub" => @url
       },
-      files: ~w(lib LICENSE mix.exs README.md CHANGELOG.md CONTRIBUTING.md)
+      files: ~w(lib guides LICENSE mix.exs README.md CHANGELOG.md CONTRIBUTING.md)
     ]
   end
 end

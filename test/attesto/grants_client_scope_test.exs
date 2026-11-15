@@ -53,12 +53,12 @@ defmodule Attesto.GrantsClientScopeTest do
       assert {:error, :client_required} = redeem(code, %{})
     end
 
-    test "a host relying on PKCE alone opts out with allow_missing_client_id?", %{challenge: challenge} do
+    test "client binding cannot be disabled", %{challenge: challenge} do
       code = issue_code(challenge, "oc_app_a")
-      params = %{redirect_uri: "https://app.example.com/cb", code_verifier: @verifier}
 
-      assert {:ok, %Grant{}} =
-               AuthorizationCode.redeem(CodeStore.ETS, code, params, allow_missing_client_id?: true)
+      assert_raise ArgumentError, ~r/no longer supported/, fn ->
+        AuthorizationCode.redeem(CodeStore.ETS, code, %{}, allow_missing_client_id?: true)
+      end
     end
 
     test "a non-boolean opt-out cannot bypass client binding", %{challenge: challenge} do
@@ -66,7 +66,7 @@ defmodule Attesto.GrantsClientScopeTest do
         code = issue_code(challenge, "oc_app_a")
         params = %{redirect_uri: "https://app.example.com/cb", code_verifier: @verifier}
 
-        assert_raise ArgumentError, ~r/:allow_missing_client_id\? must be true or false/, fn ->
+        assert_raise ArgumentError, ~r/no longer supported/, fn ->
           AuthorizationCode.redeem(CodeStore.ETS, code, params, allow_missing_client_id?: invalid)
         end
 
