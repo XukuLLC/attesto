@@ -109,9 +109,8 @@ defmodule Attesto.ProtectedResourceMetadata do
   `:bearer_methods_supported`, where §2 gives `[]` a meaning of its own: no
   bearer methods are supported.
   """
-  @spec metadata(Config.t(), keyword()) :: %{required(String.t()) => term()}
-  @spec metadata(Config.t()) :: %{required(String.t()) => term()}
-  @spec metadata(keyword()) :: %{required(String.t()) => term()}
+  @spec metadata(Config.t() | keyword(), keyword()) :: %{required(String.t()) => term()}
+  @spec metadata(Config.t() | keyword()) :: %{required(String.t()) => term()}
   def metadata(config_or_opts, opts \\ [])
 
   def metadata(%Config{} = config, opts) when is_list(opts) do

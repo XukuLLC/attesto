@@ -6,6 +6,13 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.22.0] - 2026-11-15
+
+### Added
+
+- `Attesto.Plug.ProtectResource` protects one OAuth resource in one plug: resource-bound authentication, principal loading and per-route scopes, with `prepare/1`, `authenticate/2` and `authorize/3` for a route that decides its scopes per request. `Attesto.Plug.ResourceAuthenticate` and `Attesto.Plug.ResourceScopes` are the two steps on their own. `resource_audience: :resource` derives the token audience from a pinned `:base_url` or `:origin` and the `:resource_path`; the request `Host` never chooses it. An explicit audience policy is required, a mount that accepts DPoP needs its pin at boot, and an `http` pin is accepted only on a loopback host under `allow_http: true`.
+- `Attesto.ResourceMetadata` builds an RFC 9728 document per resource and `Attesto.Plug.ResourceMetadata` serves it, publicly cacheable only when the resource is statically pinned. Each resource declares its own `:scopes_supported`.
+
 ## [2.21.0] - 2026-11-15
 
 ### Breaking
