@@ -6,6 +6,23 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.28.0] - 2026-11-16
+
+### Added
+
+- `Attesto.Plug.ResourceAuthenticate`'s `:principal` callback can return
+  `{:error, {:temporarily_unavailable, reason}}`, the result a verifier already
+  returns for an outage. It is answered with the same 503
+  `temporarily_unavailable`, with no challenge and no `Retry-After`, and the
+  reason is discarded. Until now it got 401 `invalid_token`, which a client
+  can take to mean its token is bad, for example while the database holding
+  principals is unavailable. Every other result still gets 401, and an
+  exception the callback raises still reaches the host's error handling.
+- `:principal_unavailable_send_error` on the same plug renders that 503 and
+  lets an adapter record it as `:principal_unavailable`, apart from
+  `:verifier_unavailable` and `:policy_rejected`. Without it, `:send_error`
+  renders the response.
+
 ## [2.27.0] - 2026-11-15
 
 ### Breaking

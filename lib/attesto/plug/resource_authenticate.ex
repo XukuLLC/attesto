@@ -15,7 +15,13 @@ if Code.ensure_loaded?(Plug.Conn) do
     `:resource_metadata_url` overrides the derived RFC 9728 challenge pointer;
     `:www_authenticate` overrides challenge rendering entirely.
     `:principal` receives verified claims and sender context and returns
-    `{:ok, principal}` or `{:error, reason}`. MFA extras follow call arguments.
+    `{:ok, principal}` or `{:error, reason}`. The exact error result
+    `{:error, {:temporarily_unavailable, reason}}` answers 503
+    `temporarily_unavailable`, without a challenge or `Retry-After`. The reason
+    is discarded. Every other result answers 401 `invalid_token`. An exception
+    the callback raises is not caught, as with the verifier: it reaches the
+    host's error handling, which typically answers 500. MFA extras follow call
+    arguments.
 
     Assign keys are configurable with `:claims_key` (default `:attesto_claims`),
     `:scopes_key` (`:attesto_scopes`), `:sender_key` (`:attesto_sender`),
@@ -23,6 +29,13 @@ if Code.ensure_loaded?(Plug.Conn) do
     The context contains subject, client_id, scope, claims, cnf and principal.
     `:policy_rejection_send_error` optionally supplies a separate error renderer
     for principal refusals; otherwise `:send_error` handles them too.
+    `:principal_unavailable_send_error` similarly overrides `:send_error` for
+    principal outages. Both hooks receive `(conn, status, body)`.
+
+    Outcome hooks distinguish `:policy_rejected` (401 principal refusal),
+    `:principal_unavailable` (503 principal outage), and `:verifier_unavailable`
+    (503 verifier outage through `:send_error`). A status/body alone cannot
+    distinguish the two outage outcomes.
 
     All other `Attesto.Plug.Authenticate` options pass through, including
     `:config`, `:verify`, `:replay_check`, `:nonce_check`, `:nonce_issue`,
@@ -57,6 +70,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       :principal,
       :principal_key,
       :policy_rejection_send_error,
+      :principal_unavailable_send_error,
       :resource_audience,
       :resource_path,
       :scopes_key,
@@ -222,6 +236,14 @@ if Code.ensure_loaded?(Plug.Conn) do
           |> assign(Keyword.get(opts, :principal_key, @principal_key), principal)
           |> assign(Keyword.get(opts, :context_key, @context_key), context(claims, scopes, principal))
 
+        :principal_unavailable ->
+          OAuthError.temporarily_unavailable(
+            conn,
+            error_opts(opts,
+              send_error: Keyword.get(opts, :principal_unavailable_send_error, Keyword.get(opts, :send_error))
+            )
+          )
+
         :error ->
           # The refusal is rendered as a generic invalid_token; the recording
           # hook is told the exact outcome because the envelope cannot show it.
@@ -242,6 +264,7 @@ if Code.ensure_loaded?(Plug.Conn) do
         callback ->
           case Auth.invoke(callback, [claims, sender]) do
             {:ok, principal} -> {:ok, principal}
+            {:error, {:temporarily_unavailable, _reason}} -> :principal_unavailable
             _rejected -> :error
           end
       end
