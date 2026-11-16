@@ -6,6 +6,33 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.24.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.OutboundTarget.screen/2` preserves the original `:url` and returns
+  all checked IP tuples in `:addresses`, in resolution order, alongside `:host`
+  and `:authority`. Callers must dial those addresses through `Attesto.PinnedHTTP`.
+- `Attesto.PinnedHTTP.request/2`, `request_inline/2` and `passive_request/2`
+  take a screened target and an options list. The previous positional APIs
+  are removed. `:deadline` is an absolute monotonic millisecond deadline;
+  `:body_limit`, `:connect_timeout` (3,000 ms) and `:max_attempts` (3) bound work.
+  Failed connects retry on fresh sockets, rotating checked addresses. Nothing
+  is retried after the request starts. Connect failures now return
+  `{:error, {:not_sent, cause}}`, including `:deadline_exceeded`, rather than
+  an undifferentiated transport error or timeout. Failures after the request
+  starts return `{:error, {:maybe_sent, cause}}`. All three entry points use
+  normalized transport/protocol causes, `:deadline_exceeded`, `:too_large` or
+  `:invalid_request`; no Mint error struct leaves the module. No stored data changes.
+
+### Added
+
+- `Attesto.Test.CodeStoreContract`, `Attesto.Test.CodeStoreDelegates` and
+  `Attesto.Test.CodeStoreAgent` provide shared code-store contract tests,
+  overridable callback delegates and an Agent-backed fixture for a host's tests.
+- `Attesto.Telemetry` emits `[:attesto, :http, :connect_attempt]` once per
+  connection attempt with duration, checked address, attempt number and outcome.
+
 ## [2.23.0] - 2026-11-15
 
 ### Breaking

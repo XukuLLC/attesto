@@ -36,6 +36,7 @@ defmodule Attesto.TelemetryTest do
   describe "events/0" do
     test "lists every event the library emits, for attach_many/4" do
       assert Telemetry.events() == [
+               [:attesto, :http, :connect_attempt],
                [:attesto, :refresh_token, :reuse_detected],
                [:attesto, :refresh_token, :rotation_state_failed],
                [:attesto, :introspection, :refresh_store_failed],

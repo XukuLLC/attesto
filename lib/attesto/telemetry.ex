@@ -15,7 +15,8 @@ defmodule Attesto.Telemetry do
   traffic, and emitting them would bury the useful signals below in noise.
   Attesto also emits operational events when refresh rotation cannot commit,
   recover, or read trustworthy state, and another when refresh introspection
-  cannot read its backing store reliably. Neither implies theft.
+  cannot read its backing store reliably. Outbound connection attempts also
+  emit an operational event. None of these implies theft.
 
   ## These are indicators, not verdicts
 
@@ -39,7 +40,16 @@ defmodule Attesto.Telemetry do
   ## Events
 
   Every event carries `%{system_time: System.system_time()}` as its
-  measurements and is emitted at the moment the refusal is decided.
+  measurements. Refusal events fire when the refusal is decided; connection
+  events fire when each attempt completes and also measure its duration.
+
+  ### `[:attesto, :http, :connect_attempt]`
+
+  One operational event after each TCP/TLS connection attempt. Measurements
+  include `:system_time` and `:duration` in native monotonic time units.
+  Metadata: `:address` (screened IP tuple), `:attempt` (one-based number), and
+  `:outcome` (`:ok` or `:error`). No path, query, headers or hostname is emitted.
+  Address values are unbounded; do not use them as metric labels.
 
   ### `[:attesto, :refresh_token, :reuse_detected]`
 
@@ -217,12 +227,23 @@ defmodule Attesto.Telemetry do
   @spec events() :: [[atom()]]
   def events,
     do: [
+      [:attesto, :http, :connect_attempt],
       @refresh_token_reuse,
       @refresh_token_rotation_state_failure,
       @introspection_refresh_store_failure,
       @dpop_replay,
       @sender_constraint_mismatch
     ]
+
+  @doc false
+  @spec connect_attempt(non_neg_integer(), map()) :: :ok
+  def connect_attempt(duration, metadata) do
+    :telemetry.execute(
+      [:attesto, :http, :connect_attempt],
+      %{system_time: System.system_time(), duration: duration},
+      metadata
+    )
+  end
 
   @doc false
   @spec refresh_token_reuse_detected(map()) :: :ok

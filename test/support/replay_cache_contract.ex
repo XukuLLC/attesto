@@ -2,7 +2,7 @@ defmodule Attesto.ReplayCacheContract do
   @moduledoc false
   # Reusable conformance suite for any DPoP replay-check callback.
   #
-  # Unlike `Attesto.CodeStoreContract` / `Attesto.RefreshStoreContract`,
+  # Unlike `Attesto.Test.CodeStoreContract` / `Attesto.RefreshStoreContract`,
   # the thing under test here is NOT a behaviour module with named
   # functions - it is a *callback value*. `Attesto.DPoP.verify_proof/2`
   # accepts `:replay_check` as any `(jti, ttl_seconds) -> :ok |

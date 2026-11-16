@@ -8,8 +8,8 @@ defmodule Attesto.OutboundTarget do
   `AAAA` (`:inet6`) records via `:resolver` (default `:inet.getaddrs/2`),
   checks every returned address against
   `Attesto.IPAddress.public_fetch_destination?/1`, and returns the URL
-  rewritten to dial the first checked IP alongside the original `host` and
-  `authority`.
+  and all checked IP addresses in resolution order, alongside the original
+  `host` and `authority`.
 
   ## Exceptions an operator takes on
 
@@ -40,13 +40,15 @@ defmodule Attesto.OutboundTarget do
   @typedoc """
   A screened outbound target:
 
-    * `:url` - the URL with its host rewritten to the checked IP address.
+    * `:url` - the original URL, unchanged.
+    * `:addresses` - every checked IP tuple, in resolution order (A then AAAA).
     * `:host` - the original bare hostname for TLS SNI and certificate checks.
     * `:authority` - the original `host[:port]` (with IPv6 bracketed) for the
       HTTP `Host` header.
   """
   @type screened :: %{
           url: String.t(),
+          addresses: [IPAddress.ip_address(), ...],
           host: String.t(),
           authority: String.t()
         }
@@ -59,7 +61,7 @@ defmodule Attesto.OutboundTarget do
           | {:blocked_ip, IPAddress.ip_address()}
 
   @doc """
-  Screen `url` and return a pinned target map `{:ok, %{url, host, authority}}`
+  Screen `url` and return a pinned target map `{:ok, %{url, addresses, host, authority}}`
   or `{:error, reason}`.
 
   Options:
@@ -95,10 +97,11 @@ defmodule Attesto.OutboundTarget do
     with {:ok, uri} <- validate_url(url, allow_loopback),
          {:ok, resolver} <- resolve_resolver(opts),
          {:ok, ips} <- resolve_addrs(uri.host, resolver),
-         {:ok, pinned} <- pin(ips, uri.scheme, allow_loopback, allowed_cidrs) do
+         :ok <- screen_addresses(ips, uri.scheme, allow_loopback, allowed_cidrs) do
       {:ok,
        %{
-         url: URI.to_string(%{uri | host: ip_to_string(pinned)}),
+         url: url,
+         addresses: ips,
          host: uri.host,
          authority: authority(uri)
        }}
@@ -176,9 +179,9 @@ defmodule Attesto.OutboundTarget do
     end
   end
 
-  defp pin(ips, scheme, allow_loopback, allowed_cidrs) do
+  defp screen_addresses(ips, scheme, allow_loopback, allowed_cidrs) do
     case Enum.find(ips, &blocked_ip?(&1, scheme, allow_loopback, allowed_cidrs)) do
-      nil -> {:ok, hd(ips)}
+      nil -> :ok
       blocked -> {:error, {:blocked_ip, blocked}}
     end
   end
@@ -202,6 +205,4 @@ defmodule Attesto.OutboundTarget do
   defp default_port?("https", 443), do: true
   defp default_port?("http", 80), do: true
   defp default_port?(_scheme, _port), do: false
-
-  defp ip_to_string(ip), do: ip |> :inet.ntoa() |> to_string()
 end

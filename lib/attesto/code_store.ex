@@ -42,6 +42,12 @@ defmodule Attesto.CodeStore do
   ascending family-id order and take each family's advisory lock before its
   rows. See `Attesto.RefreshStore`. Store transitions never call a refresh store.
 
+  A host can run the shared contract tests by adding
+  `use Attesto.Test.CodeStoreContract, store: Host.CodeStore` to an
+  `ExUnit.Case` with `async: false`. The suite starts the store for each test;
+  pass `:start` as a zero-arity setup function for an already supervised or
+  database-backed store, ensuring isolated storage between tests.
+
   See the custom-store upgrade guide for the previous callback mapping.
   """
 

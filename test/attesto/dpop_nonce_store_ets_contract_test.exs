@@ -13,7 +13,7 @@ defmodule Attesto.DPoPNonceStoreETSContractTest do
   # reference the same way `code_store_ets_contract_test.exs` and
   # `refresh_store_ets_contract_test.exs` pin their stores; when the shared
   # `Attesto.NonceStoreContract.__using__` macro is extracted (mirroring
-  # `Attesto.CodeStoreContract` / `Attesto.RefreshStoreContract`), these
+  # `Attesto.Test.CodeStoreContract` / `Attesto.RefreshStoreContract`), these
   # `test`s are its body and this file collapses to a one-line
   # `use Attesto.NonceStoreContract, store: Attesto.DPoP.NonceStore.ETS`.
   #

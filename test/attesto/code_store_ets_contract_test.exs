@@ -1,6 +1,6 @@
 defmodule Attesto.CodeStoreETSContractTest do
   use ExUnit.Case, async: false
-  use Attesto.CodeStoreContract, store: Attesto.CodeStore.ETS
+  use Attesto.Test.CodeStoreContract, store: Attesto.CodeStore.ETS
 
   alias Attesto.CodeStore.ETS
 

@@ -1,6 +1,33 @@
-defmodule Attesto.CodeStoreContract do
-  @moduledoc false
+defmodule Attesto.Test.CodeStoreContract do
+  @moduledoc """
+  Shared ExUnit contract tests for an `Attesto.CodeStore` implementation.
 
+  A host can use this module in its own test case to check callback coverage,
+  immutable grant bindings, atomic lifecycle transitions, grant cut-off and
+  access-token linkage and revocation. The tests ship with the Hex package;
+  ExUnit is needed only when a test case expands the macro, never to compile
+  Attesto itself.
+
+  ## Usage
+
+      defmodule Host.CodeStoreContractTest do
+        use ExUnit.Case, async: false
+        use Attesto.Test.CodeStoreContract, store: Host.CodeStore
+      end
+
+  The required `:store` option names the module under test. By default each
+  test calls `start_supervised!(store)`; pass `:start` as a zero-arity function
+  to prepare an already supervised or database-backed store instead, for
+  example `start: fn -> :ok end` after the case's database sandbox setup.
+  The function's return value is ignored. Each test needs isolated, empty
+  storage, so use a synchronous case and reset or roll back shared storage
+  between tests.
+
+  These tests cover the shared callback contract. A host should also test its
+  storage-specific concurrency, cleanup and retention guarantees.
+  """
+
+  @doc "Inject the shared code-store contract tests into an ExUnit case."
   defmacro __using__(opts) do
     store = Keyword.fetch!(opts, :store)
     start = Keyword.get(opts, :start)

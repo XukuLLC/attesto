@@ -4,6 +4,12 @@ A host must implement the complete `Attesto.CodeStore` behaviour. Reuse tracking
 and access-token linkage are required. Call `Attesto.CodeStore.validate!/1` to
 check callback coverage before serving requests.
 
+A host can run the shared contract tests by adding
+`use Attesto.Test.CodeStoreContract, store: Host.CodeStore` to an
+`ExUnit.Case` with `async: false`. The suite starts the store for each test;
+pass `:start` as a zero-arity setup function for an already supervised or
+database-backed store, ensuring isolated storage between tests.
+
 | Previous callback or extension | Replacement |
 | --- | --- |
 | `put/1` | `c:Attesto.CodeStore.put/1`: insert only; never overwrite an existing hash |

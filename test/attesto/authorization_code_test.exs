@@ -22,7 +22,7 @@ defmodule Attesto.AuthorizationCodeTest do
 
   defmodule ContractGetStore do
     @moduledoc false
-    use Attesto.CodeStoreTestDelegates, to: ETS
+    use Attesto.Test.CodeStoreDelegates, to: ETS
 
     @impl true
     def put(_entry), do: :ok
@@ -62,7 +62,7 @@ defmodule Attesto.AuthorizationCodeTest do
 
   defmodule ContractStore do
     @moduledoc false
-    use Attesto.CodeStoreTestDelegates, to: ETS
+    use Attesto.Test.CodeStoreDelegates, to: ETS
 
     @impl true
     def put(entry), do: fault(:put, ETS.put(entry))

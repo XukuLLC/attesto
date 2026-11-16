@@ -1,6 +1,26 @@
-defmodule Attesto.CodeStoreTestAgent do
-  @moduledoc false
+defmodule Attesto.Test.CodeStoreAgent do
+  @moduledoc """
+  Agent-backed authorization-code store fixture for a host's tests.
 
+  Use this module to define a named, in-memory test double with the
+  `Attesto.CodeStore` callbacks and helpers for inspecting captured grants.
+  It is a lightweight fixture, not a production store or a reference for
+  storage validation and retention. Use `Attesto.Test.CodeStoreContract` to
+  test a host's store implementation instead.
+
+      defmodule Host.CodeStoreFixture do
+        use Attesto.Test.CodeStoreAgent
+      end
+
+  Start the generated module with `start_supervised!(Host.CodeStoreFixture)`
+  in a synchronous ExUnit case, or call its `start_link/1` directly. It is
+  registered under its module name. `reset/0` clears all entries, `count/0`
+  returns their number, and `peek/1` hashes a raw code and returns its snapshot
+  or `nil`. `entry/1` hashes a raw code and returns the internal fixture entry,
+  raising `KeyError` when absent. No ExUnit code runs when Attesto compiles.
+  """
+
+  @doc "Define a named Agent code-store fixture and its inspection helpers."
   defmacro __using__(_opts) do
     definitions =
       for {name, arity} <- Attesto.CodeStore.behaviour_info(:callbacks) do
@@ -9,7 +29,7 @@ defmodule Attesto.CodeStoreTestAgent do
         quote do
           @impl Attesto.CodeStore
           def unquote(name)(unquote_splicing(args)) do
-            Attesto.CodeStoreTestAgent.call(__MODULE__, unquote(name), [unquote_splicing(args)])
+            unquote(__MODULE__).call(__MODULE__, unquote(name), [unquote_splicing(args)])
           end
         end
       end
@@ -35,6 +55,7 @@ defmodule Attesto.CodeStoreTestAgent do
     end
   end
 
+  @doc false
   def call(agent, operation, args) do
     Agent.get_and_update(agent, &transition(&1, operation, args))
   end

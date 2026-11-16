@@ -17,7 +17,13 @@ defmodule Attesto.OutboundTargetTest do
     test "a destination inside a listed block is pinned, and one outside stays refused" do
       opts = [allowed_cidrs: ["10.20.0.0/16", "fd12:3456::/32"]]
 
-      assert {:ok, %{url: "https://10.20.3.4/token", host: "idp.internal", authority: "idp.internal"}} =
+      assert {:ok,
+              %{
+                url: "https://idp.internal/token",
+                addresses: [{10, 20, 3, 4}],
+                host: "idp.internal",
+                authority: "idp.internal"
+              }} =
                OutboundTarget.screen("https://idp.internal/token", [resolver: resolver([{10, 20, 3, 4}])] ++ opts)
 
       assert {:ok, %{host: "idp.internal"}} =
@@ -80,7 +86,7 @@ defmodule Attesto.OutboundTargetTest do
 
   describe "allow_loopback and http" do
     test "http reaches loopback addresses only" do
-      assert {:ok, %{url: "http://127.0.0.1:4000/cb"}} =
+      assert {:ok, %{url: "http://localhost:4000/cb", addresses: [{127, 0, 0, 1}]}} =
                OutboundTarget.screen("http://localhost:4000/cb",
                  resolver: resolver([{127, 0, 0, 1}]),
                  allow_loopback: true
@@ -133,12 +139,12 @@ defmodule Attesto.OutboundTargetTest do
         actual = OutboundTarget.screen(url, resolver: res, allow_loopback: allow_loopback)
         expected_ssrf = legacy_ssrf_screen(url, resolver: res, allow_loopback: allow_loopback)
 
-        assert actual == expected_ssrf,
+        assert legacy_target(actual) == expected_ssrf,
                "mismatch for #{url} (allow_loopback=#{allow_loopback}): #{inspect(actual)} vs #{inspect(expected_ssrf)}"
 
         if not allow_loopback do
           expected_discovery = legacy_discovery_screen(url, resolver: res)
-          normalized = normalize_for_discovery(actual)
+          normalized = normalize_for_discovery(legacy_target(actual))
 
           assert normalized == expected_discovery,
                  "discovery mismatch for #{url}: #{inspect(normalized)} vs #{inspect(expected_discovery)}"
@@ -164,6 +170,32 @@ defmodule Attesto.OutboundTargetTest do
       end
     end
   end
+
+  test "carries the original URL and every screened address in resolution order" do
+    ips = [{93, 184, 216, 34}, {93, 184, 216, 35}]
+    ipv6 = {0x2606, 0x2800, 0x220, 1, 0x248, 0x1893, 0x25C8, 0x1946}
+    url = "https://rp.example:8443/path?query=exact%20bytes"
+
+    assert {:ok, %{url: ^url, host: "rp.example", authority: "rp.example:8443", addresses: addresses}} =
+             OutboundTarget.screen(url, resolver: resolver(ips, [ipv6]))
+
+    assert addresses == ips ++ [ipv6]
+  end
+
+  # Compare the previous first-address result while testing the richer result
+  # above. All existing screening verdicts remain the same.
+  defp legacy_target({:ok, target}) do
+    uri = URI.parse(target.url)
+
+    {:ok,
+     %{
+       url: URI.to_string(%{uri | host: target.addresses |> hd() |> :inet.ntoa() |> to_string()}),
+       host: target.host,
+       authority: target.authority
+     }}
+  end
+
+  defp legacy_target(error), do: error
 
   defp normalize_for_discovery({:ok, target}), do: {:ok, target}
   defp normalize_for_discovery({:error, :invalid_resolver}), do: {:error, :invalid_resolver}

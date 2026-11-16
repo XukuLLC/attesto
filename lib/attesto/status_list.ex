@@ -41,9 +41,10 @@ defmodule Attesto.StatusList do
 
     if is_integer(timeout) and timeout > 0 and
          accept in [@accept_status_list_jwt, @accept_status_list_cwt, @accept_identifier_list_cwt] do
-      task = Task.async(fn -> safe_fetch(uri, accept, timeout, opts) end)
+      deadline = System.monotonic_time(:millisecond) + timeout
+      task = Task.async(fn -> safe_fetch(uri, accept, deadline, opts) end)
 
-      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      case Task.yield(task, timeout + 50) || Task.shutdown(task, :brutal_kill) do
         {:ok, result} -> result
         _ -> {:error, :status_list_fetch_timeout}
       end
@@ -53,10 +54,13 @@ defmodule Attesto.StatusList do
   end
 
   if Code.ensure_loaded?(Mint.HTTP) do
-    defp safe_fetch(uri, accept, timeout, opts) do
+    defp safe_fetch(uri, accept, deadline, opts) do
       with {:ok, target} <- Attesto.OutboundTarget.screen(uri, Keyword.take(opts, [:resolver, :allow_loopback])),
-           {:ok, response} <- pinned_status_request(target, accept, timeout) do
+           {:ok, response} <- pinned_status_request(target, accept, deadline) do
         status_list_response(response, accept)
+      else
+        {:error, {:maybe_sent, :too_large}} -> {:error, :too_large}
+        error -> error
       end
     rescue
       _ -> {:error, :status_list_fetch_failed}
@@ -64,15 +68,13 @@ defmodule Attesto.StatusList do
       _, _ -> {:error, :status_list_fetch_failed}
     end
 
-    defp pinned_status_request(target, accept, timeout) do
+    defp pinned_status_request(target, accept, deadline) do
       Attesto.PinnedHTTP.request_inline(
-        :get,
-        target.url,
-        target.host,
-        [{"host", target.authority}, {"accept", accept}],
-        "",
-        timeout,
-        @max_status_list_token_bytes
+        target,
+        method: :get,
+        headers: [{"accept", accept}],
+        deadline: deadline,
+        body_limit: @max_status_list_token_bytes
       )
     end
 
@@ -92,7 +94,7 @@ defmodule Attesto.StatusList do
 
     defp status_list_response(%{status: status}, _accept), do: {:error, {:http_status, status}}
   else
-    defp safe_fetch(_uri, _accept, _timeout, _opts), do: {:error, :missing_http_dependency}
+    defp safe_fetch(_uri, _accept, _deadline, _opts), do: {:error, :missing_http_dependency}
   end
 
   @doc """

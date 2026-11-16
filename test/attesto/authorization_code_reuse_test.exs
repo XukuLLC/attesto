@@ -29,7 +29,7 @@ defmodule Attesto.AuthorizationCodeReuseTest do
   # records the meta. This is the store-side half code-reuse detection needs;
   # the separate ETS integration test exercises the bundled implementation.
   defmodule TrackingStore do
-    use Attesto.CodeStoreTestDelegates
+    use Attesto.Test.CodeStoreDelegates
 
     @impl true
     def finish(hash, redemption) do

@@ -18,7 +18,7 @@ defmodule Attesto.AuthorizationCodeRefreshBindingTest do
   @client_id "oc_app"
 
   defmodule TrackingStore do
-    use Attesto.CodeStoreTestDelegates
+    use Attesto.Test.CodeStoreDelegates
 
     @impl true
     def finish(hash, redemption) do

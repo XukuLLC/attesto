@@ -22,7 +22,7 @@ defmodule Attesto.AuthorizationCodeBindingTest do
   }
 
   defmodule StalledStore do
-    use Attesto.CodeStoreTestDelegates
+    use Attesto.Test.CodeStoreDelegates
 
     def read(hash) do
       Process.put(:stalled_reads, Process.get(:stalled_reads, 0) + 1)
@@ -34,7 +34,7 @@ defmodule Attesto.AuthorizationCodeBindingTest do
   end
 
   defmodule DeletedClaimStore do
-    use Attesto.CodeStoreTestDelegates
+    use Attesto.Test.CodeStoreDelegates
 
     def finish(hash, redemption) do
       :sys.replace_state(ETS, fn state ->
