@@ -96,6 +96,7 @@ defmodule Attesto.Store.ETS do
       unquote(init)
       unquote(sweep)
       unquote(reset_handler)
+      defoverridable init: 1
     end
   end
 

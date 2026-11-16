@@ -34,7 +34,7 @@ defmodule Attesto.ConcurrencyReplayTest do
   @await_ms 5_000
 
   setup do
-    start_supervised!({ReplayCache, multi_node_acknowledged?: true})
+    start_supervised!({ReplayCache, single_node?: true})
     # The table is a named singleton; clear any carryover so size/0 counts
     # only what this test inserts.
     ReplayCache.reset()

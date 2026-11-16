@@ -990,7 +990,7 @@ defmodule Attesto.DPoP.ReplayCacheIntegrationTest do
   @http_uri "https://api.example.com/oauth/token"
 
   setup do
-    start_supervised!({ReplayCache, multi_node_acknowledged?: true})
+    start_supervised!({ReplayCache, single_node?: true})
     :ok
   end
 

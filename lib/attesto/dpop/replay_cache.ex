@@ -15,13 +15,11 @@ defmodule Attesto.DPoP.ReplayCache do
 
   ## Single-node deployment invariant (load-bearing)
 
-  This implementation is a per-node ETS singleton. RFC 9449 §11.1 replay
-  rejection only holds *across the deployment* if every request for a
-  given access token reaches the same node - otherwise a captured proof
-  is replayable once per node behind a load balancer. On a multi-node
-  deployment you MUST swap the verifier's `:replay_check` callback for a
-  shared-store implementation and set `:multi_node_acknowledged?: true` to
-  silence the boot-time guard.
+  This implementation is a per-node ETS singleton. Start it only with
+  `single_node?: true`, an explicit statement that the deployment runs one
+  node. Separate nodes behind a load balancer cannot be detected by BEAM
+  clustering. On multiple nodes configure a shared `:replay_check` instead
+  and do not start this cache.
 
   **`AttestoPhoenix.Store.EctoReplayCheck` is that implementation** if you
   run `attesto_phoenix`: one relational table whose unique constraint on
@@ -39,12 +37,11 @@ defmodule Attesto.DPoP.ReplayCache do
   by the proof-key thumbprint; the `jti`/`ttl_seconds` argument names are
   historical.)
 
-  The boot-time guard **raises** on startup if `Node.list/0` is non-empty
-  and `:multi_node_acknowledged?` is not set - a clustered BEAM with a
-  node-local replay cache is a silently-broken security boundary (a
-  captured proof becomes replayable once per node) that this guard
-  refuses to enter. Failing the supervised start surfaces the
-  misconfiguration loudly rather than emitting a log nobody reads.
+  Startup refuses a missing or false `:single_node?` statement, even with
+  no connected peers. Connected BEAM peers also cause startup to fail.
+  This statement cannot prove deployment topology: the operator must keep it
+  true for the lifetime of the cache. The former `:multi_node_acknowledged?`
+  option is no longer accepted by this cache.
 
   ## Retention is per entry, not per cache
 
@@ -71,14 +68,13 @@ defmodule Attesto.DPoP.ReplayCache do
     * `:sweep_interval_ms` (default `30_000`) - how often expired entries
       are deleted in bulk. The cache is correct without sweeping (lookups
       re-validate expiry); the sweeper just bounds table size.
-    * `:multi_node_acknowledged?` (default `false`) - set to `true` after
-      wiring a shared-store `:replay_check` so the boot-time guard does
-      not fire on a clustered BEAM.
+    * `:single_node?` (required) - must be `true`, asserting that the
+      deployment runs one node.
 
   ## Wiring
 
       children = [
-        Attesto.DPoP.ReplayCache
+        {Attesto.DPoP.ReplayCache, single_node?: true}
       ]
 
   then, at the verifier:
@@ -91,11 +87,36 @@ defmodule Attesto.DPoP.ReplayCache do
   """
 
   use Attesto.Store.ETS,
+    cluster_guard?: false,
     default_sweep_interval_ms: 30_000,
     sweep_time: :monotonic_ms,
     reset_doc: "Clear every entry from the cache. Test-facing."
 
   alias Attesto.Store.ETS
+
+  @start_choices "Start it with single_node?: true when the deployment runs one node. " <>
+                   "For more than one node, configure a shared :replay_check such as " <>
+                   "AttestoPhoenix.Store.EctoReplayCheck and do not supervise this cache."
+
+  @impl GenServer
+  def init(opts) do
+    cond do
+      Keyword.has_key?(opts, :multi_node_acknowledged?) ->
+        raise ArgumentError,
+              "Attesto.DPoP.ReplayCache does not accept :multi_node_acknowledged?. " <> @start_choices
+
+      Keyword.get(opts, :single_node?) != true ->
+        raise ArgumentError, "Attesto.DPoP.ReplayCache was started without single_node?: true. " <> @start_choices
+
+      Node.list() != [] ->
+        raise ArgumentError,
+              "Attesto.DPoP.ReplayCache was started with single_node?: true on a node that is " <>
+                "connected to other BEAM nodes. " <> @start_choices
+
+      true ->
+        super(opts)
+    end
+  end
 
   @table __MODULE__
   @default_ttl_seconds 60

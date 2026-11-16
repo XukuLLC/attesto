@@ -22,7 +22,7 @@ defmodule Attesto.ConcurrencySwarmTest do
 
   setup do
     start_supervised!(RefreshStore.ETS)
-    start_supervised!(DPoP.ReplayCache)
+    start_supervised!({DPoP.ReplayCache, single_node?: true})
     :ok
   end
 

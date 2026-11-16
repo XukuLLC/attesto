@@ -12,10 +12,11 @@ defmodule Attesto.ClusterGuard do
   a captured code/token/proof would be replayable once per node if a second
   node held its own ETS copy, silently breaking single-use, reuse
   detection, and replay rejection. Rather than let that misconfiguration go
-  unnoticed, every ETS store calls `assert_single_node!/2` at boot and
+  unnoticed, the ordinary ETS stores call `assert_single_node!/2` at boot and
   **raises** if the BEAM is already clustered, unless the operator has
   explicitly acknowledged that they have wired a shared store and set the
-  per-store `:multi_node_acknowledged?` option.
+  per-store `:multi_node_acknowledged?` option. `Attesto.DPoP.ReplayCache`
+  instead requires an explicit `:single_node?` start option on every node.
   """
 
   require Logger
@@ -43,7 +44,11 @@ defmodule Attesto.ClusterGuard do
             "matching Attesto storage behaviour over a shared store (e.g. Postgres) for multi-node, " <>
             "or set multi_node_acknowledged?: true once you have. Refusing to boot."
 
-        Logger.error(message)
+        Logger.error("Attesto node-local store refused to start on a clustered BEAM",
+          store: module,
+          peers: inspect(peers)
+        )
+
         raise RuntimeError, message
     end
   end

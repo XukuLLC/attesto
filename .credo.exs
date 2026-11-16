@@ -85,7 +85,8 @@
           {Credo.Check.Warning.ExpensiveEmptyEnumCheck, []},
           {Credo.Check.Warning.IExPry, []},
           {Credo.Check.Warning.IoInspect, []},
-          {Credo.Check.Warning.MissedMetadataKeyInLoggerConfig, []},
+          # A library declares its metadata keys; the host owns Logger formatter configuration.
+          {Credo.Check.Warning.MissedMetadataKeyInLoggerConfig, [metadata_keys: [:store, :peers]]},
           {Credo.Check.Warning.OperationOnSameValues, []},
           {Credo.Check.Warning.OperationWithConstantResult, []},
           {Credo.Check.Warning.RaiseInsideRescue, []},

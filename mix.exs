@@ -16,8 +16,9 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.CodeStoreDelegates
   alias Attesto.Test.DPoP, as: TestDPoP
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
+  alias Attesto.Test.LogMessages
 
-  @version "2.25.0"
+  @version "2.26.0"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -174,7 +175,7 @@ defmodule Attesto.MixProject do
           Attesto.Secret,
           Attesto.ClusterGuard
         ],
-        Testing: [CodeStoreAgent, CodeStoreContract, CodeStoreDelegates, TestDPoP, TestDPoPVerifier]
+        Testing: [CodeStoreAgent, CodeStoreContract, CodeStoreDelegates, LogMessages, TestDPoP, TestDPoPVerifier]
       ]
     ]
   end

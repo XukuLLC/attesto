@@ -152,7 +152,7 @@ boundary, use the lower-level
 ```elixir
 def deps do
   [
-    {:attesto, "~> 2.25"}
+    {:attesto, "~> 2.26"}
   ]
 end
 ```
@@ -681,13 +681,17 @@ options accept only `true` or `false` (omission uses the secure default and
 `nil` is not an opt-out); and CIBA approvals carry the achieved `acr` through
 to the redeemed grant.
 
-The bundled ETS reference stores are deliberately **single-node** - a
-captured credential would otherwise be replayable once per node. Rather
-than fail silently, every ETS store (`CodeStore.ETS`, `RefreshStore.ETS`,
-`DPoP.ReplayCache`, `DPoP.NonceStore.ETS`) **refuses to boot on a clustered
-BEAM** unless you pass `multi_node_acknowledged?: true`, which forces the
-choice: wire a shared store, or explicitly accept the single-node
-constraint.
+The bundled ETS reference stores are deliberately **single-node**. A captured
+credential would otherwise be replayable once per node.
+`Attesto.DPoP.ReplayCache` starts only as
+`{Attesto.DPoP.ReplayCache, single_node?: true}`: the host states that the
+deployment runs one node, because a node cannot detect others that are not
+connected to it. A deployment with more than one node configures one shared
+`:replay_check` on every node, such as `AttestoPhoenix.Store.EctoReplayCheck`,
+and does not supervise the local cache. A deploy that starts the new node
+before stopping the old one has two nodes for that interval, and a proof one
+of them accepted is accepted once more by the other. The other ETS stores keep
+their connected-peer guard and its `:multi_node_acknowledged?` option.
 
 ## Status
 
@@ -723,6 +727,19 @@ self-skip when that Python stack is not installed). Install it with
 loads. The JavaScript parity leg covers the wallet formats with `sd-jwt-js`,
 `@auth0/mdl`, and `jose`; install its test-only dependencies with
 `npm install --no-audit --no-fund --prefix test/support/js`.
+
+## Error log messages
+
+Every `Logger.error` call passes one of the fixed messages below. The values
+that vary are Logger metadata, as atoms or strings. The default formatter
+prints a metadata key only when it is listed:
+
+```elixir
+config :logger, :default_formatter, metadata: [:store, :peers]
+```
+
+- `Attesto node-local store refused to start on a clustered BEAM`: `:store`
+  is the store module and `:peers` the connected nodes.
 
 ## License
 

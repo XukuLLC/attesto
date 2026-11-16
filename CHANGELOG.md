@@ -6,6 +6,29 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.26.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.DPoP.ReplayCache` starts only with `single_node?: true` in its
+  start options, a statement by the host that the deployment runs one node.
+  Without it the cache refuses to start, with or without connected BEAM
+  peers, and it no longer accepts `:multi_node_acknowledged?`. Change
+  `Attesto.DPoP.ReplayCache` in a supervision tree to
+  `{Attesto.DPoP.ReplayCache, single_node?: true}`. A deployment with more than
+  one node configures a shared `:replay_check` on every node and does not
+  supervise the cache. Until now nodes that were not connected as a BEAM
+  cluster each kept their own cache and nothing failed at boot.
+- The one `Logger.error` message is a fixed string, with the store module and
+  the connected nodes in the Logger metadata keys `:store` and `:peers`. The
+  README lists the message and the formatter setting that prints the keys.
+
+### Added
+
+- `Attesto.Test.LogMessages.errors/1` lists the `Logger.error` calls under a
+  directory and the literal message each one passes, for a test that keeps
+  log messages fixed.
+
 ## [2.25.0] - 2026-11-15
 
 ### Breaking

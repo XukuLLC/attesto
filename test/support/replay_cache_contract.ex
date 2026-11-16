@@ -38,7 +38,7 @@ defmodule Attesto.ReplayCacheContract do
   #       use Attesto.ReplayCacheContract,
   #         start: fn ->
   #           start_supervised!(
-  #             {Attesto.DPoP.ReplayCache, multi_node_acknowledged?: true}
+  #             {Attesto.DPoP.ReplayCache, single_node?: true}
   #           )
   #         end,
   #         check: fn -> &Attesto.DPoP.ReplayCache.check_and_record/2 end
