@@ -1,0 +1,59 @@
+# Publishes the package and its docs to Hex when a version tag is pushed.
+#
+# Hex trusted publishing: hex.pm has a workload identity for this repository,
+# this workflow file and the `release` environment. With no Hex key set,
+# `mix hex.publish` exchanges the job's GitHub OIDC token for a token that can
+# only publish this package. The package has staged publishing enabled, so the
+# release waits on hex.pm until an owner approves it with a 2FA code.
+#
+# The `release` environment on GitHub accepts only tags matching `v*`, so a
+# branch or a pull request cannot obtain the token.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to Hex
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: "1.20.4"
+          otp-version: "29.1.2"
+
+      # Trusted publishing needs Hex 2.6 or later on OTP 27 or later.
+      - name: Install the current Hex
+        run: mix local.hex --force
+
+      - name: Check that the tag names the version in mix.exs
+        run: |
+          version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match mix.exs version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Publish the package and docs
+        run: mix hex.publish --yes
