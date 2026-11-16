@@ -6,6 +6,21 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.27.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.AuthorizationRequest.validate/2` answers `invalid_request` when a
+  parameter defined as a single string arrives as anything else: a list, a
+  map, a number, a boolean or `nil`. Until now `state`, `prompt`,
+  `login_hint` and the other optional ones were dropped as if absent. A
+  non-string `scope` is `invalid_request`, where it was `invalid_scope`. A
+  non-string `client_id` or `redirect_uri` is still answered directly, since
+  there is no trusted address to redirect to; the others are redirected.
+  Pushed authorization requests are parsed the same way. Request Object
+  values are unaffected: they are converted to strings before validation, as
+  before.
+
 ## [2.26.0] - 2026-11-15
 
 ### Breaking

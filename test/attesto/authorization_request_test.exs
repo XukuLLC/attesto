@@ -11,6 +11,31 @@ defmodule Attesto.AuthorizationRequestTest do
   @dpop_jkt Attesto.Thumbprint.of("authorization-request-key")
   @outer_dpop_jkt Attesto.Thumbprint.of("outer-authorization-request-key")
 
+  for parameter <- ~w(client_id redirect_uri response_type scope state nonce code_challenge
+                       code_challenge_method prompt acr_values response_mode id_token_hint
+                       login_hint dpop_jkt request request_uri claims),
+      {kind, value} <- [list: ["x"], map: %{"value" => "x"}, null: nil, number: 123, boolean: false] do
+    test "rejects #{parameter} as #{kind} before returning a request" do
+      parameter = unquote(parameter)
+      params = base_params(%{parameter => unquote(Macro.escape(value))})
+
+      case parameter do
+        "client_id" ->
+          assert {:error, {:direct, :invalid_client_id}} = validate(params)
+
+        "redirect_uri" ->
+          assert {:error, {:direct, reason}} = validate(params)
+          assert reason in [:missing_redirect_uri, :invalid_redirect_uri]
+
+        _ ->
+          assert {:error, {:redirect, error}} = validate(params)
+          assert error.error == "invalid_request"
+          assert error.redirect_uri == @redirect_uri
+          if parameter == "state", do: assert(is_nil(error.state))
+      end
+    end
+  end
+
   # A syntactically valid S256 code_challenge: BASE64URL(SHA256(verifier)),
   # 43 chars, no padding (RFC 7636 §4.2). This is the RFC 7636 Appendix B
   # example challenge.
@@ -367,7 +392,7 @@ defmodule Attesto.AuthorizationRequestTest do
         assert {:error, {:redirect, err}} =
                  validate(base_params(%{"request_uri" => request_uri}))
 
-        assert err.error == "request_uri_not_supported"
+        assert err.error == if(is_binary(request_uri), do: "request_uri_not_supported", else: "invalid_request")
       end
     end
 
@@ -854,7 +879,7 @@ defmodule Attesto.AuthorizationRequestTest do
       assert {:ok, %{id_token_hint: "eyJ.hint.jwt", login_hint: "alice@example.com"}} =
                validate(base_params(%{"id_token_hint" => "eyJ.hint.jwt", "login_hint" => "alice@example.com"}))
 
-      assert {:ok, %{id_token_hint: nil, login_hint: nil}} =
+      assert {:error, {:redirect, %{error: "invalid_request"}}} =
                validate(base_params(%{"id_token_hint" => "", "login_hint" => ["a", "b"]}))
     end
   end

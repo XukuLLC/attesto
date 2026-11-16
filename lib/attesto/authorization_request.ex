@@ -81,6 +81,10 @@ defmodule Attesto.AuthorizationRequest do
   # outside this set is an invalid_request.
   @prompt_values ["none", "login", "consent", "select_account"]
 
+  @string_parameters ~w(response_type scope state nonce code_challenge code_challenge_method
+                        prompt acr_values response_mode id_token_hint login_hint dpop_jkt
+                        request request_uri claims)
+
   @default_require_nonce false
 
   # RFC 7636 / RFC 9700: PKCE is required by default. The caller may relax it
@@ -185,7 +189,15 @@ defmodule Attesto.AuthorizationRequest do
   Validate a parsed authorization request parameter map (RFC 6749 §4.1.1,
   OIDC Core §3.1.2.1, RFC 7636 §4.3).
 
-  `params` is a string-keyed map of the authorization request query parameters.
+  `params` is a string-keyed map of the authorization request parameters.
+  Present `client_id`, `redirect_uri`, `response_type`, `scope`, `state`,
+  `nonce`, `code_challenge`, `code_challenge_method`, `prompt`, `acr_values`,
+  `response_mode`, `id_token_hint`, `login_hint`, `dpop_jkt`, `request`,
+  `request_uri`, and `claims` must be strings; other types (including `nil`)
+  are malformed requests. Client and redirect URI errors remain direct;
+  other type errors are redirectable once that pair is trusted.
+  `resource` supports a list, `max_age` also supports an integer, and
+  `authorization_details` also supports a decoded list from a Request Object.
 
   ## Options
 
@@ -251,7 +263,7 @@ defmodule Attesto.AuthorizationRequest do
       §3.1.2.6). With `true`, an object that cannot be verified, including one
       from a client with no usable keys, stays `invalid_request_object`.
 
-  A `request` given more than once (a list or map value) is a redirectable
+  A non-string `request` (including a list, map, or `nil`) is a redirectable
   `invalid_request` (RFC 6749 §3.1). An empty `request` counts as omitted, as
   that section requires.
 
@@ -475,8 +487,7 @@ defmodule Attesto.AuthorizationRequest do
     end
   end
 
-  def resolve_request_object(%{"request" => request}, opts)
-      when not is_binary(request) and not is_nil(request) and is_list(opts) do
+  def resolve_request_object(%{"request" => request}, opts) when not is_binary(request) and is_list(opts) do
     {:error, :duplicate_request}
   end
 
@@ -640,7 +651,8 @@ defmodule Attesto.AuthorizationRequest do
     %{require_nonce: require_nonce, require_pkce: require_pkce, response_modes: response_modes} = policy
     state = string_or_nil(Map.get(params, "state"))
 
-    with :ok <- validate_request_object_params(params, redirect_uri, state),
+    with :ok <- validate_string_parameters(params, redirect_uri, state),
+         :ok <- validate_request_object_params(params, redirect_uri, state),
          :ok <- validate_response_type(params, redirect_uri, state),
          {:ok, scope} <- validate_scope(params, redirect_uri, state),
          {:ok, resource} <- validate_resource(params, redirect_uri, state),
@@ -692,6 +704,13 @@ defmodule Attesto.AuthorizationRequest do
       # such errors fall back to the default (query) at the transport.
       {:error, {:redirect, error}} ->
         {:error, {:redirect, Map.merge(error, redirect_error_context(params, client_id, response_modes))}}
+    end
+  end
+
+  defp validate_string_parameters(params, redirect_uri, state) do
+    case Enum.find(@string_parameters, &(Map.has_key?(params, &1) and not is_binary(Map.get(params, &1)))) do
+      nil -> :ok
+      name -> {:error, redirect_error("invalid_request", name <> " must be a string", redirect_uri, state)}
     end
   end
 
@@ -801,7 +820,7 @@ defmodule Attesto.AuthorizationRequest do
         end
 
       _ ->
-        {:error, redirect_error("invalid_scope", "scope must be a string", redirect_uri, state)}
+        {:error, redirect_error("invalid_request", "scope must be a string", redirect_uri, state)}
     end
   end
 
