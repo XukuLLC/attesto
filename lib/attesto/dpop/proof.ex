@@ -264,17 +264,8 @@ defmodule Attesto.DPoP.Proof do
 
   defp public_jwk(jose_jwk), do: Attesto.Key.public_map(jose_jwk)
 
-  defp sign(jose_jwk, %{"alg" => "PS" <> _} = header, claims) do
-    {:ok, JWS.sign_compact_jwk(jose_jwk, header, claims)}
-  rescue
-    _error -> {:error, {:signing_failed, @signing_failure_message}}
-  catch
-    _kind, _reason -> {:error, {:signing_failed, @signing_failure_message}}
-  end
-
   defp sign(jose_jwk, header, claims) do
-    {_protected, compact} = jose_jwk |> JOSE.JWT.sign(header, claims) |> JOSE.JWS.compact()
-    {:ok, compact}
+    {:ok, JWS.sign_compact_jwk(jose_jwk, header, claims)}
   rescue
     _error -> {:error, {:signing_failed, @signing_failure_message}}
   catch

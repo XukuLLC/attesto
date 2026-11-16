@@ -6,6 +6,31 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.25.0] - 2026-11-15
+
+### Breaking
+
+- `Attesto.Keystore.rotation_health/2` now exercises the signing key with a
+  fixed diagnostic message and verifies it against the published public key.
+  `:signing_key_mismatch` makes the result `:invalid`, including signing
+  failures. An `Attesto.Signer` callback is invoked, with its latency and cost.
+- Private JWK signing now requires an absent `key_ops` or a string list
+  containing `sign`, and an absent `use` or `sig`. `Attesto.DPoP.Proof.build/4`
+  refuses incompatible usage. `Attesto.Key.public_map/1` omits private-key
+  operation metadata when deriving the public half; public-only verification
+  material retains its restrictions.
+
+### Added
+
+- `Attesto.Key.validate_kid/3` checks identifier requirements against the full
+  key set before candidate filtering. Its `:require_kid` policy supports
+  always requiring an identifier or requiring one for a set with multiple keys.
+- `Attesto.Key.import_pem/1` returns matchable `:malformed_key` and
+  `:unsupported_key` reasons without exposing key material. The existing
+  raising PEM helpers remain available.
+- `Attesto.Key.signing_jwk/1` accepts private JWK maps and `JOSE.JWK` values
+  as well as PEMs and validates their signing permissions.
+
 ## [2.24.0] - 2026-11-15
 
 ### Breaking

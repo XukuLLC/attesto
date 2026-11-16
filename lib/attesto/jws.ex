@@ -249,6 +249,9 @@ defmodule Attesto.JWS do
       filtering.
     * `:min_rsa_bits` optionally rejects RSA candidates whose modulus is
       shorter than the given positive number of bits.
+    * `:require_kid` is `false` (default), `true`, or `:multiple`. The last
+      requires a non-empty `kid` when the original key set has more than one
+      entry, before algorithm, usage, or strength filtering. See `Attesto.Key.validate_kid/3`.
     * `:ambiguous_kid` is `:allow` (default) or `:reject`. Rejection produces
       an empty candidate set when key selection leaves more than one eligible
       key, whether the protected header supplied a `kid` or omitted it.
@@ -270,7 +273,8 @@ defmodule Attesto.JWS do
     validate_malformed_key!(malformed_key)
     validate_candidate_selection_options!(opts)
 
-    if valid_verification_policy?(opts) do
+    if valid_verification_policy?(opts) and
+         Key.validate_kid(normalize_verification_keys(keys), Keyword.get(opts, :kid), opts) == :ok do
       keys
       |> normalize_verification_keys()
       |> Enum.reduce_while([], &reduce_verification_candidate(&1, &2, opts, malformed_key))
@@ -866,11 +870,12 @@ defmodule Attesto.JWS do
 
   def sign_compact_jwk(%JOSE.JWK{} = jwk, %{"alg" => alg} = header, claims)
       when alg in ["PS256", "PS384", "PS512"] and is_map(claims) do
-    sign_ps_compact(jwk, header, JSON.encode!(claims), alg)
+    _ = rsa_private_key!(jwk)
+    sign_ps_compact(Key.signing_jwk(jwk), header, JSON.encode!(claims), alg)
   end
 
   def sign_compact_jwk(%JOSE.JWK{} = jwk, header, claims) when is_map(header) and is_map(claims) do
-    sign_compact_with_jwk(jwk, header, claims)
+    sign_compact_with_jwk(Key.signing_jwk(jwk), header, claims)
   end
 
   def sign_compact_jwk(_jwk, _header, _claims) do

@@ -20,6 +20,13 @@ defmodule Attesto.Key do
   @private_jwk_members ~w(d p q dp dq qi oth k)
   @rsa_verification_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
   @default_minimum_rsa_bits 2048
+  @supported_pem_curves [
+    {1, 2, 840, 10_045, 3, 1, 7},
+    {1, 3, 132, 0, 34},
+    {1, 3, 132, 0, 35},
+    {1, 3, 101, 112},
+    {1, 3, 101, 113}
+  ]
 
   @type verification_jwk_error ::
           :private_material
@@ -115,6 +122,30 @@ defmodule Attesto.Key do
   def single_jwk_map?(%{"kty" => kty} = jwk_map) when is_binary(kty), do: not is_map_key(jwk_map, "keys")
   def single_jwk_map?(_jwk_map), do: false
 
+  @doc """
+  Check whether key selection requires a protected-header `kid`.
+
+  `:require_kid` is `false` by default, `true` to require it for every token,
+  or `:multiple` to require it when the original key set contains more than
+  one entry. Count entries before filtering by algorithm, usage, or strength;
+  even duplicate entries count. Pass the complete list of keys before candidate
+  filtering. A required identifier must be a non-empty string.
+  """
+  @spec validate_kid(list(), term(), keyword()) :: :ok | {:error, :missing_kid}
+  def validate_kid(keys, kid, opts \\ []) do
+    required = Keyword.get(opts, :require_kid, false)
+
+    if required not in [false, true, :multiple] do
+      raise ArgumentError, ":require_kid must be false, true, or :multiple"
+    end
+
+    needs_kid? = required == true or (required == :multiple and length(keys) > 1)
+
+    if needs_kid? and not (is_binary(kid) and kid != ""),
+      do: {:error, :missing_kid},
+      else: :ok
+  end
+
   @doc "Default minimum accepted RSA modulus bit length."
   @spec default_minimum_rsa_bits() :: pos_integer()
   def default_minimum_rsa_bits, do: @default_minimum_rsa_bits
@@ -122,14 +153,19 @@ defmodule Attesto.Key do
   @doc """
   Return the public JWK field map for a single `JOSE.JWK` struct or single JWK map.
 
-  Raises `ArgumentError` for JWK Set inputs or non-JWK values.
+  When deriving from private material, omit its `key_ops`: private signing
+  permissions do not describe the public half's verification permissions.
+  Public-only inputs retain their `key_ops`, so this is not a way to relax a
+  verification key's declared usage. Raises `ArgumentError` for JWK Set inputs
+  or non-JWK values.
   """
   @spec public_map(JOSE.JWK.t() | map()) :: map()
   def public_map(%JOSE.JWK{keys: :undefined} = jwk) do
     {_metadata, fields} = JOSE.JWK.to_public_map(jwk)
 
     if single_jwk_map?(fields) do
-      fields
+      {_metadata, original} = JOSE.JWK.to_map(jwk)
+      if private_members?(original), do: Map.delete(fields, "key_ops"), else: fields
     else
       raise ArgumentError, "expected a single JWK"
     end
@@ -187,6 +223,66 @@ defmodule Attesto.Key do
                 "malformed, or carried multiple key entries)"
     end
   end
+
+  @doc """
+  Import one PEM key without matching exception messages.
+
+  Returns `{:ok, jwk}`, `{:error, :malformed_key}` for empty, malformed,
+  multi-entry or non-binary input, or `{:error, :unsupported_key}` for a
+  parseable key whose type or curve is unsupported. Neither error includes
+  key material. Accepts public and private keys, as `jwk/1` does.
+  """
+  @spec import_pem(term()) :: {:ok, JOSE.JWK.t()} | {:error, :malformed_key | :unsupported_key}
+  def import_pem(pem) when is_binary(pem) do
+    case safe_from_pem(pem) do
+      %JOSE.JWK{} = jwk -> import_supported(jwk)
+      _other -> classify_unparsed_pem(pem)
+    end
+  end
+
+  def import_pem(_other), do: {:error, :malformed_key}
+
+  defp import_supported(jwk) do
+    _fields = public_map(jwk)
+    import_algorithm(jwk)
+  rescue
+    _error -> {:error, :malformed_key}
+  catch
+    _kind, _reason -> {:error, :malformed_key}
+  end
+
+  defp import_algorithm(jwk) do
+    {:ok, ensure_supported!(jwk)}
+  rescue
+    ArgumentError -> {:error, :unsupported_key}
+  end
+
+  defp classify_unparsed_pem(pem) do
+    case :public_key.pem_decode(pem) do
+      [entry] ->
+        if unsupported_pem_key?(:public_key.pem_entry_decode(entry)),
+          do: {:error, :unsupported_key},
+          else: {:error, :malformed_key}
+
+      _other ->
+        {:error, :malformed_key}
+    end
+  rescue
+    _error -> {:error, :malformed_key}
+  catch
+    _kind, _reason -> {:error, :malformed_key}
+  end
+
+  defp unsupported_pem_key?({:ECPrivateKey, _version, _private, {:namedCurve, curve}, _public, _attributes}),
+    do: curve not in @supported_pem_curves
+
+  defp unsupported_pem_key?({{:ECPoint, _public}, {:namedCurve, curve}}), do: curve not in @supported_pem_curves
+
+  defp unsupported_pem_key?({public, {:Dss_Parms, _p, _q, _g}}) when is_integer(public), do: true
+
+  defp unsupported_pem_key?(key) when is_tuple(key), do: elem(key, 0) in [:DSAPrivateKey, :Dss_Parms, :DHParameter]
+
+  defp unsupported_pem_key?(_other), do: false
 
   defp ensure_supported!(%JOSE.JWK{} = jwk) do
     Attesto.SigningAlg.infer(jwk)
@@ -286,22 +382,53 @@ defmodule Attesto.Key do
   end
 
   @doc """
-  Parse a private PEM into a `JOSE.JWK` whose public half can sign and
-  derive a `kid`.
+  Parse a private PEM, JWK map, or `JOSE.JWK` for signing.
+
+  A JWK's `use` must be absent or `"sig"`; `key_ops` must be absent or a list
+  of strings containing `"sign"`. Public material and JWK Sets are refused
+  with `ArgumentError`. `public_map/1` derives verification material without
+  carrying the private key's operations.
 
   Unlike `jwk/1`, this rejects public-only PEMs: they are valid
   verification material, but cannot sign tokens.
   """
-  @spec signing_jwk(String.t()) :: JOSE.JWK.t()
-  def signing_jwk(pem) do
-    jwk = jwk(pem)
+  @spec signing_jwk(String.t() | map() | JOSE.JWK.t()) :: JOSE.JWK.t()
+  def signing_jwk(%JOSE.JWK{keys: :undefined} = jwk) do
+    {_metadata, fields} = JOSE.JWK.to_map(jwk)
+    validate_signing_usage!(fields)
 
     if private_jwk?(jwk) do
       jwk
     else
-      raise ArgumentError,
-            "expected a private signing key PEM; got public verification material"
+      raise ArgumentError, "expected a private signing key PEM or JWK; got public verification material"
     end
+  end
+
+  def signing_jwk(%JOSE.JWK{}), do: raise(ArgumentError, "expected a single private signing key")
+
+  def signing_jwk(fields) when is_map(fields) do
+    if not single_jwk_map?(fields), do: raise(ArgumentError, "expected a single private signing JWK")
+    validate_signing_usage!(fields)
+    fields |> JOSE.JWK.from_map() |> signing_jwk()
+  rescue
+    _error -> raise ArgumentError, "invalid private signing JWK"
+  catch
+    _kind, _reason -> raise ArgumentError, "invalid private signing JWK"
+  end
+
+  def signing_jwk(pem), do: pem |> jwk() |> signing_jwk()
+
+  defp validate_signing_usage!(fields) do
+    use_ok? = Map.fetch(fields, "use") in [:error, {:ok, "sig"}]
+
+    ops_ok? =
+      case Map.fetch(fields, "key_ops") do
+        :error -> true
+        {:ok, ops} when is_list(ops) -> Enum.all?(ops, &is_binary/1) and "sign" in ops
+        _other -> false
+      end
+
+    if not (use_ok? and ops_ok?), do: raise(ArgumentError, "invalid signing JWK usage")
   end
 
   # Decode the private key PEM to a key record. Accepts the PKCS#1

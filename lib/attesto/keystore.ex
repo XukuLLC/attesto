@@ -31,7 +31,7 @@ defmodule Attesto.Keystore do
   single-key (or manually-rotated) case.
   """
 
-  alias Attesto.{Key, Signer, SigningAlg, Thumbprint}
+  alias Attesto.{Key, SigningAlg, Thumbprint}
 
   @type key_metadata :: %{optional(:not_after) => DateTime.t() | non_neg_integer()}
 
@@ -106,7 +106,13 @@ defmodule Attesto.Keystore do
   @callback verification_key_metadata() :: %{optional(String.t()) => key_metadata()}
 
   @doc """
-  Inspect a keystore's rotation contract.
+  Inspect a keystore's rotation contract and exercise its signing key.
+
+  Signs a fixed diagnostic message and verifies it against the published public
+  key, for both PEM keystores and `Attesto.Signer` implementations. A failure
+  adds `:signing_key_mismatch` and makes the status `:invalid`. This calls an
+  external signer's `sign/2` callback once; it may incur that signer's latency
+  or cost. No token is issued and no store is changed.
 
   The current signing key must appear in `verification_pems/0`; otherwise newly
   issued tokens cannot be verified and the result is `:invalid`. More than one
@@ -127,9 +133,10 @@ defmodule Attesto.Keystore do
     warning_seconds = Keyword.get(opts, :expiry_warning_seconds, 7 * 24 * 60 * 60)
     validate_warning_seconds!(warning_seconds)
 
-    signing_jwk = current_signing_jwk(keystore)
+    signing_context = Attesto.JWS.current_signing_context(keystore)
+    signing_jwk = signing_context.jwk
     {:ok, signing_kid} = Thumbprint.of_jwk(signing_jwk)
-    signing_alg = SigningAlg.for_jwk(keystore, signing_jwk, signing?: true)
+    signing_alg = signing_context.alg
     verification_pems = verification_pems!(keystore)
     verification_kids = Enum.map(verification_pems, &Key.kid/1)
     metadata = verification_metadata(keystore)
@@ -140,7 +147,10 @@ defmodule Attesto.Keystore do
       |> Enum.map(&rotation_key(keystore, &1, signing_kid, metadata, now, warning_seconds))
       |> Enum.uniq_by(& &1.kid)
 
-    issues = rotation_issues(keys, signing_kid, signing_alg, unknown_metadata_kids)
+    issues =
+      keys
+      |> rotation_issues(signing_kid, signing_alg, unknown_metadata_kids)
+      |> maybe_issue(not signing_probe(signing_context, verification_pems), :signing_key_mismatch)
 
     %{
       status: rotation_status(issues),
@@ -182,14 +192,6 @@ defmodule Attesto.Keystore do
 
   def validate!(other) do
     raise ArgumentError, "keystore must be a module; got #{inspect(other)}"
-  end
-
-  defp current_signing_jwk(keystore) do
-    if Signer.external?(keystore) do
-      Signer.signing_jwk!(keystore)
-    else
-      keystore.signing_pem() |> Key.signing_jwk()
-    end
   end
 
   defp verification_pems!(keystore) do
@@ -291,6 +293,24 @@ defmodule Attesto.Keystore do
   defp key_state(true, nil, _now, _warning_seconds), do: :current
   defp key_state(false, nil, _now, _warning_seconds), do: :overlap
 
+  defp signing_probe(%{signer: keystore, alg: alg, kid: kid} = context, verification_pems) do
+    case Enum.find(verification_pems, &(Key.kid(&1) == kid)) do
+      nil ->
+        false
+
+      pem ->
+        claims = %{"attesto_rotation_health" => "signing-key-check"}
+        compact = Attesto.JWS.sign_current(keystore, claims, signing_context: context)
+        public = pem |> Key.jwk() |> JOSE.JWK.to_public()
+
+        match?({:ok, ^claims}, Attesto.JWS.verify_strict(compact, [{kid, alg, public}], accepted_algs: [alg]))
+    end
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
   defp rotation_issues(keys, signing_kid, signing_alg, unknown_metadata_kids) do
     published_signing_alg =
       case Enum.find(keys, &(&1.kid == signing_kid)) do
@@ -319,6 +339,7 @@ defmodule Attesto.Keystore do
     cond do
       :empty_verification_set in issues -> :invalid
       :signing_key_not_published in issues -> :invalid
+      :signing_key_mismatch in issues -> :invalid
       :signing_algorithm_not_published in issues -> :invalid
       :expired_signing_key in issues -> :invalid
       :unknown_verification_key_metadata in issues -> :invalid
