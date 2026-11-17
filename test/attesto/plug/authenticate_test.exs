@@ -12,6 +12,10 @@ defmodule Attesto.Plug.AuthenticateTest do
   alias Attesto.DPoP
   alias Attesto.Plug.Authenticate
   alias Attesto.Plug.OAuthError
+  alias Attesto.Plug.ProtectResource
+  alias Attesto.Plug.RequireScopes
+  alias Attesto.Plug.ResourceAuthenticate
+  alias Attesto.Plug.ResourceScopes
   alias Attesto.Test.Factory
   alias Attesto.Token
 
@@ -38,6 +42,8 @@ defmodule Attesto.Plug.AuthenticateTest do
   def verify_result_callback(_config, _token, _verify_opts, result), do: result
 
   def metadata_callback(conn, suffix), do: "https://#{conn.host}/.well-known/oauth-protected-resource#{suffix}"
+
+  def challenge_scopes_callback(%Plug.Conn{request_path: "/x"}, scopes), do: scopes
 
   setup do
     pem = Factory.rsa_pem()
@@ -67,6 +73,107 @@ defmodule Attesto.Plug.AuthenticateTest do
   defp cert_der(name \\ "cn=attesto-plug-test") do
     %{cert: der} = :public_key.pkix_test_root_cert(String.to_charlist(name), [])
     der
+  end
+
+  describe "RFC 6750 challenge scopes" do
+    test "every authentication refusal advertises the configured scopes" do
+      bearer = [{"authorization", "Bearer opaque"}]
+
+      cases = [
+        {[], [missing_credentials_challenge: :bare_bearer], "Bearer", nil},
+        {[], [], "Bearer", "invalid_token"},
+        {[{"authorization", "unsupported"}], [], "Bearer", "invalid_token"},
+        {bearer, [], "Bearer", "invalid_token"},
+        {bearer, [cert_der: fn _conn -> :invalid end], "Bearer", "invalid_token"},
+        {[{"authorization", "DPoP opaque"}], [], "DPoP", "invalid_dpop_proof"},
+        {bearer, [step_up: [acr_values: ["phr"]], verify: fn _, _, _ -> {:ok, %{"acr" => "pwd"}} end], "Bearer",
+         "insufficient_user_authentication"}
+      ]
+
+      scopes = ["documents.read", "documents.write"]
+
+      for {headers, extra, scheme, error} <- cases,
+          spec <- [scopes, {__MODULE__, :challenge_scopes_callback, [scopes]}] do
+        opts =
+          Keyword.merge(
+            [config: :remote, verify: fn _, _, _ -> {:error, :rejected} end, challenge_scopes: spec],
+            extra
+          )
+
+        response = headers |> request() |> Authenticate.call(Authenticate.init(opts))
+
+        assert response.status == 401
+        assert [challenge] = Plug.Conn.get_resp_header(response, "www-authenticate")
+        assert String.starts_with?(challenge, scheme <> " ")
+        assert length(Regex.scan(~r/\bscope=/, challenge)) == 1
+        assert challenge =~ ~s(scope="documents.read documents.write")
+
+        if error, do: assert(challenge =~ ~s(error="#{error}")), else: refute(challenge =~ "error=")
+      end
+    end
+
+    test "resource and scope boundaries advertise scopes on independent 401 paths" do
+      resource_opts = [config: :remote, resource_audience: @uri, challenge_scopes: ["documents.read"]]
+      scope_opts = [scopes: ["documents.write"], challenge_scopes: ["documents.read"]]
+
+      for spec <- [["documents.read"], fn _conn -> ["documents.read"] end] do
+        resource_opts = Keyword.put(resource_opts, :challenge_scopes, spec)
+        scope_opts = Keyword.put(scope_opts, :challenge_scopes, spec)
+
+        blocked_host =
+          ResourceAuthenticate.init(resource_opts ++ [allow_dynamic_origin: true, allowed_hosts: ["allowed.example"]])
+
+        principal_rejected =
+          ResourceAuthenticate.init(
+            resource_opts ++ [verify: fn _, _, _ -> {:ok, %{}} end, principal: fn _, _ -> {:error, :rejected} end]
+          )
+
+        responses = [
+          ResourceAuthenticate.call(request([]), blocked_host),
+          ResourceAuthenticate.call(request([{"authorization", "Bearer opaque"}]), principal_rejected),
+          RequireScopes.call(request([]), RequireScopes.init(scope_opts)),
+          ResourceScopes.call(request([]), ResourceScopes.init(scope_opts)),
+          ProtectResource.authorize(request([]), ProtectResource.prepare(resource_opts), ["documents.write"])
+        ]
+
+        for response <- responses do
+          assert response.status == 401
+          assert [challenge] = Plug.Conn.get_resp_header(response, "www-authenticate")
+          assert challenge =~ ~s(scope="documents.read")
+        end
+      end
+    end
+
+    test "invalid static challenge scopes raise at initialization" do
+      for scopes <- [[""], ["a b"], ["a\r\nb"], [~s(a"b)], ["a\\b"], ["café"], [123], ["a" | "b"]] do
+        assert_raise ArgumentError, ~r/:challenge_scopes/, fn ->
+          ResourceAuthenticate.init(config: :remote, resource_audience: @uri, challenge_scopes: scopes)
+        end
+      end
+    end
+
+    test "a downstream 400 and a verifier 503 have no authentication challenge" do
+      token_request = request([{"authorization", "Bearer opaque"}])
+      challenge_scopes = fn _conn -> flunk("scope callback ran outside a 401 challenge") end
+
+      opts =
+        ResourceAuthenticate.init(
+          config: :remote,
+          resource_audience: @uri,
+          verify: fn _, _, _ -> {:ok, %{}} end,
+          challenge_scopes: challenge_scopes
+        )
+
+      accepted = ResourceAuthenticate.call(token_request, opts)
+      refute accepted.halted
+      bad_request = Plug.Conn.send_resp(accepted, 400, "bad request")
+      assert [] == Plug.Conn.get_resp_header(bad_request, "www-authenticate")
+
+      outage_opts = Keyword.put(opts, :verify, fn _, _, _ -> {:error, {:temporarily_unavailable, :outage}} end)
+      outage = ResourceAuthenticate.call(token_request, outage_opts)
+      assert outage.status == 503
+      assert [] == Plug.Conn.get_resp_header(outage, "www-authenticate")
+    end
   end
 
   describe "Bearer access token" do
@@ -988,26 +1095,32 @@ defmodule Attesto.Plug.AuthenticateTest do
       ath = DPoP.compute_ath(token)
       {proof, ^jkt} = Factory.dpop_proof(jwk: jwk, htm: "GET", htu: @uri, ath: ath)
 
-      conn =
-        [{"authorization", "DPoP " <> token}, {"dpop", proof}]
-        |> request()
-        |> Authenticate.call(
-          Authenticate.init(
-            config: config,
-            origin: "https://api.example.com",
-            replay_check: fn _jti, _ttl -> :ok end,
-            nonce_check: fn _nonce -> {:error, :use_dpop_nonce} end,
-            nonce_issue: fn -> "fresh-nonce-xyz" end
+      scopes = ["documents.read", "documents.write"]
+
+      for spec <- [scopes, fn %Plug.Conn{request_path: "/x"} -> scopes end] do
+        conn =
+          [{"authorization", "DPoP " <> token}, {"dpop", proof}]
+          |> request()
+          |> Authenticate.call(
+            Authenticate.init(
+              config: config,
+              origin: "https://api.example.com",
+              replay_check: fn _jti, _ttl -> :ok end,
+              nonce_check: fn _nonce -> {:error, :use_dpop_nonce} end,
+              nonce_issue: fn -> "fresh-nonce-xyz" end,
+              challenge_scopes: spec
+            )
           )
-        )
 
-      assert conn.status == 401
-      assert conn.halted
-      assert ["fresh-nonce-xyz"] = Plug.Conn.get_resp_header(conn, "dpop-nonce")
+        assert conn.status == 401
+        assert conn.halted
+        assert ["fresh-nonce-xyz"] = Plug.Conn.get_resp_header(conn, "dpop-nonce")
 
-      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
-      assert String.starts_with?(challenge, "DPoP ")
-      assert challenge =~ ~s(error="use_dpop_nonce")
+        [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+        assert String.starts_with?(challenge, "DPoP ")
+        assert challenge =~ ~s(error="use_dpop_nonce")
+        assert challenge =~ ~s(scope="documents.read documents.write")
+      end
     end
 
     test "a DPoP-bound token sent as Bearer with no proof gets a DPoP challenge", %{config: config} do

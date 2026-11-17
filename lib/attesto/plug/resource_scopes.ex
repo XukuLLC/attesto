@@ -9,6 +9,8 @@ if Code.ensure_loaded?(Plug.Conn) do
     `:send_error`, `:www_authenticate`, `:no_store`, `:resource_metadata` and
     `:allow_http` pass to `Attesto.Plug.OAuthError`. A challenge lists every
     required operation scope; a granted broader scope can satisfy a hierarchy.
+    `:challenge_scopes` configures the built-in 401 challenge as in
+    `Attesto.Plug.OAuthError.unauthorized/4`.
     """
 
     @behaviour Plug
@@ -23,6 +25,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     @impl Plug
     def init(opts) when is_list(opts) do
       keyword_opts = if Keyword.keyword?(opts), do: opts, else: []
+      OAuthError.validate_challenge_scopes!(keyword_opts)
 
       if Keyword.has_key?(keyword_opts, :scope) and Keyword.has_key?(keyword_opts, :scopes) do
         raise ArgumentError, "use either :scope or :scopes, not both"
@@ -51,7 +54,14 @@ if Code.ensure_loaded?(Plug.Conn) do
         scopes_key: Keyword.get(keyword_opts, :scopes_key, @scopes_key),
         transport:
           keyword_opts
-          |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata, :allow_http])
+          |> Keyword.take([
+            :send_error,
+            :www_authenticate,
+            :no_store,
+            :resource_metadata,
+            :challenge_scopes,
+            :allow_http
+          ])
       }
     end
 

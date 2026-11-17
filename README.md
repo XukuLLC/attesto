@@ -152,7 +152,7 @@ boundary, use the lower-level
 ```elixir
 def deps do
   [
-    {:attesto, "~> 2.28"}
+    {:attesto, "~> 2.29"}
   ]
 end
 ```

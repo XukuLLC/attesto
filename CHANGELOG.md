@@ -6,6 +6,18 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.29.0] - 2026-11-17
+
+### Added
+
+- `Attesto.Plug.Authenticate`, `Attesto.Plug.ResourceAuthenticate`,
+  `Attesto.Plug.ProtectResource`, `Attesto.Plug.RequireScopes`, and
+  `Attesto.Plug.ResourceScopes` accept `:challenge_scopes` for built-in
+  401 challenges (RFC 6749 §3.3 and RFC 6750 §3). It also applies to
+  `Attesto.Plug.OAuthError.missing_credentials/2`,
+  `Attesto.Plug.OAuthError.unauthorized/4`, and
+  `Attesto.Plug.OAuthError.insufficient_user_authentication/4`.
+
 ## [2.28.1] - 2026-11-17
 
 ### Security

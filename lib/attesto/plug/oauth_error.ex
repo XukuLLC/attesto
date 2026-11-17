@@ -29,17 +29,20 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     import Plug.Conn
 
+    alias Attesto.ResourceContext
+    alias Attesto.Scope
+
     @type scheme :: :bearer | :dpop
 
     @doc """
-    Respond 401 with a bare `Bearer` challenge (and optional RFC 9728
-    `resource_metadata` auth-param) and an empty JSON object body `{}` when a
+    Respond 401 with a `Bearer` challenge and an empty JSON object body `{}` when a
     request omits credentials (RFC 6750 §3.1). Honors `:send_error`,
-    `:www_authenticate`, and `:no_store`. Halts.
+    `:www_authenticate`, `:no_store`, `:resource_metadata`, and `:challenge_scopes`
+    as in `unauthorized/4`. Halts.
     """
     @spec missing_credentials(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
     def missing_credentials(conn, opts \\ []) do
-      params = resource_metadata_param(conn, opts)
+      params = unauthorized_params(conn, opts)
       challenge_str = if params == [], do: "Bearer", else: challenge(:bearer, params)
 
       conn
@@ -56,11 +59,20 @@ if Code.ensure_loaded?(Plug.Conn) do
     resource's protected-resource metadata, or a `(conn -> url)` / MFA callback,
     advertised as a `resource_metadata` auth-param so the client can discover
     the authorization server). `allow_http: true` permits an HTTP metadata URL
-    for deliberate development use. Halts.
+    for deliberate development use.
+
+    `:challenge_scopes` is a list of RFC 6749 §3.3 scope tokens, a `(conn -> list)`
+    callback, or `{module, function}` / `{module, function, extra_args}`. MFA
+    extras follow `conn`. A non-empty valid list produces one RFC 6750 §3
+    `scope` auth-param. Derive callback results from trusted configuration.
+    An empty list or invalid callback result omits the parameter. A
+    callback exception reaches the host's error handling. A custom
+    `:www_authenticate` hook handles the challenge entirely and receives no
+    `scope` from this option. Halts.
     """
     @spec unauthorized(Plug.Conn.t(), scheme(), String.t(), keyword()) :: Plug.Conn.t()
     def unauthorized(conn, scheme, error, opts \\ []) do
-      params = [{"error", error} | description_param(opts)] ++ resource_metadata_param(conn, opts)
+      params = [{"error", error} | description_param(opts)] ++ unauthorized_params(conn, opts)
 
       conn
       |> maybe_put_dpop_nonce(Keyword.get(opts, :dpop_nonce))
@@ -78,8 +90,8 @@ if Code.ensure_loaded?(Plug.Conn) do
     authorization endpoint; both are appended as `WWW-Authenticate` auth-params.
     This is an *authentication* error (401, like `invalid_token`), built on the
     same machinery as `unauthorized/4`, honoring the same `:description`,
-    `:resource_metadata`, and `:send_error` / `:www_authenticate` / `:no_store`
-    transport hooks. Halts.
+    `:resource_metadata`, `:challenge_scopes`, and `:send_error` /
+    `:www_authenticate` / `:no_store` transport hooks. Halts.
     """
     @spec insufficient_user_authentication(Plug.Conn.t(), scheme(), map(), keyword()) :: Plug.Conn.t()
     def insufficient_user_authentication(conn, scheme, challenge, opts \\ []) when is_map(challenge) do
@@ -87,7 +99,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
       params =
         [{"error", "insufficient_user_authentication"}, {"error_description", description}] ++
-          step_up_params(challenge) ++ resource_metadata_param(conn, opts)
+          step_up_params(challenge) ++ unauthorized_params(conn, opts)
 
       conn
       |> put_no_store(opts)
@@ -166,6 +178,18 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     # ----- internal -----
 
+    @doc false
+    @spec validate_challenge_scopes!(keyword()) :: :ok
+    def validate_challenge_scopes!(opts) do
+      with {:ok, spec} <- Keyword.fetch(opts, :challenge_scopes) do
+        if not (valid_challenge_scopes?(spec) or callback?(spec, 1)) do
+          raise ArgumentError, ":challenge_scopes must be a list of RFC 6749 scope tokens or a callback"
+        end
+      end
+
+      :ok
+    end
+
     @doc """
     Format a `WWW-Authenticate` header value for `:bearer` or `:dpop` with escaped
     quoted auth-params.
@@ -191,6 +215,23 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
     end
 
+    defp unauthorized_params(conn, opts) do
+      resource_metadata_param(conn, opts) ++ challenge_scope_param(conn, opts)
+    end
+
+    defp challenge_scope_param(conn, opts) do
+      if callback?(Keyword.get(opts, :www_authenticate), 2) do
+        []
+      else
+        scopes = resolve_parameter(Keyword.get(opts, :challenge_scopes), conn)
+        if scopes != [] and valid_challenge_scopes?(scopes), do: [{"scope", Enum.join(scopes, " ")}], else: []
+      end
+    end
+
+    # The guard also excludes improper lists returned by callbacks.
+    defp valid_challenge_scopes?(scopes) when is_integer(length(scopes)), do: Scope.valid_list?(scopes)
+    defp valid_challenge_scopes?(_scopes), do: false
+
     # RFC 9728 §5.1: a protected resource's `WWW-Authenticate` challenge MAY
     # carry a `resource_metadata` auth-param whose value is the URL of the
     # resource's protected-resource metadata, letting a client that received a
@@ -201,23 +242,23 @@ if Code.ensure_loaded?(Plug.Conn) do
     # can advertise the matching document without replacing this module's
     # challenge builder. HTTP remains an explicit development-only opt-in.
     defp resource_metadata_param(conn, opts) do
-      url = resolve_resource_metadata(Keyword.get(opts, :resource_metadata), conn)
+      url = resolve_parameter(Keyword.get(opts, :resource_metadata), conn)
 
       if Attesto.URI.https_identifier?(url, allow_http: Keyword.get(opts, :allow_http, false)),
         do: [{"resource_metadata", url}],
         else: []
     end
 
-    defp resolve_resource_metadata(url, _conn) when is_binary(url), do: url
-    defp resolve_resource_metadata(fun, conn) when is_function(fun, 1), do: fun.(conn)
+    defp resolve_parameter(value, _conn) when is_binary(value) or is_list(value), do: value
 
-    defp resolve_resource_metadata({module, fun}, conn) when is_atom(module) and is_atom(fun),
-      do: apply(module, fun, [conn])
+    defp resolve_parameter(spec, conn) do
+      if callback?(spec, 1), do: ResourceContext.invoke(spec, [conn])
+    end
 
-    defp resolve_resource_metadata({module, fun, extra}, conn) when is_atom(module) and is_atom(fun) and is_list(extra),
-      do: apply(module, fun, [conn | extra])
-
-    defp resolve_resource_metadata(_value, _conn), do: nil
+    defp callback?(fun, arity) when is_function(fun, arity), do: true
+    defp callback?({module, fun}, _arity) when is_atom(module) and is_atom(fun), do: true
+    defp callback?({module, fun, extra}, _arity) when is_atom(module) and is_atom(fun) and is_list(extra), do: true
+    defp callback?(_value, _arity), do: false
 
     defp maybe_put_dpop_nonce(conn, nil), do: conn
     defp maybe_put_dpop_nonce(conn, nonce), do: put_resp_header(conn, "dpop-nonce", nonce)

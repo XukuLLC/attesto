@@ -14,6 +14,61 @@ defmodule Attesto.Plug.OAuthErrorTest do
     value
   end
 
+  describe ":challenge_scopes" do
+    test "an empty list leaves the uncredentialed challenge bare" do
+      conn = OAuthError.missing_credentials(conn(:get, "/mcp"), challenge_scopes: [])
+      assert www_authenticate(conn) == "Bearer"
+    end
+
+    test "invalid callback results are omitted as for resource metadata" do
+      for result <- [nil, "documents.read", ["documents.read", "a b"], ["documents.read" | :invalid]] do
+        callback = fn _conn -> result end
+
+        conn =
+          conn(:get, "/mcp")
+          |> OAuthError.missing_credentials(challenge_scopes: callback, resource_metadata: callback)
+
+        assert conn.status == 401
+        assert www_authenticate(conn) == "Bearer"
+      end
+    end
+
+    test "callback exceptions propagate as for resource metadata" do
+      for opt <- [:challenge_scopes, :resource_metadata] do
+        assert_raise RuntimeError, "callback failed", fn ->
+          OAuthError.missing_credentials(conn(:get, "/mcp"), [{opt, fn _conn -> raise "callback failed" end}])
+        end
+      end
+    end
+
+    test "the custom challenge hook receives no configured scope" do
+      response =
+        OAuthError.unauthorized(conn(:get, "/mcp"), :bearer, "invalid_token",
+          challenge_scopes: fn _conn -> flunk("overridden scope callback ran") end,
+          www_authenticate: fn conn, challenge ->
+            assert challenge == ~s(Bearer error="invalid_token")
+            Plug.Conn.put_resp_header(conn, "www-authenticate", "Custom realm=api")
+          end
+        )
+
+      assert www_authenticate(response) == "Custom realm=api"
+    end
+
+    test "insufficient_scope uses the operation scopes and resource metadata" do
+      response =
+        OAuthError.insufficient_scope(conn(:get, "/mcp"), ["documents.write"], :dpop,
+          challenge_scopes: fn _conn -> flunk("scope callback ran on 403") end,
+          resource_metadata: "https://api.example/.well-known/oauth-protected-resource"
+        )
+
+      assert response.status == 403
+
+      assert www_authenticate(response) ==
+               ~s(DPoP error="insufficient_scope", error_description="requires scope: documents.write", ) <>
+                 ~s(scope="documents.write", resource_metadata="https://api.example/.well-known/oauth-protected-resource")
+    end
+  end
+
   describe "unauthorized/4" do
     test "Bearer challenge: 401, names the scheme, carries error, halts, JSON body" do
       conn =

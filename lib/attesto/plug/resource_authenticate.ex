@@ -12,8 +12,11 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     `:base_url` / `:origin` accepts a URL, one-arity callback or MFA tuple.
     `:resource_audience` also accepts a literal identifier, callback or MFA.
-    `:resource_metadata_url` overrides the derived RFC 9728 challenge pointer;
-    `:www_authenticate` overrides challenge rendering entirely.
+    `:resource_metadata_url` overrides the derived RFC 9728 challenge pointer.
+    `:challenge_scopes` takes a list of RFC 6749 §3.3 scope tokens or a callback
+    as in `Attesto.Plug.OAuthError.unauthorized/4`, and advertises a non-empty
+    list on every built-in 401 challenge. `:www_authenticate` overrides challenge
+    rendering entirely and receives no `scope` from this option.
     `:principal` receives verified claims and sender context and returns
     `{:ok, principal}` or `{:error, reason}`. The exact error result
     `{:error, {:temporarily_unavailable, reason}}` answers 503
@@ -285,7 +288,15 @@ if Code.ensure_loaded?(Plug.Conn) do
     @doc false
     @spec oauth_error_opts(keyword()) :: keyword()
     def oauth_error_opts(opts),
-      do: Keyword.take(opts, [:send_error, :www_authenticate, :no_store, :resource_metadata, :allow_http])
+      do:
+        Keyword.take(opts, [
+          :send_error,
+          :www_authenticate,
+          :no_store,
+          :resource_metadata,
+          :challenge_scopes,
+          :allow_http
+        ])
 
     @doc false
     @spec oauth_error_metadata_opts(keyword()) :: keyword()

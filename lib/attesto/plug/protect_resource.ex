@@ -56,6 +56,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       :www_authenticate,
       :no_store,
       :resource_metadata,
+      :challenge_scopes,
       :allow_http,
       :claims_key,
       :scopes_key,

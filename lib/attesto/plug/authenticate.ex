@@ -98,6 +98,10 @@ if Code.ensure_loaded?(Plug.Conn) do
         The URL is advertised as a `resource_metadata` auth-param on every 401
         `WWW-Authenticate` challenge (RFC 9728 §5.1) so a refused client can
         discover the authorization server.
+      * `:challenge_scopes` - scope tokens (RFC 6749 §3.3) or a callback as in
+        `Attesto.Plug.OAuthError.unauthorized/4`. A non-empty list adds `scope`
+        to every built-in 401 challenge. A custom `:www_authenticate` hook
+        replaces challenge handling and receives no `scope` from this option.
       * `:allow_http` - permits an HTTP `:resource_metadata` URL for deliberate
         development use. Defaults to `false`.
 
@@ -182,6 +186,7 @@ if Code.ensure_loaded?(Plug.Conn) do
       end
 
       validate_htu_options!(opts, Keyword.get(init_opts, :require_dpop_pin?, true))
+      OAuthError.validate_challenge_scopes!(opts)
 
       opts
       |> Keyword.put(:bearer_methods, bearer_methods(opts))
@@ -869,7 +874,7 @@ if Code.ensure_loaded?(Plug.Conn) do
 
     defp error_opts(opts, extra) do
       opts
-      |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata, :allow_http])
+      |> Keyword.take([:send_error, :www_authenticate, :no_store, :resource_metadata, :challenge_scopes, :allow_http])
       |> Keyword.merge(extra)
     end
 
