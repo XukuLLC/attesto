@@ -6,6 +6,18 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.28.1] - 2026-11-17
+
+### Security
+
+- Requires `plug >= 1.20.4 and < 2.0.0` when Plug is present. Plug 1.13.0
+  through 1.20.3 do not count multipart part delimiters, header separators or
+  line endings against `Plug.Parsers`' `:length` limit, and hold parts without a
+  `content-disposition` header in memory until the body has been read, so a
+  request under the limit can take far more memory (CVE-2026-120287,
+  GHSA-qj4r-jh2r-rw3f). No earlier Plug line has a fixed release. A host's
+  endpoint runs that parser for any request with a multipart body, before a
+  route is chosen.
 ## [2.28.0] - 2026-11-16
 
 ### Added

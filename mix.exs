@@ -18,7 +18,7 @@ defmodule Attesto.MixProject do
   alias Attesto.Test.DPoPVerifier, as: TestDPoPVerifier
   alias Attesto.Test.LogMessages
 
-  @version "2.28.0"
+  @version "2.28.1"
   @url "https://github.com/XukuLLC/attesto"
   @maintainers ["Neil Berkman"]
 
@@ -71,7 +71,7 @@ defmodule Attesto.MixProject do
       {:telemetry, "~> 1.0"},
       # Optional: the Attesto.Plug.* integration layer. Hosts that use the
       # plugs already have Plug; the core library does not require it.
-      {:plug, "~> 1.16.6 or ~> 1.17.4 or ~> 1.18.5 or ~> 1.19.5 or >= 1.20.3 and < 2.0.0", optional: true},
+      {:plug, ">= 1.20.4 and < 2.0.0", optional: true},
       # Optional: pinned-address HTTP/HTTPS transport over Mint (`Attesto.PinnedHTTP`).
       {:mint, ">= 1.10.2 and < 2.0.0", optional: true},
 
