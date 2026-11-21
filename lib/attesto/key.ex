@@ -20,6 +20,27 @@ defmodule Attesto.Key do
   @private_jwk_members ~w(d p q dp dq qi oth k)
   @rsa_verification_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
   @default_minimum_rsa_bits 2048
+  # Short Weierstrass parameters {coordinate bytes, p, a, b}: SEC 2 v2 §2.4.1
+  # (secp256k1) and §§2.4.2, 2.5.1, 2.6.1 (P-256, P-384, P-521; FIPS 186-5).
+  @p256_prime Bitwise.bsl(1, 256) - Bitwise.bsl(1, 224) + Bitwise.bsl(1, 192) + Bitwise.bsl(1, 96) - 1
+  @p384_prime Bitwise.bsl(1, 384) - Bitwise.bsl(1, 128) - Bitwise.bsl(1, 96) + Bitwise.bsl(1, 32) - 1
+  @p521_prime Bitwise.bsl(1, 521) - 1
+  @secp256k1_prime Bitwise.bsl(1, 256) - Bitwise.bsl(1, 32) - 977
+  @p521_b String.to_integer(
+            "0051953EB9618E1C9A1F929A21A0B68540EEA2DA725B99B315F3B8B489918EF1" <>
+              "09E156193951EC7E937B1652C0BD3BB1BF073573DF883D2C34F1EF451FD46B503F00",
+            16
+          )
+  @verification_ec_curves %{
+    "P-256" => {32, @p256_prime, @p256_prime - 3, 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B},
+    "P-384" =>
+      {48, @p384_prime, @p384_prime - 3,
+       0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875AC656398D8A2ED19D2A85C8EDD3EC2AEF},
+    "P-521" => {66, @p521_prime, @p521_prime - 3, @p521_b},
+    "secp256k1" => {32, @secp256k1_prime, 0, 7}
+  }
+  @ed25519_prime Bitwise.bsl(1, 255) - 19
+  @ed448_prime Bitwise.bsl(1, 448) - Bitwise.bsl(1, 224) - 1
   @supported_pem_curves [
     {1, 2, 840, 10_045, 3, 1, 7},
     {1, 3, 132, 0, 34},
@@ -85,9 +106,14 @@ defmodule Attesto.Key do
   `:require_public?` defaults to `true`, and `:minimum_rsa_bits` defaults to
   #{@default_minimum_rsa_bits}.
 
-  The requested algorithm is checked against the parsed key type and curve
-  before the key reaches a signature verifier, including explicit Edwards and
-  ES256K identifiers.
+  EC coordinates must have the curve's byte length, be smaller than its
+  field prime and satisfy its curve equation (RFC 7518 §6.2.1 and SEC 1 v2
+  §3.2.2.1). This applies to P-256, P-384, P-521 and secp256k1. Ed25519 and
+  Ed448 keys must use canonical encodings with `y` below the field prime and
+  the sign bit clear when `x` is zero (RFC 8032 §§5.1.3 and 5.2.3).
+
+  The requested algorithm must match the key type and curve, including
+  explicit Edwards and ES256K identifiers.
   """
   @spec verification_jwk(map(), keyword()) ::
           {:ok, JOSE.JWK.t()} | {:error, verification_jwk_error()}
@@ -103,6 +129,7 @@ defmodule Attesto.Key do
          :ok <- validate_jwk_usage(jwk_map),
          :ok <- validate_jwk_alg(jwk_map, alg),
          :ok <- validate_rsa_params(jwk_map),
+         :ok <- validate_public_point(jwk_map),
          {:ok, jwk} <- from_verification_map(jwk_map),
          :ok <- validate_rsa_strength(alg, jwk, minimum_rsa_bits),
          :ok <- validate_verification_algorithm(alg, jwk) do
@@ -149,6 +176,13 @@ defmodule Attesto.Key do
   @doc "Default minimum accepted RSA modulus bit length."
   @spec default_minimum_rsa_bits() :: pos_integer()
   def default_minimum_rsa_bits, do: @default_minimum_rsa_bits
+
+  # Exposed for the test that checks the constants against OTP's curve data.
+  @doc false
+  @spec verification_ec_curve_parameters() :: %{
+          String.t() => {pos_integer(), pos_integer(), non_neg_integer(), pos_integer()}
+        }
+  def verification_ec_curve_parameters, do: @verification_ec_curves
 
   @doc """
   Return the public JWK field map for a single `JOSE.JWK` struct or single JWK map.
@@ -326,6 +360,57 @@ defmodule Attesto.Key do
         if Attesto.SigningAlg.equivalent_okp_algs?(jwk_alg, alg, jwk_map),
           do: :ok,
           else: {:error, :alg_mismatch}
+    end
+  end
+
+  defp validate_public_point(%{"kty" => "EC", "crv" => curve} = jwk_map)
+       when is_map_key(@verification_ec_curves, curve) do
+    {coordinate_bytes, prime, a, b} = Map.fetch!(@verification_ec_curves, curve)
+
+    with {:ok, x} <- decode_point_member(jwk_map["x"], coordinate_bytes),
+         {:ok, y} <- decode_point_member(jwk_map["y"], coordinate_bytes),
+         true <- on_weierstrass_curve?(x, y, prime, a, b) do
+      :ok
+    else
+      _ -> {:error, :malformed_jwk}
+    end
+  end
+
+  defp validate_public_point(%{"kty" => "OKP", "crv" => "Ed25519"} = jwk_map),
+    do: validate_edwards_encoding(jwk_map["x"], 32, @ed25519_prime)
+
+  defp validate_public_point(%{"kty" => "OKP", "crv" => "Ed448"} = jwk_map),
+    do: validate_edwards_encoding(jwk_map["x"], 57, @ed448_prime)
+
+  defp validate_public_point(_jwk_map), do: :ok
+
+  defp decode_point_member(encoded, size) when is_binary(encoded) and byte_size(encoded) <= div(size + 2, 3) * 4 do
+    case Base.url_decode64(encoded, padding: false) do
+      {:ok, bytes} when byte_size(bytes) == size -> {:ok, bytes}
+      _ -> :error
+    end
+  end
+
+  defp decode_point_member(_encoded, _size), do: :error
+
+  defp on_weierstrass_curve?(x_bytes, y_bytes, prime, a, b) do
+    x = :binary.decode_unsigned(x_bytes)
+    y = :binary.decode_unsigned(y_bytes)
+
+    x < prime and y < prime and rem(y * y - x * x * x - a * x - b, prime) == 0
+  end
+
+  defp validate_edwards_encoding(encoded, size, prime) do
+    prefix_bytes = size - 1
+
+    with {:ok, <<prefix::binary-size(^prefix_bytes), sign::1, high_bits::7>>} <- decode_point_member(encoded, size),
+         y = :binary.decode_unsigned(<<prefix::binary, high_bits>>, :little),
+         true <- y < prime,
+         # On both curves, x = 0 gives y² = 1.
+         false <- sign == 1 and y in [1, prime - 1] do
+      :ok
+    else
+      _ -> {:error, :malformed_jwk}
     end
   end
 

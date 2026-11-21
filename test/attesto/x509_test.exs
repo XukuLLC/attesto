@@ -131,8 +131,70 @@ defmodule Attesto.X509Test do
 
   test "malformed raw certificates do not invalidate unrelated valid anchors", ctx do
     for malformed <- [<<48, 128, 0, 0>>, <<48, 130, 255>>, <<48, 3, 48, 1, 0>>, ctx.issuer.leaf <> <<0>>] do
+      refute X509.valid_trust_anchors?([malformed | ctx.issuer.anchors])
       assert {:error, _} = X509.verify([malformed], trusted_certificates: ctx.issuer.anchors)
       assert {:ok, _} = X509.verify(ctx.issuer.chain, trusted_certificates: [malformed | ctx.issuer.anchors])
+    end
+  end
+
+  test "refuses a digitalSignature leaf with cA TRUE under a separate anchor", ctx do
+    extensions = [
+      {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, true, :asn1_NOVALUE}},
+      {:Extension, {2, 5, 29, 15}, true, [:digitalSignature]}
+    ]
+
+    issuer = Fixture.chain(ctx.root, peer: [extensions: extensions])
+    assert {:ok, _} = :public_key.pkix_path_validation(ctx.root.cert, issuer.chain, [])
+    assert {:error, :untrusted_certificate} = X509.verify(issuer.chain, trusted_certificates: issuer.anchors)
+    assert {:ok, _} = X509.verify(issuer.chain, trusted_certificates: [issuer.leaf])
+
+    %{cert: pinned} =
+      :public_key.pkix_test_root_cert(~c"pinned-ca-leaf",
+        key: Fixture.curve(),
+        digest: :sha256,
+        extensions: extensions
+      )
+
+    assert X509.valid_trust_anchors?([pinned])
+    assert {:ok, %{trust_anchor: ^pinned}} = X509.verify([pinned], trusted_certificates: [pinned])
+  end
+
+  test "requires unique extension OIDs in the leaf, intermediate and anchor", ctx do
+    first = Fixture.san([{:dNSName, ~c"first.example"}])
+    second = Fixture.san([{:dNSName, ~c"second.example"}])
+
+    for extensions <- [[first], [first, second]] do
+      %{cert: anchor} =
+        root =
+        :public_key.pkix_test_root_cert(~c"extension-policy-root",
+          key: Fixture.curve(),
+          digest: :sha256,
+          extensions: extensions
+        )
+
+      accepted? = length(extensions) == 1
+      assert X509.valid_trust_anchors?([anchor]) == accepted?
+
+      for {issuing_root, opts} <- [
+            {ctx.root, [peer: [extensions: extensions]]},
+            {ctx.root, [intermediates: [[key: Fixture.curve(), extensions: extensions]]]},
+            {root, []}
+          ] do
+        issuer = Fixture.chain(issuing_root, opts)
+
+        assert {:ok, _} =
+                 :public_key.pkix_path_validation(
+                   issuing_root.cert,
+                   [issuing_root.cert | Enum.reverse(issuer.chain)],
+                   []
+                 )
+
+        if accepted? do
+          assert {:ok, _} = X509.verify(issuer.chain, trusted_certificates: issuer.anchors)
+        else
+          assert {:error, :untrusted_certificate} = X509.verify(issuer.chain, trusted_certificates: issuer.anchors)
+        end
+      end
     end
   end
 

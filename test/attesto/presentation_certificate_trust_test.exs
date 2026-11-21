@@ -197,6 +197,7 @@ defmodule Attesto.PresentationCertificateTrustTest do
     root =
       :public_key.pkix_test_root_cert(~c"self-signed-leaf",
         key: Fixture.curve(),
+        digest: :sha256,
         extensions: [
           Fixture.san([{:uniformResourceIdentifier, String.to_charlist(@issuer)}]),
           {:Extension, {2, 5, 29, 19}, true, {:BasicConstraints, false, :asn1_NOVALUE}},

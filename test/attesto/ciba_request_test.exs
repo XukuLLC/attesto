@@ -401,7 +401,7 @@ defmodule Attesto.CIBA.RequestTest do
       assert {:error, :invalid_request} = Request.validate(client, %{"request" => jwt}, signed_opts())
     end
 
-    test "the derived FAPI policy rejects PS256 with an RSA modulus below 2048 bits" do
+    test "PS256 with an RSA modulus below 2048 bits is rejected with or without the FAPI policy" do
       key = JOSE.JWK.generate_key({:rsa, 1024})
       jwt = signed_request(key, %{}, %{"alg" => "PS256"})
       client = signing_client(key, %{}, "PS256")
@@ -416,7 +416,7 @@ defmodule Attesto.CIBA.RequestTest do
                  signed_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: true]
                )
 
-      assert {:ok, _request} =
+      assert {:error, :invalid_request} =
                Request.validate(
                  client,
                  %{"request" => jwt},

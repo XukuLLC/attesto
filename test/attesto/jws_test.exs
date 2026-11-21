@@ -387,15 +387,32 @@ defmodule Attesto.JWSTest do
              )
   end
 
-  test "minimum RSA strength and ambiguous-kid policies fail closed" do
+  test "RSA candidates below the minimum are skipped under every malformed-key policy" do
     weak = JOSE.JWK.generate_key({:rsa, 1024})
     weak_map = public_map(weak, %{"kid" => "weak", "alg" => "RS256"})
+    strong = JOSE.JWK.generate_key({:rsa, 2048})
+    strong_map = public_map(strong, %{"kid" => "strong", "alg" => "RS256"})
 
-    assert [{"weak", "RS256", %JOSE.JWK{}}] =
-             JWS.verification_candidates(weak_map, min_rsa_bits: 1024)
+    for policy <- [:reject_set, :skip, :raise] do
+      opts = [malformed_key: policy]
+      assert [] = JWS.verification_candidates(weak_map, opts)
+      assert [{"strong", "RS256", %JOSE.JWK{}}] = JWS.verification_candidates([weak_map, strong_map], opts)
+    end
 
-    assert [] = JWS.verification_candidates(weak_map, min_rsa_bits: 2048)
+    assert_raise ArgumentError, ~r/:min_rsa_bits/, fn ->
+      JWS.verification_candidates(weak_map, min_rsa_bits: 1024)
+    end
 
+    assert [{"strong", "RS256", %JOSE.JWK{}}] = JWS.verification_candidates(strong_map, min_rsa_bits: nil)
+    assert [] = JWS.verification_candidates(strong_map, min_rsa_bits: 2049)
+
+    builder = fn {kid, key} -> {kid, "RS256", key} end
+
+    assert [{"strong", "RS256", %JOSE.JWK{}}] =
+             JWS.verification_candidates([{"weak", weak}, {"strong", strong}], candidate_builder: builder)
+  end
+
+  test "ambiguous-kid policy counts only candidates that meet the RSA minimum" do
     signer = JOSE.JWK.generate_key({:ec, "P-256"})
     duplicate = public_map(signer, %{"kid" => "same", "alg" => "ES256"})
 
@@ -407,16 +424,17 @@ defmodule Attesto.JWSTest do
                ambiguous_kid: :reject
              )
 
-    strong = JOSE.JWK.generate_key({:rsa, 2048})
+    lower = JOSE.JWK.generate_key({:rsa, 2048})
+    higher = JOSE.JWK.generate_key({:rsa, 3072})
 
     assert [{"same", "RS256", %JOSE.JWK{}}] =
              JWS.verification_candidates(
                [
-                 public_map(weak, %{"kid" => "same", "alg" => "RS256"}),
-                 public_map(strong, %{"kid" => "same", "alg" => "RS256"})
+                 public_map(lower, %{"kid" => "same", "alg" => "RS256"}),
+                 public_map(higher, %{"kid" => "same", "alg" => "RS256"})
                ],
                kid: "same",
-               min_rsa_bits: 2048,
+               min_rsa_bits: 3072,
                ambiguous_kid: :reject
              )
   end

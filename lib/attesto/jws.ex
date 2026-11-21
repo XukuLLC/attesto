@@ -247,8 +247,9 @@ defmodule Attesto.JWS do
       Omitting the option leaves algorithms unrestricted at this low-level API.
     * `:fapi?` applies `SigningAlg.fapi_compatible?/2` after algorithm
       filtering.
-    * `:min_rsa_bits` optionally rejects RSA candidates whose modulus is
-      shorter than the given positive number of bits.
+    * `:min_rsa_bits` raises the 2048-bit minimum for RSA candidates
+      (RFC 7518 §§3.3 and 3.5). Omit it or pass `nil` for the default.
+      An integer below 2048 raises `ArgumentError`.
     * `:require_kid` is `false` (default), `true`, or `:multiple`. The last
       requires a non-empty `kid` when the original key set has more than one
       entry, before algorithm, usage, or strength filtering. See `Attesto.Key.validate_kid/3`.
@@ -263,15 +264,19 @@ defmodule Attesto.JWS do
       whose `use` is not `sig`, whose `key_ops` lacks `verify`, whose `alg`
       names no JWS signature algorithm, whose key type or curve has no
       supported signature algorithm, or, with `alg:`, whose type or own `alg`
-      does not fit that algorithm.
+      does not fit that algorithm, or whose RSA modulus is below the minimum.
     * `:candidate_builder` can build a candidate from non-JWK inputs, such as
       a PEM. Its result must be a `{kid, alg, jwk}` tuple.
+
+  JWK maps must encode on-curve EC points with fixed-width coordinates below
+  the field prime and canonical Ed25519 or Ed448 public keys. See
+  `Attesto.Key.verification_jwk/2` for the point and encoding requirements.
   """
   @spec verification_candidates(term(), keyword()) :: [verification_candidate()]
   def verification_candidates(keys, opts \\ []) when is_list(opts) do
     malformed_key = Keyword.get(opts, :malformed_key, :reject_set)
     validate_malformed_key!(malformed_key)
-    validate_candidate_selection_options!(opts)
+    opts = validate_candidate_selection_options!(opts)
 
     if valid_verification_policy?(opts) and
          Key.validate_kid(normalize_verification_keys(keys), Keyword.get(opts, :kid), opts) == :ok do
@@ -590,9 +595,12 @@ defmodule Attesto.JWS do
   defp signature_key_candidate!(jwk_map, opts) do
     {alg_source, alg} = candidate_alg(jwk_map, opts)
 
-    case Key.verification_jwk(jwk_map, alg: alg, minimum_rsa_bits: 1) do
+    case Key.verification_jwk(jwk_map, alg: alg, minimum_rsa_bits: Keyword.fetch!(opts, :min_rsa_bits)) do
       {:ok, jwk} ->
         {:ok, {Map.get(jwk_map, "kid"), alg, jwk}}
+
+      {:error, :weak_key} ->
+        :skip
 
       {:error, reason} ->
         if unusable_for_alg?(reason, alg_source, jwk_map),
@@ -737,16 +745,19 @@ defmodule Attesto.JWS do
     do: raise(ArgumentError, ":malformed_key must be :reject_set, :skip, or :raise; got #{inspect(mode)}")
 
   defp validate_candidate_selection_options!(opts) do
+    default_min_rsa_bits = Key.default_minimum_rsa_bits()
     min_rsa_bits = Keyword.get(opts, :min_rsa_bits)
     ambiguous_kid = Keyword.get(opts, :ambiguous_kid, :allow)
 
-    if !(is_nil(min_rsa_bits) or (is_integer(min_rsa_bits) and min_rsa_bits > 0)) do
-      raise ArgumentError, ":min_rsa_bits must be nil or a positive integer"
+    if !(is_nil(min_rsa_bits) or (is_integer(min_rsa_bits) and min_rsa_bits >= default_min_rsa_bits)) do
+      raise ArgumentError, ":min_rsa_bits must be nil or an integer of at least #{default_min_rsa_bits}"
     end
 
     if ambiguous_kid not in [:allow, :reject] do
       raise ArgumentError, ":ambiguous_kid must be :allow or :reject"
     end
+
+    Keyword.put(opts, :min_rsa_bits, min_rsa_bits || default_min_rsa_bits)
   end
 
   defp validate_protected_header_options!(error, crit_error, supported_crit)

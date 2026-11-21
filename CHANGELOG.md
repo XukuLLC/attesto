@@ -6,6 +6,23 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.30.0] - 2026-11-20
+
+### Security
+
+- Each certificate in a validated path, including the selected trust anchor, must use `rsaEncryption` with a modulus of at least 2048 bits, `id-ecPublicKey` on P-256, P-384 or P-521, Ed25519, or Ed448 (RFC 4055 §1.2, RFC 7518 §§3.3 and 3.5, RFC 5480 §2.1.1, and RFC 8410 §4).
+- Each certificate in the path must use a SHA-256, SHA-384 or SHA-512 RSA PKCS#1 v1.5, RSASSA-PSS or ECDSA signature, or an Ed25519 or Ed448 signature. RSASSA-PSS requires a matching MGF1 digest (RFC 4055 §§3 and 5, RFC 5758 §3.2, and RFC 8410 §6).
+- Each extension OID may appear at most once per certificate, including the selected trust anchor (RFC 5280 §4.2).
+- A leaf with `basicConstraints.cA` set to `TRUE` is eligible only as the selected trust anchor (RFC 5280 §4.2.1.9).
+- P-256, P-384, P-521 and secp256k1 verification JWKs must encode on-curve points with fixed-width coordinates below the field prime (RFC 7518 §6.2.1 and RFC 8812 §3.1).
+- Ed25519 and Ed448 verification JWKs must encode `y` below the field prime with the sign bit clear when `x` is zero (RFC 8032 §§5.1.3 and 5.2.3).
+- RSA JWS verification candidates must have moduli of at least 2048 bits (RFC 7518 §§3.3 and 3.5).
+
+### Breaking
+
+- `Attesto.X509.verify/2` returns `{:error, :untrusted_certificate}` when a certificate in the path or the selected trust anchor uses a refused key or signature algorithm. `Attesto.X509.valid_trust_anchors?/1` returns `false` for a list containing such an anchor.
+- JWS verification candidate building skips RSA verification keys under 2048 bits, and a `:min_rsa_bits` value below 2048 raises `ArgumentError`.
+
 ## [2.29.0] - 2026-11-17
 
 ### Added

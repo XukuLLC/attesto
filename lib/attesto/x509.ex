@@ -14,10 +14,16 @@ defmodule Attesto.X509 do
   critical mdoc document-signer extended key usage on the leaf certificate.
   It does not accept that extension on a CA or bypass any path-validation error.
 
-  PSS-specific SubjectPublicKeyInfo keys are rejected throughout the selected
-  path, including its trust anchor, until complete PSS parameter propagation
-  is supported. `rsaEncryption` parameters must be NULL; absent parameters are
-  accepted for interoperability. Other parameter values fail closed.
+  Each certificate in the selected path, including its trust anchor, must
+  have an `rsaEncryption` key of at least 2048 bits with NULL or absent
+  parameters, an `id-ecPublicKey` key on P-256, P-384 or P-521, or an Ed25519
+  or Ed448 key. Certificate signatures must use RSA PKCS#1 v1.5 or ECDSA with
+  SHA-256, SHA-384 or SHA-512, RSASSA-PSS with one of those digests and matching
+  MGF1 digest, or Ed25519 or Ed448.
+
+  Each extension OID may appear at most once per certificate (RFC 5280 §4.2).
+  A leaf with `cA` set to `TRUE` in `basicConstraints` is eligible only when
+  the leaf is itself the selected trust anchor (RFC 5280 §4.2.1.9).
 
   `:haip` defaults to `false`. With `true`, a self-signed leaf or any supplied
   trust anchor in the chain is refused. Both the chain and anchor list contain
@@ -66,14 +72,14 @@ defmodule Attesto.X509 do
   Record.defrecordp(:certificate, :Certificate, @records[:Certificate])
   Record.defrecordp(:tbs_certificate, :TBSCertificate, @records[:TBSCertificate])
   Record.defrecordp(:extension, :Extension, @records[:Extension])
+  Record.defrecordp(:otp_certificate, :OTPCertificate, @records[:OTPCertificate])
+  Record.defrecordp(:otp_tbs_certificate, :OTPTBSCertificate, @records[:OTPTBSCertificate])
 
   Record.defrecordp(
     :subject_public_key_info,
     :SubjectPublicKeyInfo,
     @records[:SubjectPublicKeyInfo]
   )
-
-  Record.defrecordp(:algorithm_identifier, :AlgorithmIdentifier, @records[:AlgorithmIdentifier])
 
   Record.defrecordp(
     :authority_key_identifier,
@@ -94,12 +100,25 @@ defmodule Attesto.X509 do
   @certificate_policies_oid {2, 5, 29, 32}
   @rsa_pss_oid {1, 2, 840, 113_549, 1, 1, 10}
   @rsa_encryption_oid {1, 2, 840, 113_549, 1, 1, 1}
+  @ec_public_key_oid {1, 2, 840, 10_045, 2, 1}
+  @ec_curves [{1, 2, 840, 10_045, 3, 1, 7}, {1, 3, 132, 0, 34}, {1, 3, 132, 0, 35}]
+  @minimum_rsa_modulus Bitwise.bsl(1, 2047)
   @mgf1_oid {1, 2, 840, 113_549, 1, 1, 8}
   @sha256_oid {2, 16, 840, 1, 101, 3, 4, 2, 1}
   @sha384_oid {2, 16, 840, 1, 101, 3, 4, 2, 2}
   @sha512_oid {2, 16, 840, 1, 101, 3, 4, 2, 3}
   @ed25519_oid {1, 3, 101, 112}
   @ed448_oid {1, 3, 101, 113}
+  @signature_oids [
+    {1, 2, 840, 113_549, 1, 1, 11},
+    {1, 2, 840, 113_549, 1, 1, 12},
+    {1, 2, 840, 113_549, 1, 1, 13},
+    {1, 2, 840, 10_045, 4, 3, 2},
+    {1, 2, 840, 10_045, 4, 3, 3},
+    {1, 2, 840, 10_045, 4, 3, 4},
+    @ed25519_oid,
+    @ed448_oid
+  ]
   @mdoc_document_signer_oid {1, 0, 18_013, 5, 1, 2}
 
   @type verified :: %{public_key: map(), authority_key_identifiers: [String.t()], trust_anchor: binary()}
@@ -123,14 +142,14 @@ defmodule Attesto.X509 do
   def max_trust_anchors, do: @max_trust_anchors
 
   @doc """
-  Return `true` when `anchors` is a non-empty bounded list of valid DER certificate binaries.
+  Return `true` when `anchors` is a non-empty bounded list of DER certificates
+  and each meets the path's key, signature algorithm and extension uniqueness
+  requirements. Use `verify/2` to validate a path to an anchor.
   """
   @spec valid_trust_anchors?(term()) :: boolean()
-  def valid_trust_anchors?(anchors) when is_list(anchors) and length(anchors) in 1..@max_trust_anchors do
-    Enum.all?(anchors, &certificate_binary?/1)
+  def valid_trust_anchors?(anchors) do
+    bounded_anchors?(anchors) and Enum.all?(anchors, &certificate_policy_allowed?/1)
   end
-
-  def valid_trust_anchors?(_anchors), do: false
 
   @doc """
   Derive an OID4VP `x509_hash:<base64url-sha256>` client identifier from a leaf DER certificate.
@@ -156,7 +175,7 @@ defmodule Attesto.X509 do
   def verify(chain, opts) when is_list(chain) and is_list(opts) do
     with true <- valid_chain?(chain),
          anchors = Keyword.get(opts, :trusted_certificates),
-         true <- valid_trust_anchors?(anchors),
+         true <- bounded_anchors?(anchors),
          :ok <- profile_chain(chain, anchors, opts),
          anchor when is_binary(anchor) <- Enum.find(anchors, &valid_path?(&1, chain, opts)),
          {:ok, key} <- leaf_public_key(hd(chain)),
@@ -264,6 +283,12 @@ defmodule Attesto.X509 do
 
   defp certificate_binary?(der), do: is_binary(der) and byte_size(der) in 1..@max_cert_bytes
 
+  defp bounded_anchors?(anchors) when is_list(anchors) and length(anchors) in 1..@max_trust_anchors do
+    Enum.all?(anchors, &certificate_binary?/1)
+  end
+
+  defp bounded_anchors?(_anchors), do: false
+
   defp valid_chain?(chain), do: length(chain) in 1..@max_chain_length and Enum.all?(chain, &certificate_binary?/1)
 
   defp valid_path?(anchor, chain, opts) do
@@ -278,10 +303,7 @@ defmodule Attesto.X509 do
 
       certs_in_path = Enum.uniq([anchor | path_to_leaf])
 
-      Enum.all?(
-        certs_in_path,
-        &(certificate_key_algorithm_allowed?(&1) and certificate_signature_algorithm_allowed?(&1))
-      ) and
+      Enum.all?(certs_in_path, &certificate_policy_allowed?/1) and
         validate_anchored_path(anchor, path_to_leaf, purpose) and
         dns_constraints_hold_for_uri_sans?(anchor, path_to_leaf)
     else
@@ -313,14 +335,20 @@ defmodule Attesto.X509 do
     waive_anchor = if !:public_key.pkix_is_self_signed(anchor_otp), do: anchor
     pkix_opts = pkix_options(leaf, purpose, waive_anchor)
 
-    match?(
-      {:ok, _},
-      :public_key.pkix_path_validation(anchor, [anchor | issuer_path], pkix_opts)
-    )
+    not ca_leaf?(leaf) and
+      match?({:ok, _}, :public_key.pkix_path_validation(anchor, [anchor | issuer_path], pkix_opts))
+  end
+
+  defp ca_leaf?(der) do
+    der
+    |> :public_key.pkix_decode_cert(:otp)
+    |> otp_certificate(:tbsCertificate)
+    |> otp_extensions()
+    |> Enum.any?(&match?(extension(extnID: @basic_constraints_oid, extnValue: {:BasicConstraints, true, _}), &1))
   end
 
   defp valid_pinned_leaf_anchor?(anchor_otp, purpose) do
-    tbs = certificate(anchor_otp, :tbsCertificate)
+    tbs = otp_certificate(anchor_otp, :tbsCertificate)
     extensions = otp_extensions(tbs)
 
     valid_certificate_time?(tbs) and
@@ -370,7 +398,7 @@ defmodule Attesto.X509 do
     extensions =
       ca_der
       |> :public_key.pkix_decode_cert(:otp)
-      |> certificate(:tbsCertificate)
+      |> otp_certificate(:tbsCertificate)
       |> otp_extensions()
 
     case Enum.find(extensions, &(extension(&1, :extnID) == @name_constraints_oid)) do
@@ -427,7 +455,7 @@ defmodule Attesto.X509 do
   end
 
   defp valid_certificate_time?(tbs) do
-    {:Validity, not_before, not_after} = tbs_certificate(tbs, :validity)
+    {:Validity, not_before, not_after} = otp_tbs_certificate(tbs, :validity)
     now = System.system_time(:second)
 
     with {:ok, from_unix} <- asn1_time_to_unix(not_before),
@@ -480,24 +508,42 @@ defmodule Attesto.X509 do
   end
 
   defp otp_extensions(tbs) do
-    case tbs_certificate(tbs, :extensions) do
+    case otp_tbs_certificate(tbs, :extensions) do
       list when is_list(list) -> list
       :asn1_NOVALUE -> []
     end
   end
 
-  defp certificate_signature_algorithm_allowed?(der) do
-    otp = :public_key.pkix_decode_cert(der, :otp)
-    tbs = certificate(otp, :tbsCertificate)
-    outer_alg = certificate(otp, :signatureAlgorithm)
-    tbs_alg = tbs_certificate(tbs, :signature)
+  defp certificate_policy_allowed?(der) do
+    case der_value(der) do
+      {0x30, encoded_cert, ""} ->
+        cert = :public_key.pkix_decode_cert(der, :otp)
+        tbs = otp_certificate(cert, :tbsCertificate)
 
-    normalized_sig_alg(outer_alg) == normalized_sig_alg(tbs_alg) and
-      allowed_signature_algorithm?(outer_alg)
+        certificate_key_algorithm_allowed?(encoded_cert, otp_tbs_certificate(tbs, :subjectPublicKeyInfo)) and
+          certificate_signature_algorithm_allowed?(cert, tbs) and
+          unique_extension_oids?(tbs)
+
+      _ ->
+        false
+    end
   rescue
     _ -> false
   catch
     _, _ -> false
+  end
+
+  defp unique_extension_oids?(tbs) do
+    oids = Enum.map(otp_extensions(tbs), &extension(&1, :extnID))
+    length(oids) == MapSet.size(MapSet.new(oids))
+  end
+
+  defp certificate_signature_algorithm_allowed?(cert, tbs) do
+    outer_alg = otp_certificate(cert, :signatureAlgorithm)
+    tbs_alg = otp_tbs_certificate(tbs, :signature)
+
+    normalized_sig_alg(outer_alg) == normalized_sig_alg(tbs_alg) and
+      allowed_signature_algorithm?(outer_alg)
   end
 
   defp normalized_sig_alg({:SignatureAlgorithm, oid, :asn1_NOVALUE}), do: {:SignatureAlgorithm, oid, :NULL}
@@ -508,15 +554,7 @@ defmodule Attesto.X509 do
     allowed_pss_signature_params?(params)
   end
 
-  defp allowed_signature_algorithm?({:SignatureAlgorithm, oid, _params}) do
-    case :public_key.pkix_sign_types(oid) do
-      {hash, _alg} when hash in [:sha256, :sha384, :sha512] -> true
-      {:none, :eddsa} when oid in [@ed25519_oid, @ed448_oid] -> true
-      _other -> false
-    end
-  rescue
-    _ -> false
-  end
+  defp allowed_signature_algorithm?({:SignatureAlgorithm, oid, _params}), do: oid in @signature_oids
 
   defp allowed_signature_algorithm?(_alg), do: false
 
@@ -597,8 +635,7 @@ defmodule Attesto.X509 do
     tbs = certificate(cert, :tbsCertificate)
     spki = tbs_certificate(tbs, :subjectPublicKeyInfo)
 
-    with true <- signing_usage_allowed?(tbs),
-         true <- signing_key_algorithm_allowed?(spki) do
+    if signing_usage_allowed?(tbs) do
       der = :public_key.der_encode(:SubjectPublicKeyInfo, spki)
 
       key =
@@ -608,7 +645,7 @@ defmodule Attesto.X509 do
 
       {:ok, Attesto.Key.public_map(key)}
     else
-      false -> {:error, :unsupported_certificate_key}
+      {:error, :unsupported_certificate_key}
     end
   end
 
@@ -627,34 +664,30 @@ defmodule Attesto.X509 do
 
   defp signing_usage_extension?(_extension), do: true
 
-  defp certificate_key_algorithm_allowed?(der) do
+  defp certificate_key_algorithm_allowed?(
+         encoded_cert,
+         {:OTPSubjectPublicKeyInfo, {:PublicKeyAlgorithm, @rsa_encryption_oid, _}, {:RSAPublicKey, modulus, _}}
+       ) do
+    modulus >= @minimum_rsa_modulus and rsa_parameters_allowed?(encoded_cert)
+  end
+
+  defp certificate_key_algorithm_allowed?(
+         _encoded_cert,
+         {:OTPSubjectPublicKeyInfo, {:PublicKeyAlgorithm, @ec_public_key_oid, {:namedCurve, curve}}, _}
+       ), do: curve in @ec_curves
+
+  defp certificate_key_algorithm_allowed?(_encoded_cert, {:OTPSubjectPublicKeyInfo, {:PublicKeyAlgorithm, oid, _}, _}),
+    do: oid in [@ed25519_oid, @ed448_oid]
+
+  defp rsa_parameters_allowed?(encoded_cert) do
     # OTP normalizes some rsaEncryption parameter values to NULL on decode.
     # Inspect the original DER before that normalization loses information.
-    decoded_spki =
-      der
-      |> :public_key.pkix_decode_cert(:plain)
-      |> certificate(:tbsCertificate)
-      |> tbs_certificate(:subjectPublicKeyInfo)
-
-    decoded_algorithm =
-      decoded_spki |> subject_public_key_info(:algorithm) |> algorithm_identifier(:algorithm)
-
-    with {0x30, cert, ""} <- der_value(der),
-         {0x30, tbs, _signature} <- der_value(cert),
+    with {0x30, tbs, _signature} <- der_value(encoded_cert),
          {0x30, spki, _extensions} <-
            tbs |> without_version() |> skip_der_fields(5) |> der_value(),
          {0x30, algorithm, _key} <- der_value(spki),
          {0x06, oid, parameters} <- der_value(algorithm) do
-      case decoded_algorithm do
-        @rsa_pss_oid ->
-          false
-
-        @rsa_encryption_oid ->
-          oid == <<42, 134, 72, 134, 247, 13, 1, 1, 1>> and parameters in ["", <<5, 0>>]
-
-        _ ->
-          true
-      end
+      oid == <<42, 134, 72, 134, 247, 13, 1, 1, 1>> and parameters in ["", <<5, 0>>]
     else
       _ -> false
     end
@@ -686,23 +719,6 @@ defmodule Attesto.X509 do
     true = first != 0 and size >= 128
     <<value::binary-size(^size), tail::binary>> = rest
     {tag, value, tail}
-  end
-
-  # OTP may accept a v1.5 child under a PSS-only CA with absent parameters.
-  # Check the selected path ourselves before generic PKIX/JWK conversion.
-  defp signing_key_algorithm_allowed?(spki) do
-    algorithm = subject_public_key_info(spki, :algorithm)
-
-    case algorithm_identifier(algorithm, :algorithm) do
-      @rsa_pss_oid ->
-        false
-
-      @rsa_encryption_oid ->
-        algorithm_identifier(algorithm, :parameters) in [:NULL, <<5, 0>>, :asn1_NOVALUE]
-
-      _ ->
-        true
-    end
   end
 
   defp authority_key_identifiers(chain) do

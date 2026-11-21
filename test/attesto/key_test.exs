@@ -93,6 +93,55 @@ defmodule Attesto.KeyTest do
       assert {:error, :incompatible_key} = Key.verification_jwk(jwk_map, alg: "Ed448")
     end
 
+    test "accepts generated NIST curve verification keys" do
+      for {curve, alg} <- [{"P-256", "ES256"}, {"P-384", "ES384"}, {"P-521", "ES512"}] do
+        jwk_map = JOSE.JWK.generate_key({:ec, curve}) |> public_map()
+        assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(jwk_map, alg: alg)
+      end
+    end
+
+    test "requires an EC point on the curve with full-width field coordinates" do
+      {{:prime_field, prime_bytes}, {_, b, _}, _, _, _} = :crypto.ec_curve(:secp256r1)
+      prime = :binary.decode_unsigned(prime_bytes)
+      y = :crypto.mod_pow(b, div(prime + 1, 4), prime)
+      zero = Base.url_encode64(<<0::256>>, padding: false)
+
+      jwk_map = %{
+        "kty" => "EC",
+        "crv" => "P-256",
+        "x" => zero,
+        "y" => Base.url_encode64(y, padding: false)
+      }
+
+      assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(jwk_map, alg: "ES256")
+
+      for invalid <- [
+            Map.put(jwk_map, "y", zero),
+            Map.put(jwk_map, "x", Base.url_encode64(prime_bytes, padding: false)),
+            Map.put(jwk_map, "x", Base.url_encode64(<<0>>, padding: false))
+          ] do
+        assert {:error, :malformed_jwk} = Key.verification_jwk(invalid, alg: "ES256")
+      end
+    end
+
+    test "requires canonical Ed25519 and Ed448 verification keys" do
+      for {curve, size, prime} <- [
+            {:Ed25519, 256, Bitwise.bsl(1, 255) - 19},
+            {:Ed448, 456, Bitwise.bsl(1, 448) - Bitwise.bsl(1, 224) - 1}
+          ] do
+        alg = Atom.to_string(curve)
+        jwk_map = JOSE.JWK.generate_key({:okp, curve}) |> public_map()
+        assert {:ok, %JOSE.JWK{}} = Key.verification_jwk(jwk_map, alg: alg)
+
+        sign_bit = Bitwise.bsl(1, size - 1)
+
+        for value <- [prime, sign_bit + 1, sign_bit + prime - 1] do
+          encoded = Base.url_encode64(<<value::little-size(size)>>, padding: false)
+          assert {:error, :malformed_jwk} = Key.verification_jwk(Map.put(jwk_map, "x", encoded), alg: alg)
+        end
+      end
+    end
+
     test "accepts ES256K with a secp256k1 verification key" do
       jwk_map = JOSE.JWK.generate_key({:ec, "secp256k1"}) |> public_map()
 
@@ -104,6 +153,23 @@ defmodule Attesto.KeyTest do
       jwk_map = JOSE.JWK.generate_key({:ec, "P-256"}) |> public_map()
 
       assert {:error, :incompatible_key} = Key.verification_jwk(jwk_map, alg: "RS256")
+    end
+  end
+
+  describe "EC curve parameters" do
+    test "the curve-equation constants match OTP's curve data" do
+      for {crv, otp_curve} <- [
+            {"P-256", :secp256r1},
+            {"P-384", :secp384r1},
+            {"P-521", :secp521r1},
+            {"secp256k1", :secp256k1}
+          ] do
+        {{:prime_field, prime}, {a, b, _seed}, _generator, _order, _cofactor} = :crypto.ec_curve(otp_curve)
+
+        assert Map.fetch!(Key.verification_ec_curve_parameters(), crv) ==
+                 {byte_size(prime), :binary.decode_unsigned(prime), :binary.decode_unsigned(a),
+                  :binary.decode_unsigned(b)}
+      end
     end
   end
 end

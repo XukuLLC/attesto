@@ -110,7 +110,7 @@ defmodule Attesto.RequestObjectTest do
                RequestObject.verify(jwt, %{"keys" => [jwk]}, base_opts())
     end
 
-    test "the FAPI default rejects PS256 with an RSA modulus below 2048 bits" do
+    test "PS256 with an RSA modulus below 2048 bits is rejected with or without the FAPI policy" do
       key = JOSE.JWK.generate_key({:rsa, 1024})
       jwt = request_object(key, %{}, %{"alg" => "PS256"})
       trusted = public_jwk(key, %{"alg" => "PS256"})
@@ -125,7 +125,7 @@ defmodule Attesto.RequestObjectTest do
                  base_opts() ++ [accepted_algs: ["PS256"], enforce_fapi_alg_policy: true]
                )
 
-      assert {:ok, _params} =
+      assert {:error, :invalid_signature} =
                RequestObject.verify(
                  jwt,
                  %{"keys" => [trusted]},

@@ -73,8 +73,11 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
       assert {:error, _reason} = verify_for(api, weak, accepted_algs: accepted)
       assert {:ok, _verified} = verify_for(api, strong, accepted_algs: accepted)
 
-      assert {:ok, _verified} =
+      assert {:error, _reason} =
                verify_for(api, weak, accepted_algs: accepted, enforce_fapi_alg_policy: false)
+
+      assert {:ok, _verified} =
+               verify_for(api, strong, accepted_algs: accepted, enforce_fapi_alg_policy: false)
     end
   end
 
@@ -88,8 +91,11 @@ defmodule Attesto.AlgorithmPolicyBoundaryTest do
       assert {:error, _reason} = verify_for(api, weak, accepted_algs: accepted)
       assert {:ok, _verified} = verify_for(api, strong, accepted_algs: accepted)
 
-      assert {:ok, _verified} =
+      assert {:error, _reason} =
                verify_for(api, weak, accepted_algs: accepted, enforce_fapi_alg_policy: false)
+
+      assert {:ok, _verified} =
+               verify_for(api, strong, accepted_algs: accepted, enforce_fapi_alg_policy: false)
     end
   end
 
