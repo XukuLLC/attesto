@@ -273,16 +273,52 @@ defmodule Attesto.IdentityAssertionTest do
       end
     end
 
-    test "rejects authorization_details until the exchange can enforce them" do
-      key = rsa_key()
+    test "returns typed authorization details and optional identity claims" do
+      key = ec_key()
 
-      jwt =
-        assertion(key, "RS256", %{
-          "authorization_details" => [%{"type" => "example_authorization"}]
-        })
+      optional = %{
+        "tenant" => "issuer-tenant",
+        "aud_tenant" => "recipient-tenant",
+        "aud_sub" => "recipient-user",
+        "email" => "a@example.com",
+        "auth_time" => 1_728_000_000.5,
+        "amr" => ["pwd", "otp"],
+        "acr" => "mfa",
+        "sub_id" => %{"format" => "opaque", "id" => "user-123"},
+        "authorization_details" => [%{"type" => "example_authorization", "actions" => ["read"]}]
+      }
 
-      assert {:error, :invalid_claims} =
-               IdentityAssertion.verify(jwt, public_jwks(key, "RS256"), opts())
+      jwt = assertion(key, "ES256", optional)
+      assert {:ok, claims} = IdentityAssertion.verify(jwt, public_jwks(key, "ES256"), opts())
+      assert Map.take(claims, Map.keys(optional)) == optional
+
+      empty = assertion(key, "ES256", %{"authorization_details" => []})
+
+      assert {:ok, %{"authorization_details" => []}} =
+               IdentityAssertion.verify(empty, public_jwks(key, "ES256"), opts())
+    end
+
+    test "rejects optional claims with the wrong JSON type" do
+      key = ec_key()
+
+      for {claim, value} <- [
+            {"tenant", []},
+            {"aud_tenant", nil},
+            {"aud_sub", 10},
+            {"email", %{}},
+            {"auth_time", "1728000000"},
+            {"amr", ["pwd", 10]},
+            {"amr", "pwd"},
+            {"acr", true},
+            {"sub_id", []},
+            {"authorization_details", %{"type" => "example"}},
+            {"authorization_details", ["example"]},
+            {"authorization_details", [%{}]},
+            {"authorization_details", [%{"type" => 10}]}
+          ] do
+        jwt = assertion(key, "ES256", %{claim => value})
+        assert {:error, :invalid_claims} = IdentityAssertion.verify(jwt, public_jwks(key, "ES256"), opts())
+      end
     end
   end
 
@@ -406,6 +442,12 @@ defmodule Attesto.IdentityAssertionTest do
     test "returns :error for a malformed token" do
       assert :error = IdentityAssertion.peek_issuer("garbage")
     end
+  end
+
+  test "peek_claims returns unverified routing claims within the assertion size cap" do
+    jwt = assertion(ec_key(), "ES256", %{"aud_tenant" => "recipient"})
+    assert {:ok, %{"iss" => @iss, "aud_tenant" => "recipient"}} = IdentityAssertion.peek_claims(jwt)
+    assert {:error, :malformed} = IdentityAssertion.peek_claims(String.duplicate("x", 65_537))
   end
 
   describe "sign/3 - Domain A ID-JAG issuance" do

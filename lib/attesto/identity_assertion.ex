@@ -1,48 +1,25 @@
 defmodule Attesto.IdentityAssertion do
   @moduledoc """
-  Identity Assertion JWT Authorization Grant (ID-JAG) verification - the resource
-  Authorization Server's half of the Identity Assertion Authorization Grant
-  (`draft-ietf-oauth-identity-assertion-authz-grant-04`), the grant behind MCP
-  Enterprise-Managed Authorization (EMA).
+  Verify Identity Assertion JWT Authorization Grants (ID-JAGs) at the Resource
+  Authorization Server.
 
-  In EMA the client first performs an RFC 8693 token exchange *at the enterprise
-  IdP*, trading the user's ID token / SAML assertion for an **ID-JAG**: a
-  short-lived JWT, signed by the IdP, asserting one user for one resource
-  application. The client then presents that ID-JAG to *this* server's token
-  endpoint as an RFC 7523 §4 JWT-bearer authorization grant
-  (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`, the assertion in the
-  `assertion` parameter) and receives a normal access token. This module verifies
-  that assertion.
+  The client redeems the ID-JAG at the token endpoint with the RFC 7523 §4
+  JWT-bearer authorization grant. The verifier checks the signature against a
+  trusted JWKS supplied by the caller and returns the verified claims. The caller
+  selects the issuer, prevents replay, and applies authorization policy.
+  [ID-JAG draft -06, §§3.1 and 4.4.1](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-identity-assertion-authz-grant-06#section-4.4.1).
 
-  It is deliberately **conn-free and side-effect-free**: it verifies the
-  compact JWT's signature against a caller-supplied trusted JWKS and validates
-  the draft's claim rules, returning the claims or a typed error. The caller
-  (the `AttestoPhoenix` token layer) owns the stateful concerns: resolving which
-  trusted issuer's JWKS to use (and fetching/caching it), `jti` replay
-  protection, subject resolution, and mapping every error here to the RFC 6749
-  §5.2 `invalid_grant` the token endpoint must return.
+    * The JOSE `typ` is `oauth-id-jag+jwt`, compared case-insensitively
+      (RFC 7515 §4.1.9 and RFC 2045 §5.1).
+    * The trusted issuer matches `iss`. The expected audience is the sole
+      value in `aud`, which may be a string or a one-element array.
+    * The request client matches `client_id`.
+    * `iss`, `sub`, `aud`, `client_id`, `jti`, `exp`, and `iat` are required.
+    * The assertion must be unexpired. The verifier allows 60 seconds of skew
+      for `iat` and `nbf` and checks the configured lifetime bound.
+    * The verifier checks the types of optional claims and returns validated
+      `authorization_details` for the caller to process under RFC 9396.
 
-  This is NOT `private_key_jwt` client authentication (RFC 7523 §3, which asserts
-  the *client's* identity) nor the RFC 8693 token-exchange grant (which runs at
-  the IdP, not here). It shares JWT-validation shape with
-  `Attesto.RequestObject` but enforces ID-JAG's distinct claim rules - notably
-  `iss` is the IdP (NOT equal to `client_id`), `aud` is this server's issuer,
-  and the JOSE `typ` is pinned to `oauth-id-jag+jwt`.
-
-  ## Validated per the draft
-
-    * JOSE header `typ` MUST be `oauth-id-jag+jwt` (a media type, compared
-      case-insensitively per RFC 7515 §4.1.9 / RFC 2045 §5.1).
-    * signature verifies against the trusted issuer JWKS, selecting the key by
-      `kid` and the accepted algorithms.
-    * `iss` matches the caller-supplied trusted issuer.
-    * `aud` is exactly this server's issuer identifier - a single string, or an
-      array of exactly one element equal to it (draft §6.1).
-    * `client_id` matches the authenticated client making the token request.
-    * the REQUIRED claims `iss`, `sub`, `aud`, `client_id`, `jti`, `exp`, `iat`
-      are present and well-typed.
-    * `exp` is in the future; `iat`/`nbf` are not in the future (60s skew); the
-      lifetime `exp - iat` does not exceed `:max_lifetime_seconds` when set.
   """
 
   alias Attesto.{Claims, Config, JWS, ResourceIndicator, Scope, Secret, Thumbprint}
@@ -99,15 +76,27 @@ defmodule Attesto.IdentityAssertion do
   """
   @spec peek_issuer(String.t()) :: {:ok, String.t()} | :error
   def peek_issuer(jwt) when is_binary(jwt) do
-    with {:ok, claims} <- peek_json(jwt, :payload),
-         {:ok, iss} when is_binary(iss) and iss != "" <- Map.fetch(claims, "iss") do
-      {:ok, iss}
-    else
+    case peek_claims(jwt) do
+      {:ok, %{"iss" => iss}} when is_binary(iss) and iss != "" -> {:ok, iss}
       _ -> :error
     end
   end
 
   def peek_issuer(_jwt), do: :error
+
+  @doc """
+  Decode the unverified claims of a size-bounded ID-JAG for issuer selection.
+
+  Use `verify/3` with the selected trusted issuer before using any claim for
+  authorization.
+  """
+  @spec peek_claims(String.t()) :: {:ok, claims()} | {:error, :malformed}
+  def peek_claims(jwt) do
+    case JWS.peek_json(jwt, :payload, max_compact_bytes: @max_assertion_bytes) do
+      {:ok, claims} -> {:ok, claims}
+      {:error, _reason} -> {:error, :malformed}
+    end
+  end
 
   @doc """
   Verify an ID-JAG assertion against a trusted issuer JWKS and return its claims.
@@ -119,7 +108,7 @@ defmodule Attesto.IdentityAssertion do
     * `:audience` - this server's issuer identifier the assertion's `aud` must
       identify.
     * `:client_id` - the authenticated client; the `client_id` claim must equal
-      it (draft §6.1).
+      it (draft §3.1).
 
   Optional opts:
 
@@ -153,7 +142,8 @@ defmodule Attesto.IdentityAssertion do
          :ok <- check_optional_scope(claims),
          :ok <- check_optional_resource(claims),
          :ok <- check_optional_cnf(claims),
-         :ok <- reject_unsupported_authorization_details(claims),
+         :ok <- check_authorization_details(claims),
+         :ok <- check_optional_identity_claims(claims),
          :ok <- check_issuer(claims, Keyword.get(opts, :issuer)),
          :ok <- check_audience(claims, Keyword.get(opts, :audience)),
          :ok <- check_client(claims, Keyword.get(opts, :client_id)),
@@ -183,13 +173,6 @@ defmodule Attesto.IdentityAssertion do
 
   # ── Header checks ─────────────────────────────────────────────────────────
 
-  defp peek_json(jwt, segment) do
-    case JWS.peek_json(jwt, segment, max_compact_bytes: @max_assertion_bytes) do
-      {:ok, map} -> {:ok, map}
-      {:error, _reason} -> {:error, :malformed}
-    end
-  end
-
   defp check_supported_alg(%{"alg" => alg}, opts) when is_binary(alg) do
     accepted = Keyword.get(opts, :accepted_algs, SigningAlg.allowed())
 
@@ -203,7 +186,7 @@ defmodule Attesto.IdentityAssertion do
 
   defp check_supported_alg(_header, _opts), do: {:error, :unsupported_alg}
 
-  # draft §5: the JOSE header `typ` MUST be `oauth-id-jag+jwt`. `typ` is a media
+  # ID-JAG draft -06 §3.1: the JOSE header `typ` MUST be `oauth-id-jag+jwt`. `typ` is a media
   # type (RFC 7515 §4.1.9), and media types are case-insensitive (RFC 2045
   # §5.1), so compare case-insensitively.
   defp check_typ(%{"typ" => typ}) do
@@ -216,7 +199,7 @@ defmodule Attesto.IdentityAssertion do
 
   # ── Claim checks ──────────────────────────────────────────────────────────
 
-  # draft §6.1: iss, sub, aud, client_id, jti, exp, iat are all REQUIRED. String
+  # ID-JAG draft -06 §3.1: iss, sub, aud, client_id, jti, exp, iat are all REQUIRED. String
   # claims must be non-empty strings; exp/iat must be NumericDate integers; aud
   # must be a string or a list (its single-value rule is enforced separately).
   defp check_required_claims(claims) do
@@ -250,7 +233,7 @@ defmodule Attesto.IdentityAssertion do
   defp check_jti(%{"jti" => jti}) when is_binary(jti) and byte_size(jti) <= @max_jti_bytes, do: :ok
   defp check_jti(_claims), do: {:error, :invalid_claims}
 
-  # draft §6.1: optional claims are still type- and syntax-constrained when
+  # ID-JAG draft -06 §3.1: optional claims are still type- and syntax-constrained when
   # present. In particular, treating a malformed `scope` as absent would erase
   # the IdP's authorization ceiling.
   defp check_optional_scope(%{"scope" => scope}) when is_binary(scope) do
@@ -281,19 +264,38 @@ defmodule Attesto.IdentityAssertion do
   defp check_optional_cnf(%{"cnf" => _cnf}), do: {:error, :invalid_claims}
   defp check_optional_cnf(_claims), do: :ok
 
-  # The draft allows RFC 9396 authorization details, but this verifier has no
-  # policy engine for their typed constraints yet. Ignoring a signed constraint
-  # would turn it into broader scope-only authority, so fail closed until the
-  # integration can process it end to end.
-  defp reject_unsupported_authorization_details(%{"authorization_details" => _details}), do: {:error, :invalid_claims}
+  # Reject malformed `authorization_details` so an invalid signed constraint
+  # cannot be treated as absent. Require an array of objects with string
+  # `type` members (ID-JAG draft -06 §§3.1 and 4.4.1 and RFC 9396 §2). The
+  # caller applies policy to the authorization details in the verified claims.
+  defp check_authorization_details(%{"authorization_details" => details}) when is_list(details) do
+    if Enum.all?(details, &match?(%{"type" => type} when is_binary(type), &1)),
+      do: :ok,
+      else: {:error, :invalid_claims}
+  end
 
-  defp reject_unsupported_authorization_details(_claims), do: :ok
+  defp check_authorization_details(%{"authorization_details" => _details}), do: {:error, :invalid_claims}
+  defp check_authorization_details(_claims), do: :ok
+
+  defp check_optional_identity_claims(claims) do
+    identity_claims = Map.take(claims, ~w(tenant aud_tenant aud_sub email auth_time amr acr sub_id))
+
+    if Enum.all?(identity_claims, &valid_identity_claim?/1),
+      do: :ok,
+      else: {:error, :invalid_claims}
+  end
+
+  # RFC 7519 §2 permits fractional NumericDate values.
+  defp valid_identity_claim?({"auth_time", value}), do: is_number(value)
+  defp valid_identity_claim?({"amr", values}), do: is_list(values) and Enum.all?(values, &is_binary/1)
+  defp valid_identity_claim?({"sub_id", value}), do: is_map(value)
+  defp valid_identity_claim?({_claim, value}), do: is_binary(value)
 
   defp check_issuer(_claims, nil), do: {:error, :invalid_issuer}
   defp check_issuer(%{"iss" => iss}, iss) when is_binary(iss) and iss != "", do: :ok
   defp check_issuer(_claims, _issuer), do: {:error, :invalid_issuer}
 
-  # draft §6.1: aud "MUST contain the issuer identifier of the Resource
+  # ID-JAG draft -06 §4.4.1: aud "MUST contain the issuer identifier of the Resource
   # Authorization Server ... MAY be a string ... or an array containing a single
   # issuer identifier. If the aud claim is an array, it MUST contain exactly one
   # element, and that element MUST be the issuer identifier." Stricter than a
@@ -308,8 +310,10 @@ defmodule Attesto.IdentityAssertion do
 
   defp check_audience(_claims, _expected), do: {:error, :invalid_audience}
 
-  # draft §6.1: the client_id claim MUST identify the same client as the client
-  # authentication in the request.
+  # Match the assertion's `client_id` to the request client supplied by the
+  # caller. With client authentication it identifies the authenticated client.
+  # Without it the caller verifies proof of possession for a sender-constrained
+  # assertion (ID-JAG draft -06 §§4.4 and 4.4.1).
   defp check_client(_claims, nil), do: {:error, :client_mismatch}
   defp check_client(%{"client_id" => client_id}, client_id), do: :ok
   defp check_client(_claims, _client_id), do: {:error, :client_mismatch}
@@ -380,7 +384,7 @@ defmodule Attesto.IdentityAssertion do
   @doc """
   Sign an Identity Assertion JWT Authorization Grant as a trust domain A
   authorization server (`draft-ietf-oauth-identity-chaining-17` / RFC 10092;
-  `draft-ietf-oauth-identity-assertion-authz-grant-05`).
+  `draft-ietf-oauth-identity-assertion-authz-grant-06`).
 
   Options:
 

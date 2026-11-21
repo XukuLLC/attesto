@@ -6,6 +6,17 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.31.0] - 2026-11-20
+
+### Added
+
+- `Attesto.IdentityAssertion.verify/3` validates and returns optional `tenant`, `aud_tenant`, `aud_sub`, `email`, `auth_time`, `amr`, `acr`, and `sub_id` claims.
+- `Attesto.IdentityAssertion.peek_claims/1` decodes size-bounded, unverified claims for issuer selection.
+
+### Changed
+
+- `Attesto.IdentityAssertion.verify/3` accepts `authorization_details` as an array of objects with string `type` values and returns it for the caller to apply policy (ID-JAG draft -06 §4.4.1 and RFC 9396).
+
 ## [2.30.0] - 2026-11-20
 
 ### Security
