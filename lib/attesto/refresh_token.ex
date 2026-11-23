@@ -9,11 +9,13 @@ defmodule Attesto.RefreshToken do
   parent after a lost response and receive the same successor. The parent
   expiry remains authoritative: a cached successor is never returned after
   the consumed parent expires, even when the persisted retry deadline is
-  later. Outside the intersection of those two fixed deadlines, or when the
-  retry does not match the original client and binding or requests scope or
-  resource outside the grant, a rotated token is a captured-token signal and
-  the entire family is revoked so neither the attacker nor the victim can
-  continue, forcing a fresh authorization.
+  later. When the bound client presents a rotated token outside the
+  intersection of those two fixed deadlines, or with a DPoP or attestation
+  binding, scope or resource that does not match the original rotation, the
+  rotated token is a captured-token signal and the entire family is revoked so
+  neither the attacker nor the victim can continue, forcing a fresh
+  authorization. A rotated token presented by another client is refused
+  without revoking anything (see below).
 
   A refresh request may name a subset of the granted scope (RFC 6749 §6) and
   resource set (RFC 8707 §2.2). The subset applies to the access token minted
@@ -31,35 +33,35 @@ defmodule Attesto.RefreshToken do
   be protected as described by
   `c:Attesto.RefreshStore.rotate/4`.
 
-  ## A consumed token presented under another client
+  ## A token presented by another client
 
-  The client check has two outcomes, and which one applies depends on whether
-  the presented token has already been rotated.
+  The client binding is checked before expiry, the retry window and reuse
+  detection. A token bound to a client and presented without a `:client_id`
+  fails with `:client_required`; one presented with a different `:client_id`
+  fails with `:client_mismatch`. Either way the token and its family are left
+  untouched, whether or not the token has expired or been rotated, and the
+  presenter learns nothing about its state. Each refusal is reported as
+  `[:attesto, :refresh_token, :client_mismatch]` (see `Attesto.Telemetry`).
 
-  A token that has not been rotated and is presented with the wrong
-  `:client_id` fails with `:client_mismatch` and is left untouched. Nothing is
-  consumed and nothing is revoked, so a misrouted request costs the real
-  client nothing.
-
-  A token that has already been rotated is different. Presenting it again is
-  reuse, and reuse revokes the family (RFC 9700 §4.14.2) whichever client the
-  request names. The client is not consulted first, on purpose:
+  Reuse detection (RFC 9700 §4.14.2) applies to presentations that name the
+  bound client: a rotated token presented again outside the retry window, or
+  inside it with a DPoP or attestation proof, scope or resource that does not
+  match the original rotation, revokes the family.
 
     * For a public client there is no credential behind `client_id`. Whoever
-      holds a leaked consumed token can name the owning client as easily as
-      any other, so refusing a replay "from another client" would stop
-      nothing.
-    * For a confidential client, a consumed token arriving under a different
-      client is the signal reuse detection exists for: the token has left the
-      party it was issued to. Revoking the family is the intended response.
+      holds a leaked rotated token can name the owning client, and reuse
+      detection then revokes the family as before.
+    * For a confidential client, the token endpoint authenticates the client
+      before rotation, so another client presenting the owner's token cannot
+      use it. That presentation is not treated as reuse: the token reaching
+      another client means it leaked, and the host decides from the telemetry
+      event whether to revoke the family (`c:Attesto.RefreshStore.revoke_family/1`).
+      Revoking automatically would let any client holding another client's
+      old token end that client's authorization.
 
-  The consequence is that anyone who obtains a consumed refresh token can end
-  that family, and the legitimate client has to authorize again. That is the
-  cost RFC 9700 accepts for detecting theft. It is bounded to the one family,
-  and it needs a token that has leaked. An issuer mismatch is the one case
-  checked first: a consumed token sent to a different issuer of a
-  multi-issuer deployment fails with `:issuer_mismatch` and revokes nothing,
-  because that is routing, not a leak.
+  An issuer mismatch is checked before the client: a token sent to a different
+  issuer of a multi-issuer deployment fails with `:issuer_mismatch` and
+  revokes nothing, because that is routing, not a leak.
 
   `:ttl` bounds inactivity between refreshes. An optional `:family_ttl` on
   initial issuance also fixes an absolute family deadline, which every
@@ -230,11 +232,14 @@ defmodule Attesto.RefreshToken do
   from the `:scope` and `:resource` options below. The new refresh token
   itself keeps the presented token's full scope and resource set.
 
-  If the presented token was already rotated, an immediate retry by the same
-  client and binding returns the original successor within
-  `:rotation_grace_seconds`, with a `context` for the retry's own requested
-  scope and resource; otherwise the whole family is revoked and
-  `{:error, :reuse_detected}` is returned. Other failures include
+  If the presented token was already rotated and the request names the bound
+  client, an immediate retry with the same binding returns the original
+  successor within `:rotation_grace_seconds`, with a `context` for the retry's
+  own requested scope and resource; otherwise the whole family is revoked and
+  `{:error, :reuse_detected}` is returned. A request naming another client, or
+  no client for a client-bound token, gets `:client_mismatch` or
+  `:client_required` and changes nothing, whether the token is live, expired
+  or rotated. Other failures include
   `:invalid_grant` (unknown token), `:expired`, `:grant_revoked`,
   `:temporarily_unavailable`, `:client_mismatch`, `:issuer_mismatch`,
   `:invalid_scope`, `:invalid_target`, and the DPoP binding errors.
@@ -280,9 +285,13 @@ defmodule Attesto.RefreshToken do
   `:invalid_scope`, `:expired`, the DPoP binding errors) are checked on a
   non-consuming read *before* the token is claimed, so they do NOT burn the
   token: a client that, say, retries with a corrected DPoP proof succeeds
-  rather than tripping reuse detection. Issuer mismatch is also checked before
-  retry/reuse handling for an already-consumed token, so a request routed to a
-  different issuer cannot revoke the legitimate issuer's family. An
+  rather than tripping reuse detection. On an unconsumed token the presenter's
+  bindings (client, DPoP key, client instance key) are checked before expiry,
+  so a presenter that cannot prove them does not learn whether the token has
+  expired. Issuer and client mismatch are also checked before the family lock
+  and retry/reuse handling for an already-consumed token, so a request routed
+  to a different issuer, or presented by a different client, cannot revoke the
+  legitimate client's family. An
   already-consumed token is accepted only when its complete successor state
   proves it is the same request inside the fixed retry window.
 

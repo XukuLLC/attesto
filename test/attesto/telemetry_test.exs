@@ -38,6 +38,7 @@ defmodule Attesto.TelemetryTest do
       assert Telemetry.events() == [
                [:attesto, :http, :connect_attempt],
                [:attesto, :refresh_token, :reuse_detected],
+               [:attesto, :refresh_token, :client_mismatch],
                [:attesto, :refresh_token, :rotation_state_failed],
                [:attesto, :introspection, :refresh_store_failed],
                [:attesto, :dpop, :replay_detected],
@@ -881,6 +882,34 @@ defmodule Attesto.TelemetryTest do
       refute encoded =~ Attesto.Secret.hash(t0)
       refute encoded =~ successor
       refute encoded =~ Attesto.Secret.hash(successor)
+    end
+  end
+
+  describe "[:attesto, :refresh_token, :client_mismatch]" do
+    test "fires for an unconsumed and a consumed token presented by another client, revoking nothing" do
+      {:ok, %{token: t0}} =
+        RefreshToken.issue(RefreshStore.ETS, %{subject: "usr_78", client_id: "oc_client", scope: ["documents.read"]})
+
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "other_client")
+
+      assert_received {:telemetry, [:attesto, :refresh_token, :client_mismatch], measurements, metadata}
+      assert is_integer(measurements.system_time)
+      assert is_binary(metadata.family_id)
+      assert metadata.client_id == "oc_client"
+      assert metadata.presented_client_id == "other_client"
+      assert metadata.consumed == false
+      assert metadata.reason == :client_mismatch
+
+      {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "oc_client")
+
+      assert {:error, :client_required} = RefreshToken.rotate(RefreshStore.ETS, t0, now: future())
+      assert_received {:telemetry, [:attesto, :refresh_token, :client_mismatch], _measurements, consumed}
+      assert consumed.consumed == true
+      assert consumed.presented_client_id == nil
+      assert consumed.reason == :client_required
+      refute_received {:telemetry, [:attesto, :refresh_token, :reuse_detected], _, _}
+
+      assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "oc_client")
     end
   end
 

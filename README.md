@@ -562,7 +562,8 @@ or a SIEM without wrapping every call site:
 
 | Event | Fires when |
 |---|---|
-| `[:attesto, :refresh_token, :reuse_detected]` | a rotated refresh token is presented again outside its safe fixed-window retry conditions — family revocation is attempted first; inspect `metadata.revocation` to determine whether containment succeeded |
+| `[:attesto, :refresh_token, :reuse_detected]` | the bound client presents a rotated refresh token again outside its safe fixed-window retry conditions — family revocation is attempted first; inspect `metadata.revocation` to determine whether containment succeeded |
+| `[:attesto, :refresh_token, :client_mismatch]` | a refresh token is presented without its bound client or by another client — the rotation is refused before expiry, the family lock and reuse detection, and nothing is revoked; `metadata.consumed` says whether the token had already been rotated, which is the case a host may choose to treat as a leak |
 | `[:attesto, :refresh_token, :rotation_state_failed]` | refresh rotation could not commit, recover, or read trustworthy state — the rotation is denied; `metadata.revocation` says whether containment succeeded, failed, was already completed atomically, or was unnecessary because nothing changed. This is an operational fault, **not** an allegation of reuse |
 | `[:attesto, :introspection, :refresh_store_failed]` | refresh-token introspection cannot read its store reliably; the response stays indistinguishable from an inactive token while this operational signal is emitted |
 | `[:attesto, :dpop, :replay_detected]` | a DPoP proof carries a `jti` the replay store already recorded |
@@ -604,7 +605,7 @@ events as indicators to correlate rather than proof of theft;
 `Attesto.Telemetry` covers both. Event names and metadata keys are public
 API.
 
-**Never use `jti`, `client_id`, `subject`, or `family_id` as metric labels.**
+**Never use `jti`, `client_id`, `presented_client_id`, `subject`, or `family_id` as metric labels.**
 Their values are attacker controlled or have unbounded cardinality, so a
 remote party can create an unbounded number of time series and exhaust the
 metrics backend. Hashing or truncating a value does not bound its cardinality.

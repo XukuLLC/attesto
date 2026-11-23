@@ -29,6 +29,9 @@ defmodule Attesto.Telemetry do
       can ring `sender_constraint_mismatch` indefinitely.
     * A mid-rotation key or certificate rotation, or a client with a stale
       cached key, produces the same mismatch for entirely benign reasons.
+    * `refresh_token.client_mismatch` revokes nothing, so one token presented
+      by the wrong client can ring it repeatedly, and `:presented_client_id`
+      is whatever the request named.
 
   So treat them as inputs to a decision rather than the decision:
   rate-limit and deduplicate by `client_id` before alerting, correlate
@@ -53,9 +56,11 @@ defmodule Attesto.Telemetry do
 
   ### `[:attesto, :refresh_token, :reuse_detected]`
 
-  A refresh token was presented after it had already been rotated, outside
-  the idempotency window or without matching the original client, binding,
-  and scope (RFC 6749 §10.4, RFC 9700 §4.14). Family revocation is attempted
+  A refresh token was presented by the client it was issued to after it had
+  already been rotated, outside the idempotency window or without matching the
+  original DPoP or attestation binding, scope, and resource (RFC 6749 §10.4,
+  RFC 9700 §4.14). A rotated token presented by another client is reported as
+  `[:attesto, :refresh_token, :client_mismatch]` instead and revokes nothing. Family revocation is attempted
   before this fires. The event is emitted even when that cleanup fails, because
   losing the highest-value security signal along with the revocation would
   hide both the replay and its incomplete containment.
@@ -72,6 +77,22 @@ defmodule Attesto.Telemetry do
     * `:subject` - the resource owner whose session was revoked.
     * `:generation` - the generation of the presented token.
     * `:revocation` - `:succeeded` or `:failed` for the family cleanup attempt.
+
+  ### `[:attesto, :refresh_token, :client_mismatch]`
+
+  A refresh token bound to a client was presented without a client identifier
+  or by a different client (RFC 6749 §10.4). The rotation is refused with
+  `:client_required` or `:client_mismatch` before expiry, retry, or reuse is
+  evaluated, and neither the token nor its family changes. The token reaching
+  another client can mean it leaked; treat a stream of these as an alert.
+
+  Metadata:
+
+    * `:family_id` - the family of the presented token.
+    * `:client_id` - the client the token was issued to.
+    * `:presented_client_id` - the client named by the request, or `nil`.
+    * `:consumed` - `true` when the token had already been rotated.
+    * `:reason` - `:client_required` or `:client_mismatch`.
 
   ### `[:attesto, :refresh_token, :rotation_state_failed]`
 
@@ -180,7 +201,7 @@ defmodule Attesto.Telemetry do
   interpolate it into anything that parses. A client that puts its own live
   secret in `jti` will have that secret written wherever the handler writes.
 
-  **Never use `jti`, `client_id`, `subject`, or `family_id` as metric labels.**
+  **Never use `jti`, `client_id`, `presented_client_id`, `subject`, or `family_id` as metric labels.**
   Their values are attacker controlled or have unbounded cardinality, so a
   remote party can create an unbounded number of time series and exhaust the
   metrics backend. Hashing or truncating a value does not bound its cardinality.
@@ -201,6 +222,7 @@ defmodule Attesto.Telemetry do
         "attesto-security",
         [
           [:attesto, :refresh_token, :reuse_detected],
+          [:attesto, :refresh_token, :client_mismatch],
           [:attesto, :refresh_token, :rotation_state_failed],
           [:attesto, :introspection, :refresh_store_failed],
           [:attesto, :dpop, :replay_detected],
@@ -218,6 +240,7 @@ defmodule Attesto.Telemetry do
   """
 
   @refresh_token_reuse [:attesto, :refresh_token, :reuse_detected]
+  @refresh_token_client_mismatch [:attesto, :refresh_token, :client_mismatch]
   @refresh_token_rotation_state_failure [:attesto, :refresh_token, :rotation_state_failed]
   @introspection_refresh_store_failure [:attesto, :introspection, :refresh_store_failed]
   @dpop_replay [:attesto, :dpop, :replay_detected]
@@ -229,6 +252,7 @@ defmodule Attesto.Telemetry do
     do: [
       [:attesto, :http, :connect_attempt],
       @refresh_token_reuse,
+      @refresh_token_client_mismatch,
       @refresh_token_rotation_state_failure,
       @introspection_refresh_store_failure,
       @dpop_replay,
@@ -249,6 +273,12 @@ defmodule Attesto.Telemetry do
   @spec refresh_token_reuse_detected(map()) :: :ok
   def refresh_token_reuse_detected(metadata) when is_map(metadata) do
     emit(@refresh_token_reuse, metadata)
+  end
+
+  @doc false
+  @spec refresh_token_client_mismatch(map()) :: :ok
+  def refresh_token_client_mismatch(metadata) when is_map(metadata) do
+    emit(@refresh_token_client_mismatch, metadata)
   end
 
   @doc false

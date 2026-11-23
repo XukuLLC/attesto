@@ -28,6 +28,20 @@ defmodule Attesto.RefreshTokenTest do
     def revoke_family(family_id), do: ETS.revoke_family(family_id)
   end
 
+  defmodule LockRecordingStore do
+    @behaviour Attesto.RefreshStore
+
+    defdelegate insert(entry), to: ETS
+    defdelegate get(hash), to: ETS
+    defdelegate rotate(hash, child, successor, opts), to: ETS
+    defdelegate revoke_family(family_id), to: ETS
+
+    def with_family_lock(family_id, fun) do
+      send(self(), {:family_lock, family_id})
+      {:ok, fun.()}
+    end
+  end
+
   defmodule TokenConflictStore do
     @moduledoc false
     @behaviour Attesto.RefreshStore
@@ -695,7 +709,7 @@ defmodule Attesto.RefreshTokenTest do
       assert {:error, :expired} = RefreshToken.rotate(RefreshStore.ETS, t0, now: 5_000)
     end
 
-    test "expiry takes precedence over a presenting-client mismatch" do
+    test "the presenting-client check runs before expiry, so another client cannot learn a token expired" do
       {:ok, %{token: t0}} =
         RefreshToken.issue(
           RefreshStore.ETS,
@@ -704,11 +718,11 @@ defmodule Attesto.RefreshTokenTest do
           now: 1_000
         )
 
-      assert {:error, :expired} =
-               RefreshToken.rotate(RefreshStore.ETS, t0,
-                 client_id: "client-b",
-                 now: 5_000
-               )
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-b", now: 5_000)
+      assert {:error, :client_required} = RefreshToken.rotate(RefreshStore.ETS, t0, now: 5_000)
+
+      # The refusals left the record untouched; the bound client still sees the expiry.
+      assert {:error, :expired} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-a", now: 5_000)
     end
 
     test "a multi-generation chain rotates 1 -> 2 -> 3 in the same family" do
@@ -777,22 +791,23 @@ defmodule Attesto.RefreshTokenTest do
                RefreshToken.rotate(RefreshStore.ETS, t1, now: now)
     end
 
-    test "a consumed token replayed under another client revokes the family; an unconsumed one does not" do
+    test "another client presenting a consumed or unconsumed token is refused and revokes nothing" do
       owner = context(%{client_id: "client_a"})
 
-      {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, owner)
+      {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, owner, now: 1_000)
 
       # Not yet rotated: the wrong client is refused and nothing is touched.
-      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b")
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b", now: 1_000)
 
       {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_a", now: 1_000)
 
-      # Already rotated: the replay is reuse whichever client it names, inside
-      # the retry window or after it.
-      assert {:error, :reuse_detected} =
-               RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b", now: 1_001)
+      # Already rotated, inside the retry window and after it: the client check
+      # runs first, so the other client learns nothing and the family survives.
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b", now: 1_001)
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client_b", now: 9_000)
+      assert {:error, :client_required} = RefreshToken.rotate(RefreshStore.ETS, t0, now: 9_000)
 
-      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client_a", now: 1_002)
+      assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client_a", now: 1_002)
     end
 
     test "strict mode keeps immediate replay as reuse detection" do
@@ -841,14 +856,59 @@ defmodule Attesto.RefreshTokenTest do
       assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t2)
     end
 
-    test "a consumed-token retry with a different client revokes the family" do
+    test "a consumed-token retry with a different client is a client mismatch, not reuse" do
       {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, context(%{client_id: "client-a"}))
       {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-a")
 
-      assert {:error, :reuse_detected} =
-               RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-b")
+      assert {:error, :client_mismatch} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-b")
 
-      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client-a")
+      # The owner's retry and successor are unaffected.
+      assert {:ok, %{token: ^t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-a")
+      assert {:ok, _} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client-a")
+    end
+
+    test "another client presenting a rotated token does not take the owner's family lock" do
+      store = LockRecordingStore
+      {:ok, %{token: t0}} = RefreshToken.issue(store, context(%{client_id: "client-a"}), now: 1_000)
+      {:ok, %{token: t1}} = RefreshToken.rotate(store, t0, client_id: "client-a", now: 1_000)
+
+      assert {:error, :client_mismatch} = RefreshToken.rotate(store, t0, client_id: "client-b", now: 1_001)
+      assert {:error, :client_required} = RefreshToken.rotate(store, t0, now: 9_000)
+      refute_received {:family_lock, _}
+
+      assert {:ok, %{token: ^t1}} = RefreshToken.rotate(store, t0, client_id: "client-a", now: 1_001)
+      assert_received {:family_lock, _}
+    end
+
+    test "on an unconsumed token the DPoP and instance-key bindings are checked before expiry" do
+      dpop = jkt("dpop-key")
+      instance = jkt("instance-key")
+
+      {:ok, %{token: dpop_bound}} =
+        RefreshToken.issue(RefreshStore.ETS, context(%{dpop_jkt: dpop}), ttl: 1, now: 1_000)
+
+      assert {:error, :dpop_binding_mismatch} =
+               RefreshToken.rotate(RefreshStore.ETS, dpop_bound, dpop_jkt: jkt("other-key"), now: 5_000)
+
+      assert {:error, :dpop_proof_required} = RefreshToken.rotate(RefreshStore.ETS, dpop_bound, now: 5_000)
+      assert {:error, :expired} = RefreshToken.rotate(RefreshStore.ETS, dpop_bound, dpop_jkt: dpop, now: 5_000)
+
+      {:ok, %{token: attested}} =
+        RefreshToken.issue(RefreshStore.ETS, context(%{attestation_jkt: instance}), ttl: 1, now: 1_000)
+
+      assert {:error, :attestation_binding_mismatch} =
+               RefreshToken.rotate(RefreshStore.ETS, attested, attestation_jkt: jkt("other-instance"), now: 5_000)
+
+      assert {:error, :expired} =
+               RefreshToken.rotate(RefreshStore.ETS, attested, attestation_jkt: instance, now: 5_000)
+    end
+
+    test "the bound client replaying a rotated token outside the window is still reuse" do
+      {:ok, %{token: t0}} = RefreshToken.issue(RefreshStore.ETS, context(%{client_id: "client-a"}), now: 1_000)
+      {:ok, %{token: t1}} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-a", now: 1_000)
+
+      assert {:error, :reuse_detected} = RefreshToken.rotate(RefreshStore.ETS, t0, client_id: "client-a", now: 9_000)
+      assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, t1, client_id: "client-a", now: 9_001)
     end
 
     test "a consumed-token retry may request another granted scope subset for its access token" do

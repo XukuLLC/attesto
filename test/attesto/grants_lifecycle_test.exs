@@ -107,7 +107,9 @@ defmodule Attesto.GrantsLifecycleTest do
 
     # 7. An attacker replays an OLD refresh token (r0, long since rotated):
     #    reuse is detected and the whole family is revoked.
-    assert {:error, :reuse_detected} = RefreshToken.rotate(RefreshStore.ETS, r0)
+    #    The replay names the bound client: a different client presenting r0
+    #    would be refused as a client mismatch without touching the family.
+    assert {:error, :reuse_detected} = RefreshToken.rotate(RefreshStore.ETS, r0, client_id: "oc_app")
 
     # 8. The live token (r3) no longer rotates: the family is dead.
     assert {:error, :invalid_grant} = RefreshToken.rotate(RefreshStore.ETS, r3)

@@ -51,8 +51,17 @@ defmodule Attesto.RefreshToken.Rotation do
     fail_initial_lookup(store, invalid_return, token_hash)
   end
 
-  defp handle_valid_refresh_record(%{consumed: true} = record, store, _token_hash, opts),
-    do: maybe_idempotent_retry_or_reuse(store, record, opts)
+  # The client binding is checked before the family lock, the retry window and
+  # reuse detection. A client the token was not issued to gets
+  # `:client_required` or `:client_mismatch` without taking the owner's lock,
+  # learning that the token was rotated, or revoking the owner's family. The
+  # binding is immutable, so the record read here is the one to check. A
+  # presenter that names the bound client but fails a DPoP, attestation, scope
+  # or resource check on a consumed token is still treated as reuse.
+  defp handle_valid_refresh_record(%{consumed: true} = record, store, _token_hash, opts) do
+    with :ok <- check_presenting_client(record, opts),
+         do: maybe_idempotent_retry_or_reuse(store, record, opts)
+  end
 
   defp handle_valid_refresh_record(%{consumed: false} = record, store, token_hash, opts) do
     if TokenRecord.unconsumed?(record),
@@ -136,8 +145,7 @@ defmodule Attesto.RefreshToken.Rotation do
   end
 
   defp recover_successor_or_reuse(store, record, opts) do
-    with :ok <- check_client(record.data, opts),
-         :ok <- check_dpop(record.data, opts),
+    with :ok <- check_dpop(record.data, opts),
          :ok <- check_attestation(record.data, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
          {:ok, resource} <- resolve_resource(record.data, opts),
@@ -268,12 +276,14 @@ defmodule Attesto.RefreshToken.Rotation do
 
   # Validate on the read (no consumption), then atomically commit the parent,
   # child, and retry state. A recoverable validation failure leaves the parent
-  # intact for a corrected retry.
+  # intact for a corrected retry. The presenter's bindings (client, then DPoP
+  # key, then client instance key) are checked before expiry, so a presenter
+  # that cannot prove them does not learn whether the token has expired.
   defp rotate_unconsumed(store, record, opts) do
-    with :ok <- check_expiry(record, opts),
-         :ok <- check_client(record.data, opts),
+    with :ok <- check_presenting_client(record, opts),
          :ok <- check_dpop(record.data, opts),
          :ok <- check_attestation(record.data, opts),
+         :ok <- check_expiry(record, opts),
          {:ok, scope} <- resolve_scope(record.data, opts),
          {:ok, resource} <- resolve_resource(record.data, opts) do
       rotate_successor(store, record, scope, resource, opts)
@@ -539,6 +549,28 @@ defmodule Attesto.RefreshToken.Rotation do
   defp store_failure_reason(:error), do: :store_raised
   defp store_failure_reason(:throw), do: :store_threw
   defp store_failure_reason(:exit), do: :store_exited
+
+  # Runs `check_client/2` and reports a failure through
+  # `[:attesto, :refresh_token, :client_mismatch]`, so a token that reaches a
+  # client it was not issued to stays visible to the host even though the
+  # rotation changes nothing.
+  defp check_presenting_client(record, opts) do
+    case check_client(record.data, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Attesto.Telemetry.refresh_token_client_mismatch(%{
+          family_id: record.family_id,
+          client_id: record |> Map.get(:data, %{}) |> Map.get(:client_id),
+          presented_client_id: Keyword.get(opts, :client_id),
+          consumed: Map.get(record, :consumed) == true,
+          reason: reason
+        })
+
+        error
+    end
+  end
 
   # RFC 6749 §10.4: a refresh token must only be redeemed by the client it
   # was issued to. Fail closed by default - when the token carries a

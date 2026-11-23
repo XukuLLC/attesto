@@ -6,6 +6,20 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.31.1] - 2026-11-23
+
+### Security
+
+- `Attesto.RefreshToken.rotate/3` checks the client binding before expiry, the family lock, the retry window and reuse detection (RFC 6749 §10.4), and on an unconsumed token checks the DPoP and client-instance bindings before expiry. Before, a client presenting another client's expired token got `:expired`, and one presenting another client's rotated token got `:reuse_detected` and revoked the owner's family. Both told the presenter the token existed and was issued to someone else, which a caller mapping reasons to error descriptions exposes. Now both get `:client_mismatch` (or `:client_required` without a `:client_id`), and the token and its family are left untouched.
+
+### Changed
+
+- A rotated refresh token presented by a different client no longer revokes the family. Reuse detection (RFC 9700 §4.14.2) applies to presentations that name the bound client; for a public client, whose `client_id` is no credential, a leaked token presented under the owning client still revokes the family. A host that wants to revoke on a cross-client presentation of a rotated token can attach to the new event below, check `metadata.consumed == true`, and call `revoke_family/1` outside any transaction the request is running in.
+
+### Added
+
+- `[:attesto, :refresh_token, :client_mismatch]` telemetry event for a refresh token presented without its bound client or by another client, with `:family_id`, `:client_id`, `:presented_client_id`, `:consumed` and `:reason`.
+
 ## [2.31.0] - 2026-11-20
 
 ### Added
