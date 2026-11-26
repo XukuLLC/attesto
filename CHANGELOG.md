@@ -6,6 +6,17 @@ functions and behaviour contracts remain compatible within 2.x where security
 permits; security and correctness fixes may tighten validation or derived
 defaults in a minor release.
 
+## [2.32.0] - 2026-11-26
+
+### Added
+
+- `Attesto.Discovery.metadata_candidates/2` returns the RFC 8414 path-insertion,
+  OpenID Connect path-insertion, and OpenID Connect path-appending metadata URLs
+  for an issuer in interoperability order, de-duplicating the two equivalent
+  OpenID Connect URLs for a root issuer. It validates the issuer without
+  normalizing its identity and supports an explicit loopback-HTTP development
+  exception.
+
 ## [2.31.1] - 2026-11-23
 
 ### Security

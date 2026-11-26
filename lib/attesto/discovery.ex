@@ -33,6 +33,65 @@ defmodule Attesto.Discovery do
 
   @default_jwks_path "/.well-known/jwks.json"
   @default_grant_types ["client_credentials"]
+  @oauth_metadata_segment "/.well-known/oauth-authorization-server"
+  @oidc_metadata_segment "/.well-known/openid-configuration"
+
+  @typedoc "An authorization-server metadata protocol and its discovery URL."
+  @type metadata_candidate ::
+          {:oauth_authorization_server | :openid_configuration, String.t()}
+
+  @doc """
+  Return the authorization-server metadata URLs to try for `issuer`, in
+  interoperability order.
+
+  For an issuer with a path, the candidates are RFC 8414 path insertion,
+  OpenID Connect path insertion, then OpenID Connect path appending. For an
+  issuer without a path, the two OpenID Connect constructions are identical
+  and are returned once. This is the sequence MCP clients use, and is also
+  suitable for any OAuth client that supports both metadata formats.
+
+  The issuer must be an HTTPS issuer identifier: an absolute URL without a
+  query, fragment, or userinfo component. The issuer value itself is not
+  normalized; consumers must still compare a retrieved document's `issuer`
+  member to it by exact string comparison.
+
+  Options are passed to `Attesto.URI.issuer_identifier?/2`. In particular,
+  `allow_loopback_http: true` supports a local development issuer without
+  weakening the default HTTPS requirement.
+
+      iex> Attesto.Discovery.metadata_candidates("https://auth.example/tenant")
+      {:ok,
+       [
+         {:oauth_authorization_server,
+          "https://auth.example/.well-known/oauth-authorization-server/tenant"},
+         {:openid_configuration,
+          "https://auth.example/.well-known/openid-configuration/tenant"},
+         {:openid_configuration,
+          "https://auth.example/tenant/.well-known/openid-configuration"}
+       ]}
+  """
+  @spec metadata_candidates(term(), keyword()) ::
+          {:ok, [metadata_candidate()]} | {:error, :invalid_issuer}
+  def metadata_candidates(issuer, opts \\ [])
+
+  def metadata_candidates(issuer, opts) when is_binary(issuer) and is_list(opts) do
+    if Attesto.URI.issuer_identifier?(issuer, opts) do
+      uri = URI.parse(issuer)
+      path = issuer_path(uri.path)
+
+      candidates = [
+        {:oauth_authorization_server, URI.to_string(%{uri | path: @oauth_metadata_segment <> path})},
+        {:openid_configuration, URI.to_string(%{uri | path: @oidc_metadata_segment <> path})},
+        {:openid_configuration, URI.to_string(%{uri | path: path <> @oidc_metadata_segment})}
+      ]
+
+      {:ok, Enum.uniq(candidates)}
+    else
+      {:error, :invalid_issuer}
+    end
+  end
+
+  def metadata_candidates(_issuer, _opts), do: {:error, :invalid_issuer}
 
   @host_fields ~w(
     authorization_endpoint
@@ -130,4 +189,6 @@ defmodule Attesto.Discovery do
   defp default_jwks_uri(%Config{issuer: issuer}) do
     Config.append_endpoint_path(issuer, @default_jwks_path)
   end
+
+  defp issuer_path(path), do: String.trim_trailing(path || "", "/")
 end

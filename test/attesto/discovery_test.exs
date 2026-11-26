@@ -21,6 +21,53 @@ defmodule Attesto.DiscoveryTest do
     |> Config.new()
   end
 
+  describe "metadata_candidates/1" do
+    test "orders OAuth insertion before both OpenID Connect path variants" do
+      assert {:ok, candidates} =
+               Discovery.metadata_candidates("https://auth.example.com/tenant/")
+
+      assert candidates == [
+               {:oauth_authorization_server, "https://auth.example.com/.well-known/oauth-authorization-server/tenant"},
+               {:openid_configuration, "https://auth.example.com/.well-known/openid-configuration/tenant"},
+               {:openid_configuration, "https://auth.example.com/tenant/.well-known/openid-configuration"}
+             ]
+    end
+
+    test "returns each root candidate once" do
+      assert {:ok, candidates} = Discovery.metadata_candidates("https://auth.example.com/")
+
+      assert candidates == [
+               {:oauth_authorization_server, "https://auth.example.com/.well-known/oauth-authorization-server"},
+               {:openid_configuration, "https://auth.example.com/.well-known/openid-configuration"}
+             ]
+    end
+
+    test "refuses invalid issuer identifiers" do
+      for issuer <- [
+            "http://auth.example.com",
+            "https://auth.example.com?tenant=a",
+            "https://user@auth.example.com",
+            "not a url",
+            nil
+          ] do
+        assert {:error, :invalid_issuer} = Discovery.metadata_candidates(issuer)
+      end
+    end
+
+    test "permits a loopback HTTP issuer only when explicitly enabled" do
+      issuer = "http://127.0.0.1:4000/tenant"
+
+      assert {:error, :invalid_issuer} = Discovery.metadata_candidates(issuer)
+
+      assert {:ok,
+              [
+                {:oauth_authorization_server, "http://127.0.0.1:4000/.well-known/oauth-authorization-server/tenant"},
+                {:openid_configuration, "http://127.0.0.1:4000/.well-known/openid-configuration/tenant"},
+                {:openid_configuration, "http://127.0.0.1:4000/tenant/.well-known/openid-configuration"}
+              ]} = Discovery.metadata_candidates(issuer, allow_loopback_http: true)
+    end
+  end
+
   describe "metadata/2 protocol-fixed and derived fields" do
     test "derives issuer, token_endpoint, and jwks_uri" do
       meta = Discovery.metadata(config())
